@@ -1,4 +1,4 @@
-# Build Assistant
+# Urban AI Assistant
 
 AI assistant for planning, building regulations, and document-grounded compliance checks.
 
@@ -15,7 +15,7 @@ AI assistant for planning, building regulations, and document-grounded complianc
 
 ## What it does
 
-Build Assistant is a prototype application that answers planning and construction-related questions using indexed source documents, clause-level retrieval, and citation-backed responses.
+Urban AI Assistant is a prototype application that answers planning and construction-related questions using indexed source documents, clause-level retrieval, and citation-backed responses.
 
 ## Current capabilities
 
