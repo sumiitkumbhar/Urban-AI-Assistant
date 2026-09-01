@@ -1,6 +1,15 @@
 // lib/query-intent-detector.ts
 // Detects what the user is trying to accomplish
 
+export type QueryIntent =
+  | 'compliance_check'
+  | 'feasibility'
+  | 'cost_estimation'
+  | 'timeline'
+  | 'comparison'
+  | 'document_gen'
+  | 'standard_rag';
+
 export function detectQueryIntent(query: string): QueryIntent {
   const intents = {
     compliance_check: /\b(check|validate|compliant|meets?|requirements)\b/i,

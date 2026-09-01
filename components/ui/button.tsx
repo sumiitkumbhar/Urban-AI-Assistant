@@ -6,7 +6,8 @@ import { Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export interface ButtonProps
-  extends Omit<HTMLMotionProps<"button">, "ref"> {
+  extends Omit<HTMLMotionProps<"button">, "ref" | "children"> {
+  children?: React.ReactNode;
   variant?: "primary" | "secondary" | "ghost" | "danger" | "success";
   size?: "sm" | "md" | "lg";
   loading?: boolean;
@@ -75,17 +76,17 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
       >
         {loading && (
           <Loader2
-            className={cn("animate-spin", iconSizes[size], children && "mr-2")}
+            className={cn("animate-spin", iconSizes[size], Boolean(children) && "mr-2")}
           />
         )}
         {!loading && icon && iconPosition === "left" && (
-          <span className={cn(iconSizes[size], children && "mr-2")}>
+          <span className={cn(iconSizes[size], Boolean(children) && "mr-2")}>
             {icon}
           </span>
         )}
         {children}
         {!loading && icon && iconPosition === "right" && (
-          <span className={cn(iconSizes[size], children && "ml-2")}>
+          <span className={cn(iconSizes[size], Boolean(children) && "ml-2")}>
             {icon}
           </span>
         )}

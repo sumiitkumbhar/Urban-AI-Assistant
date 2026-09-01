@@ -20,28 +20,59 @@ export const runtime = "nodejs";
 // ENV & SETUP
 // =============================================================================
 
-const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY!;
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY!;
-const GROQ_API_KEY = process.env.GROQ_API_KEY!;
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY || "";
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-}
-
-if (!GOOGLE_API_KEY) {
-  throw new Error("Missing GOOGLE_API_KEY");
-}
-
-if (!GROQ_API_KEY) {
-  throw new Error("Missing GROQ_API_KEY");
-}
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-const ai = new GoogleGenAI({ apiKey: GOOGLE_API_KEY });
-const groq = new Groq({ apiKey: GROQ_API_KEY });
 const GROQ_CHAT_MODEL = "llama-3.3-70b-versatile";
+
+// Clients below are constructed lazily (on first use inside a request),
+// not at module load. Next.js's build step ("Collecting page data")
+// imports every API route module to statically analyze it, even when no
+// request is being made — so throwing/constructing clients at module
+// scope made `npm run build` require live Supabase/Google/Groq
+// credentials just to compile, in every environment, forever. Deferring
+// this to request time lets the app build without secrets and fail with
+// a clear error only if a request actually comes in unconfigured.
+
+// Typed as `any`: this matches how the original eager
+// `const supabase = createClient(...)` was consumed elsewhere in this file
+// (no Database generic was ever supplied). `ReturnType<typeof createClient>`
+// resolves the generic differently and made `.rpc()`'s argument type collapse
+// to `undefined`, so it is avoided here rather than fighting it.
+let _supabase: any = null;
+function getSupabase() {
+  if (!_supabase) {
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) {
+      throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+    }
+    _supabase = createClient(url, key);
+  }
+  return _supabase;
+}
+
+let _ai: GoogleGenAI | null = null;
+function getAI() {
+  if (!_ai) {
+    const key = process.env.GOOGLE_API_KEY;
+    if (!key) {
+      throw new Error("Missing GOOGLE_API_KEY");
+    }
+    _ai = new GoogleGenAI({ apiKey: key });
+  }
+  return _ai;
+}
+
+let _groq: Groq | null = null;
+function getGroq() {
+  if (!_groq) {
+    const key = process.env.GROQ_API_KEY;
+    if (!key) {
+      throw new Error("Missing GROQ_API_KEY");
+    }
+    _groq = new Groq({ apiKey: key });
+  }
+  return _groq;
+}
 
 // =============================================================================
 // SYSTEM PROMPT (Multi-country + diagram rules)
@@ -197,7 +228,7 @@ async function generateEmbedding(text: string): Promise<number[]> {
     throw new Error("Cannot generate embedding for empty text");
   }
 
-  const response = await ai.models.embedContent({
+  const response = await getAI().models.embedContent({
     model: GEMINI_EMBEDDING_MODEL,
     contents: cleanText,
   });
@@ -1878,7 +1909,7 @@ diagramType must be "annotated_object".`;
 
 Query: ${query}`;
 
-  const completion = await groq.chat.completions.create({
+  const completion = await getGroq().chat.completions.create({
     model: GROQ_CHAT_MODEL,
     messages: [
       { role: "system", content: system },
@@ -1915,7 +1946,7 @@ async function searchRAG(
   const optimizedQuery = optimizeQuery(query);
   const embedding = await generateEmbedding(optimizedQuery);
 
-  const { data, error } = await supabase.rpc("match_rag_chunks", {
+  const { data, error } = await getSupabase().rpc("match_rag_chunks", {
     query_embedding: embedding,
     match_threshold: 1 - threshold,
     match_count: topK,
@@ -2046,7 +2077,7 @@ Return JSON only in this exact shape:
 `.trim();
 
   try {
-    const completion = await groq.chat.completions.create({
+    const completion = await getGroq().chat.completions.create({
       model: GROQ_CHAT_MODEL,
       messages: [
         { role: "system", content: systemPrompt },
@@ -2104,7 +2135,7 @@ Return JSON only in this exact shape:
         strictDocumentContext
       );
 
-      const retryCompletion = await groq.chat.completions.create({
+      const retryCompletion = await getGroq().chat.completions.create({
         model: GROQ_CHAT_MODEL,
         messages: [
           {

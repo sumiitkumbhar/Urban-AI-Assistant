@@ -86,7 +86,6 @@ html, body {
 @tailwind utilities;
 
 @import url('https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css');
-@import 'mapbox-gl/dist/mapbox-gl.css';
 
 /* Global Variables */
 :root {

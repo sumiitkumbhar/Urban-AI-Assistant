@@ -444,7 +444,12 @@ export async function generateProfessionalReport(
   }
 
   const bytes = await pdf.save()
-  return new Blob([bytes], { type: 'application/pdf' })
+  // pdf-lib's save() returns a Uint8Array typed against ArrayBufferLike, which
+  // TS's DOM lib no longer accepts directly as a BlobPart (it wants a view
+  // backed specifically by ArrayBuffer, not SharedArrayBuffer). Copy into a
+  // fresh ArrayBuffer-backed view so this is a real fix, not a type cast.
+  const pdfBuffer = new Uint8Array(bytes)
+  return new Blob([pdfBuffer], { type: 'application/pdf' })
 }
 
 // Default export

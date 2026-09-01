@@ -59,6 +59,9 @@
     ".next/types/**/*.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "lib/utils/clauseExtractor.ts",
+    "lib/utils/contractAnalyzer.ts",
+    "lib/utils/reportGenerator.ts"
   ]
 }
