@@ -222,6 +222,13 @@ interface RagResponse {
 const GEMINI_EMBEDDING_MODEL =
   process.env.GEMINI_EMBEDDING_MODEL || "gemini-embedding-001";
 
+// The Supabase `chunks.embedding` column is vector(768) (chosen to keep
+// storage/compute cheap on the free tier), but gemini-embedding-001 defaults
+// to 3072 dimensions. Requesting outputDimensionality here truncates to match
+// the column - without it, every query vector would be 3072-dim and Postgres
+// would reject the RPC call outright with a dimension mismatch.
+const EMBEDDING_DIMENSIONS = 768;
+
 async function generateEmbedding(text: string): Promise<number[]> {
   const cleanText = text.trim();
   if (!cleanText) {
@@ -231,6 +238,7 @@ async function generateEmbedding(text: string): Promise<number[]> {
   const response = await getAI().models.embedContent({
     model: GEMINI_EMBEDDING_MODEL,
     contents: cleanText,
+    config: { outputDimensionality: EMBEDDING_DIMENSIONS },
   });
 
   const values = response.embeddings?.[0]?.values;
@@ -238,7 +246,13 @@ async function generateEmbedding(text: string): Promise<number[]> {
     throw new Error("Embedding API returned no values");
   }
 
-  return Array.from(values);
+  // Google's docs: gemini-embedding-001 does NOT auto-normalize truncated
+  // (non-3072-dim) output the way newer models do, so it must be normalized
+  // to unit length manually here to match how the ingestion pipeline must
+  // also normalize before storing (see lib/chromaIngest.ts).
+  const raw = Array.from(values);
+  const norm = Math.sqrt(raw.reduce((sum, v) => sum + v * v, 0));
+  return norm > 0 ? raw.map((v) => v / norm) : raw;
 }
 
 function escapeRegExp(s: string): string {
