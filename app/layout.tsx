@@ -1,5 +1,4 @@
 import React from 'react'
-import { ClerkProvider } from '@clerk/nextjs'
 import { Inter } from 'next/font/google'
 import './globals.css'
 
@@ -18,9 +17,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="ui-compact">
       <body className={`${inter.className} antialiased`}>
-        <ClerkProvider>
-          {children}
-        </ClerkProvider>
+        {children}
       </body>
     </html>
   )

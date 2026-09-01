@@ -1,6 +1,6 @@
 // lib/question-patterns-store.ts
 
-import type { QuestionAnalysis } from '@/scripts/analyze-questions';
+import type { QuestionAnalysis } from '@/lib/types/questionAnalysis';
 import { readFile } from 'fs/promises';
 import path from 'path';
 

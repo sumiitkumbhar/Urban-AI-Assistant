@@ -1,7 +1,7 @@
 // app/api/rag/ingest/route.ts
 import { NextRequest, NextResponse } from 'next/server'
 import { ingestMultiplePdfs } from '@/lib/chromaIngest'
-import type { Region } from '@/lib/corpus'
+import type { Region } from '@/app/api/rag/corpus'
 
 export const runtime = 'nodejs'
 
