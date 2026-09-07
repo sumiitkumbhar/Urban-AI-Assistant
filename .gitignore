@@ -19,6 +19,10 @@ tsconfig.tsbuildinfo
 
 # Python (voice-agent mirrors voice-service above)
 voice-agent/venv/
+
+# Cloned CosyVoice dependency (git clone --recursive, ~88MB incl. the
+# Matcha-TTS submodule) - fetched fresh per README, not project source.
+voice-service/CosyVoice/
 __pycache__/
 *.pyc
 
