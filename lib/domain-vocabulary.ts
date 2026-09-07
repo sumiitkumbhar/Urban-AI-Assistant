@@ -639,7 +639,12 @@ export function toLpaSlug(name: string): string {
     .replace(/^(london|royal) borough of\s+/i, "")
     .replace(/^city of\s+/i, "")
     .replace(/\b(county|borough|district|metropolitan|unitary|city)?\s*council\b/gi, "")
-    .replace(/\b(district|borough)\b/gi, "")
+    // Trailing only. A global strip mangles names where the word is part of
+    // the place rather than an administrative suffix: "Lake District National
+    // Park Authority" became "lake-national-park-authority", a slug no
+    // question could ever resolve to, so its documents would have been
+    // ingested permanently unreachable.
+    .replace(/\s+(district|borough)\s*$/i, "")
     .replace(/&/g, "and")
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
@@ -736,7 +741,16 @@ function hasCouncilSignal(rawQuery: string, word: string): boolean {
 }
 
 export function resolveCouncils(query: string): CouncilResolution {
-  const text = ` ${(query || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim()} `;
+  // "&" becomes "and" here because toLpaSlug does the same, and the two must
+  // agree. Stripping it to a space instead made "Telford & Wrekin Council"
+  // normalise to "telford wrekin" while its index entry read "telford and
+  // wrekin" - so the council was simply never found.
+  const text = ` ${(query || "")
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()} `;
   if (text.trim().length < 3) return { matches: [], ambiguous: [] };
 
   const index = getLpaIndex();

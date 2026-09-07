@@ -40,6 +40,25 @@ export interface IngestFile {
   jurisdictionKey?: string;
   docType?: string;
   sourceUrl?: string;
+
+  // ---- council-aware fields (sql/2026-09-07-council-aware-retrieval.sql) ----
+  // All optional. Omit them all and this behaves exactly as it did before the
+  // fields existed, so the NPPF and any ad-hoc upload keep working unchanged.
+  /** 'national' for policy that applies everywhere (the NPPF), else 'local'. */
+  scope?: "national" | "local";
+  /** Canonical LPA slugs this document is authoritative for, e.g. ['reading']. */
+  lpaSlugs?: string[];
+  /** Human-readable authority names, parallel to lpaSlugs. */
+  lpaNames?: string[];
+  /**
+   * Adoption status. Only ever set this from a source that actually states it.
+   * 'unknown' is a first-class value and is the correct answer when the
+   * tracker does not say - a fabricated 'adopted' is worse than no value,
+   * because an emerging policy presented as adopted is legally wrong.
+   */
+  planStatus?: "adopted" | "emerging" | "superseded" | "unknown";
+  /** SHA-256 of the source bytes. Enables skip-if-already-ingested. */
+  contentSha256?: string;
 }
 
 export interface IngestOptions {
@@ -166,19 +185,53 @@ async function ingestOnePdf(
 
   const supabase = getSupabase();
 
+  // Idempotency: same bytes => same hash => already ingested. Re-running a
+  // batch after a mid-run crash must not append a second full set of chunks
+  // for the councils that already succeeded - duplicated chunks do not just
+  // waste storage, they let one document win several slots in the top-K and
+  // crowd out every other source.
+  if (file.contentSha256) {
+    const { data: existing } = await supabase
+      .from("documents")
+      .select("id")
+      .eq("content_sha256", file.contentSha256)
+      .maybeSingle();
+
+    if (existing?.id) {
+      const { count } = await supabase
+        .from("chunks")
+        .select("id", { count: "exact", head: true })
+        .eq("document_id", existing.id);
+      console.log(
+        `  skip (already ingested): ${title} -> document_id=${existing.id}, ${count ?? 0} chunks`
+      );
+      return { file: file.name, document_id: existing.id as number, chunks: count ?? 0 };
+    }
+  }
+
+  const documentRow: Record<string, unknown> = {
+    title,
+    region,
+    jurisdiction_level: jurisdictionKey || null,
+    doc_type: docType,
+    source_path: file.name,
+    source_url: file.sourceUrl || null,
+    year: null,
+    citation_ref: title,
+    updated_at: new Date().toISOString().slice(0, 10),
+  };
+
+  // Only send council columns when the caller supplied them, so this same
+  // function still works against a database where the migration has not run.
+  if (file.scope) documentRow.scope = file.scope;
+  if (file.lpaSlugs?.length) documentRow.lpa_slugs = file.lpaSlugs;
+  if (file.lpaNames?.length) documentRow.lpa_names = file.lpaNames;
+  if (file.planStatus) documentRow.plan_status = file.planStatus;
+  if (file.contentSha256) documentRow.content_sha256 = file.contentSha256;
+
   const { data: docRow, error: docError } = await supabase
     .from("documents")
-    .insert({
-      title,
-      region,
-      jurisdiction_level: jurisdictionKey || null,
-      doc_type: docType,
-      source_path: file.name,
-      source_url: file.sourceUrl || null,
-      year: null,
-      citation_ref: title,
-      updated_at: new Date().toISOString().slice(0, 10),
-    })
+    .insert(documentRow)
     .select("id")
     .single();
 

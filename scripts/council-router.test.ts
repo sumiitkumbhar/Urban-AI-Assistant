@@ -60,6 +60,20 @@ const CASES: Case[] = [
   { query: "How does Reading compare with Wokingham on affordable housing?", kind: "COMPARISON", slugs: ["reading", "wokingham"] },
   { query: "Compare Manchester and Leeds on tall buildings policy", kind: "COMPARISON", slugs: ["manchester", "leeds"] },
 
+  // --- Regressions found by scripts/lpa-slug-roundtrip.test.ts -------------
+  {
+    query: "Telford & Wrekin Council employment land policy",
+    kind: "COUNCIL_SPECIFIC",
+    slugs: ["telford-and-wrekin"],
+    why: 'both sides must normalise "&" to "and", or the council is unfindable',
+  },
+  {
+    query: "Lake District National Park Authority housing policy",
+    kind: "COUNCIL_SPECIFIC",
+    slugs: ["lake-district-national-park-authority"],
+    why: '"District" is part of this place name, not an administrative suffix',
+  },
+
   // --- Case D: locality-dependent, no authority given -> ask ----------------
   { query: "What is the affordable housing threshold for my site?", kind: "COUNCIL_AMBIGUOUS" },
 

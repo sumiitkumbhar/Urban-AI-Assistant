@@ -53,7 +53,18 @@ import dotenv from "dotenv";
 // lazily-initialized clients read them.
 dotenv.config({ path: path.join(process.cwd(), ".env.local") });
 
+import crypto from "crypto";
+import { createClient } from "@supabase/supabase-js";
+
 import { ingestMultiplePdfs } from "../lib/chromaIngest";
+import { toLpaSlug } from "../lib/domain-vocabulary";
+
+// A Policies Map is a cartographic PDF: site allocations drawn on a base map,
+// with almost no extractable prose. Ingesting one produces a few dozen chunks
+// of legend fragments and street names that match everything weakly and answer
+// nothing - actively harmful to retrieval quality. Excluded by design; see
+// PROJECT_STATE.md section 11c.
+const EXCLUDED_DOC_TYPES = new Set(["local_plan_policies_map"]);
 
 // The tracker carries ~70 distinct doc_type values (local_plan,
 // local_plan_core_strategy, local_plan_policies_map, local_plan_part2, ...).
@@ -265,8 +276,27 @@ async function main() {
     return;
   }
 
-  const batch = pending.slice(0, limit);
-  console.log(`Processing ${batch.length} of ${pending.length} pending council(s)...`);
+  await assertMigrationApplied();
+
+  const skipped = pending.filter((r) => EXCLUDED_DOC_TYPES.has(r.doc_type));
+  const ingestable = pending.filter((r) => !EXCLUDED_DOC_TYPES.has(r.doc_type));
+  if (skipped.length) {
+    console.log(
+      `Skipping ${skipped.length} Policies Map row(s) - cartographic PDFs with ` +
+        `no useful prose (see EXCLUDED_DOC_TYPES).`
+    );
+    for (const row of skipped) {
+      row.status = "skipped_excluded";
+      row.notes = "doc_type excluded from ingestion (policies map)";
+    }
+    saveTracker(trackerPath, rows);
+  }
+
+  const batch = ingestable.slice(0, limit);
+  console.log(`Processing ${batch.length} of ${ingestable.length} pending council(s)...`);
+
+  let totalBytes = 0;
+  let totalChunks = 0;
 
   for (const row of batch) {
     console.log(`\n=== ${row.organisation_name} (${row.jurisdiction_key}) ===`);
@@ -274,7 +304,25 @@ async function main() {
 
     try {
       const buffer = await downloadPdf(row.source_url);
-      console.log(`Downloaded ${(buffer.length / 1024 / 1024).toFixed(1)} MB, ingesting...`);
+      const sha256 = crypto.createHash("sha256").update(buffer).digest("hex");
+      console.log(
+        `Downloaded ${(buffer.length / 1024 / 1024).toFixed(1)} MB ` +
+          `(sha256 ${sha256.slice(0, 12)}...), ingesting...`
+      );
+
+      // The canonical slug comes from lpa_name via the SAME toLpaSlug() the
+      // query-side router uses. One function, so a document is filed under
+      // exactly the string a question will later be resolved to - deriving
+      // them separately is how "reading" and "reading-borough" end up in the
+      // same database and nothing matches.
+      const lpaName = (row.lpa_name || row.organisation_name).trim();
+      const lpaSlug = toLpaSlug(lpaName);
+      if (!lpaSlug || lpaSlug.length < 3) {
+        throw new Error(
+          `Could not derive an LPA slug from "${lpaName}". Fix lpa_name in the ` +
+            `tracker rather than ingesting a document no council filter can reach.`
+        );
+      }
 
       const [result] = await ingestMultiplePdfs(
         [
@@ -285,14 +333,28 @@ async function main() {
             jurisdictionKey: row.jurisdiction_key,
             docType: row.doc_type,
             sourceUrl: row.source_url,
+            scope: "local",
+            lpaSlugs: [lpaSlug],
+            lpaNames: [lpaName],
+            // The tracker records INGEST status, not adoption status. It has no
+            // column that says whether a plan is adopted, emerging or
+            // superseded, so the only honest value is 'unknown'. Do not infer
+            // one from the filename or the year.
+            planStatus: "unknown",
+            contentSha256: sha256,
           },
         ],
         { region: "uk" as any }
       );
 
+      totalBytes += buffer.length;
+      totalChunks += result.chunks;
+
       row.status = "ingested";
-      row.notes = `${result.chunks} chunks, document_id=${result.document_id}`;
-      console.log(`OK: ${result.chunks} chunks ingested (document_id=${result.document_id})`);
+      row.notes = `${result.chunks} chunks, document_id=${result.document_id}, lpa=${lpaSlug}`;
+      console.log(
+        `OK: ${result.chunks} chunks ingested (document_id=${result.document_id}, lpa_slug=${lpaSlug})`
+      );
     } catch (err: any) {
       row.status = "error";
       row.notes = String(err?.message || err).slice(0, 500);
@@ -310,6 +372,92 @@ async function main() {
   }, {});
   console.log("\n=== Tracker status summary ===");
   console.log(summary);
+
+  await reportCapacity(totalBytes, totalChunks, batch.length);
+}
+
+/**
+ * Refuses to run against an un-migrated database.
+ *
+ * Without the council columns every document would be ingested with no
+ * lpa_slugs, which is not a partial success - it is a corpus that looks
+ * populated while being invisible to every council-filtered query, and the
+ * only way to tell is to re-ingest everything. Cheaper to stop here.
+ */
+async function assertMigrationApplied() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) {
+    console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY in .env.local");
+    process.exit(1);
+  }
+  const supabase = createClient(url, key);
+  const { error } = await supabase
+    .from("documents")
+    .select("scope, lpa_slugs, plan_status, content_sha256")
+    .limit(1);
+
+  if (error) {
+    console.error(
+      "\nThe council-aware migration has not been applied to this database.\n" +
+        `  ${error.message}\n\n` +
+        "Run sql/2026-09-07-council-aware-retrieval.sql in the Supabase SQL\n" +
+        "Editor first, then re-run this script. Nothing has been ingested.\n"
+    );
+    process.exit(1);
+  }
+  console.log("Preflight OK: council columns present.");
+}
+
+/**
+ * Real measured numbers from this run, projected to the full tracker.
+ *
+ * The projection before any ingestion put the full corpus at 0.85-3.9 GB
+ * against a 500 MB free tier - a range wide enough that the decision to bulk
+ * ingest cannot responsibly be made on it. This replaces the estimate with
+ * measurement, which is the entire purpose of running a 5-council pilot.
+ */
+async function reportCapacity(
+  totalBytes: number,
+  totalChunks: number,
+  councilCount: number
+) {
+  if (!councilCount || !totalChunks) return;
+
+  const url = process.env.SUPABASE_URL!;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+  const supabase = createClient(url, key);
+
+  const { count: docCount } = await supabase
+    .from("documents")
+    .select("id", { count: "exact", head: true });
+  const { count: chunkCount } = await supabase
+    .from("chunks")
+    .select("id", { count: "exact", head: true });
+
+  const mb = (n: number) => (n / 1024 / 1024).toFixed(1);
+
+  // 768-dim float4 embedding = 3072 bytes, plus the chunk text itself, plus
+  // the tsvector and index overhead. The 2.2x multiplier is a rule of thumb,
+  // NOT a measurement - the authoritative number is the database size shown
+  // in the Supabase dashboard after this run. Compare the two.
+  const embeddingBytes = totalChunks * 768 * 4;
+  const estimatedDbBytes = (embeddingBytes + totalBytes * 0.35) * 2.2;
+
+  console.log("\n=== Capacity (measured, this run) ===");
+  console.log(`  councils ingested:     ${councilCount}`);
+  console.log(`  PDFs downloaded:       ${mb(totalBytes)} MB`);
+  console.log(`  chunks created:        ${totalChunks}`);
+  console.log(`  chunks per council:    ${Math.round(totalChunks / councilCount)}`);
+  console.log(`  est. database growth:  ~${mb(estimatedDbBytes)} MB`);
+  console.log(`  => per council:        ~${mb(estimatedDbBytes / councilCount)} MB`);
+  console.log(`\n  Projected for 335 councils: ~${(estimatedDbBytes / councilCount * 335 / 1024 / 1024 / 1024).toFixed(2)} GB`);
+  console.log(`  Supabase free tier:         0.50 GB`);
+  console.log(`\n  Database now holds ${docCount ?? "?"} documents / ${chunkCount ?? "?"} chunks.`);
+  console.log(
+    "  CHECK THE ACTUAL SIZE in the Supabase dashboard before ingesting more -\n" +
+      "  the estimate above is arithmetic, the dashboard is the truth."
+  );
 }
 
 main().catch((err) => {
