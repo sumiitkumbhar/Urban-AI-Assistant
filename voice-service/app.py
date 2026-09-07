@@ -80,7 +80,6 @@ def get_model():
     if _model is None and _model_load_error is None:
         try:
             from cosyvoice.cli.cosyvoice import CosyVoice2
-            from cosyvoice.utils.file_utils import load_wav
 
             logger.info("Loading CosyVoice2 from %s ...", MODEL_DIR)
             _model = CosyVoice2(MODEL_DIR)
@@ -89,23 +88,36 @@ def get_model():
                 _model.sample_rate,
                 torch.cuda.is_available(),
             )
+        except Exception as exc:  # noqa: BLE001 - surface it, don't crash the process
+            _model_load_error = str(exc)
+            logger.exception("Failed to load CosyVoice2 model")
 
-            if REFERENCE_VOICE_PATH and REFERENCE_PROMPT_TEXT:
+        # Voice-clone registration is optional and separate from model
+        # loading on purpose: a bad/missing reference clip should mean
+        # "no cloned voice available" (falls back to inference_sft /
+        # a clear error at /speak time), not "the whole service is down".
+        if _model is not None and REFERENCE_VOICE_PATH and REFERENCE_PROMPT_TEXT:
+            try:
+                from cosyvoice.utils.file_utils import load_wav
+
                 logger.info("Registering cloned voice from %s ...", REFERENCE_VOICE_PATH)
                 prompt_wav = load_wav(REFERENCE_VOICE_PATH, 16000)
                 _model.add_zero_shot_spk(REFERENCE_PROMPT_TEXT, prompt_wav, _SPK_ID)
                 _spk_registered = True
                 logger.info("Cloned voice registered as %r.", _SPK_ID)
-            elif REFERENCE_VOICE_PATH or REFERENCE_PROMPT_TEXT:
-                logger.warning(
-                    "Only one of COSYVOICE_REFERENCE_VOICE / "
-                    "COSYVOICE_REFERENCE_PROMPT_TEXT is set - both are "
-                    "required for voice cloning. Falling back to whatever "
-                    "speakers (if any) ship with the model."
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Could not register cloned voice from %s - continuing "
+                    "without it (check the path and that it's a valid WAV).",
+                    REFERENCE_VOICE_PATH,
                 )
-        except Exception as exc:  # noqa: BLE001 - surface it, don't crash the process
-            _model_load_error = str(exc)
-            logger.exception("Failed to load CosyVoice2 model")
+        elif _model is not None and (REFERENCE_VOICE_PATH or REFERENCE_PROMPT_TEXT):
+            logger.warning(
+                "Only one of COSYVOICE_REFERENCE_VOICE / "
+                "COSYVOICE_REFERENCE_PROMPT_TEXT is set - both are "
+                "required for voice cloning. Falling back to whatever "
+                "speakers (if any) ship with the model."
+            )
     if _model_load_error is not None:
         raise RuntimeError(_model_load_error)
     return _model
