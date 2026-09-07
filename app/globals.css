@@ -8457,3 +8457,40 @@ p {
   .rise { animation: none; opacity: 1; transform: none; }
   .press:active { transform: none; }
 }
+
+/* ===========================================================================
+   TOKEN CORRECTION  (2026-09-07)
+   ---------------------------------------------------------------------------
+   A stray :root block near line 7843 redefines --glass as rgba(10,10,11,0.95)
+   and --text as #ffffff - a dark-theme token set that leaked into a light-only
+   app. Because the rule at ~line 2533 applies those tokens to every text input
+   with `!important`, every input in the product rendered as a near-black pill
+   with white text, overriding any Tailwind class on it. That is what made the
+   composer look like a black bar dropped onto warm paper.
+
+   Fixing the tokens rather than fighting the !important: this block is last in
+   the cascade, so these values win, and every input in the app inherits the
+   correction at once instead of needing per-component overrides.
+   ======================================================================== */
+
+:root {
+  --glass: #fbf9f5;                    /* was rgba(10,10,11,0.95) */
+  --border: rgb(61 52 38 / 0.14);      /* was rgba(255,255,255,0.1) */
+  --text: #1c1a16;                     /* was #ffffff */
+  --text-muted: #7a7367;               /* was #999999 */
+  --bg: #f7f4ee;
+}
+
+/* The composer specifically: a pill, not the 0.5rem radius the global input
+   rule forces on everything. Matches the shape system in DESIGN.md. */
+input[type="text"].uaa-composer {
+  background: var(--paper-raised) !important;
+  color: var(--ink) !important;
+  border: 1px solid var(--rule) !important;
+  border-radius: var(--r-pill) !important;
+}
+input[type="text"].uaa-composer::placeholder { color: var(--ink-faint); }
+input[type="text"].uaa-composer:focus {
+  background: #ffffff !important;
+  border-color: var(--rule-strong) !important;
+}

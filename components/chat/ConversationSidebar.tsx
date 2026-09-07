@@ -4,6 +4,10 @@ import React, { useEffect, useState, useCallback } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { formatDistanceToNowStrict } from "date-fns";
 
+// How many conversation marks the collapsed rail shows before it stops.
+// Past this the rail is a scrollbar pretending to be navigation.
+const RAIL_VISIBLE = 14;
+
 export interface ConversationSummary {
   id: string;
   title: string;
@@ -246,7 +250,7 @@ export default function ConversationSidebar({
                 "linear-gradient(to bottom, black calc(100% - 2rem), transparent 100%)",
             }}
           >
-            {conversations.map((c) => {
+            {conversations.slice(0, RAIL_VISIBLE).map((c) => {
               const isActive = c.id === activeConversationId;
               const isOpening = loadingConversationId === c.id;
               return (
@@ -256,27 +260,40 @@ export default function ConversationSidebar({
                   onClick={() => onSelectConversation(c.id)}
                   title={c.title}
                   aria-label={c.title}
-                  className={`press relative flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[11px] font-semibold transition-colors ${
-                    isActive
-                      ? "bg-neutral-950 text-[#f7f4ee]"
-                      : "text-neutral-500 hover:bg-neutral-950/[0.07] hover:text-neutral-900"
-                  }`}
+                  className="press group relative flex h-7 w-9 shrink-0 items-center justify-center"
                 >
                   {isOpening ? (
-                    <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />
+                    <SpinnerIcon className="h-3.5 w-3.5 animate-spin text-neutral-500" />
                   ) : (
-                    // An initial derived from the conversation title, not a
-                    // repeated speech-bubble glyph. Thirty identical icons
-                    // stacked in a rail carry no information and read as a
-                    // rendering fault; initials make the rail scannable and
-                    // give the active item something to actually highlight.
-                    <span aria-hidden="true">
-                      {(c.title || "?").trim().charAt(0).toUpperCase()}
-                    </span>
+                    // Almost every title begins "What" or "How", so an initial
+                    // is noise dressed as information. A position mark shows
+                    // the only thing a 64px rail can honestly show: where you
+                    // are in the list. Titles stay available on hover.
+                    <span
+                      aria-hidden="true"
+                      className={`block rounded-full transition-all duration-200 ${
+                        isActive
+                          ? "h-[3px] w-5 bg-neutral-950"
+                          : "h-[3px] w-2.5 bg-neutral-950/20 group-hover:w-5 group-hover:bg-neutral-950/45"
+                      }`}
+                    />
                   )}
                 </button>
               );
             })}
+            {conversations.length > RAIL_VISIBLE && (
+              <button
+                type="button"
+                onClick={onToggleCollapse}
+                title={`${conversations.length - RAIL_VISIBLE} more conversations`}
+                aria-label={`Show ${
+                  conversations.length - RAIL_VISIBLE
+                } more conversations`}
+                className="press mt-1 flex h-7 shrink-0 items-center justify-center px-1 text-[10px] font-medium tabular-nums text-neutral-400 transition-colors hover:text-neutral-800"
+              >
+                +{conversations.length - RAIL_VISIBLE}
+              </button>
+            )}
           </div>
         </div>
 

@@ -1281,7 +1281,11 @@ export default function ChatInterface() {
         </span>
       </div>
       <div className="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
-      <div className="mx-auto w-full max-w-3xl space-y-6 px-2 sm:px-4">
+      {/* Same min-height whether the welcome screen or a conversation is
+          showing, so the scroll container does not resize under the user
+          the instant they send - which is what made the thinking
+          indicator appear to snap to the top of an empty page. */}
+      <div className="mx-auto flex min-h-[calc(100vh-16rem)] w-full max-w-3xl flex-col space-y-6 px-2 sm:px-4">
           {messages.length === 0 ? (
             <WelcomeScreen onSuggestionClick={(s) => handleSend(s)} />
           ) : (
@@ -1350,7 +1354,7 @@ export default function ChatInterface() {
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={onKeyDown}
               placeholder="Ask anything"
-              className="w-full rounded-full border border-neutral-950/10 bg-[#fbf9f5] py-3.5 pl-11 pr-32 text-sm placeholder:text-neutral-500 shadow-paper-sm transition-[box-shadow,border-color,background-color] duration-200 ease-settle focus:outline-none focus:border-neutral-950/25 focus:bg-white focus:shadow-paper-md"
+              className="uaa-composer w-full rounded-full border border-neutral-950/10 bg-[#fbf9f5] py-3.5 pl-11 pr-32 text-sm shadow-paper-sm transition-[box-shadow,border-color,background-color] duration-200 ease-settle focus:outline-none focus:border-neutral-950/25 focus:bg-white focus:shadow-paper-md"
               disabled={isLoading}
             />
 
