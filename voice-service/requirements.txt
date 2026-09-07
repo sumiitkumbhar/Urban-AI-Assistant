@@ -4,6 +4,7 @@
 # The sys_platform markers below are copied as-is from upstream and
 # already do the right thing on a Mac (skip the Linux/CUDA-only wheels).
 conformer==0.3.2
+diffusers==0.29.0
 fastapi==0.115.6
 HyperPyYAML==1.2.3
 inflect==7.3.1
