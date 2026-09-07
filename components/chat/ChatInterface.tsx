@@ -1660,7 +1660,7 @@ function WelcomeScreen({
     // min-h fills the space the composer leaves, so the block sits optically
     // centred instead of stranded at the top above 600px of nothing.
     <div className="flex min-h-[calc(100vh-16rem)] flex-col items-center justify-center py-10">
-      <div className="w-full max-w-3xl">
+      <div className="w-full max-w-4xl">
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/logo.png"
@@ -1671,12 +1671,20 @@ function WelcomeScreen({
 
         {/* Solid ink, not gradient-clipped text. tracking-tight because
             Manrope at display size opens up more than Inter did. */}
-        <h1 className="rise mb-3 text-center text-[2.15rem] font-semibold leading-[1.1] tracking-tight text-neutral-950 sm:text-[2.6rem]"
-            style={{ ["--i" as any]: 1 }}>
-          Urban AI Assistant
+        {/* Two lines, the second dropped to muted ink. In the dark draft this
+            was a blue-to-pink gradient; on this ground the accent IS ink
+            (DESIGN.md), so the second clause steps back in weight instead of
+            changing hue. The product name lives in the sidebar and the tab
+            title - repeating it here as the headline spent the largest type
+            on the page saying nothing. */}
+        <h1 className="rise mb-4 text-center text-[2.15rem] font-semibold leading-[1.08] tracking-tight text-neutral-950 sm:text-[2.9rem]"
+            style={{ ["--i" as any]: 1, textWrap: "balance" as any }}>
+          A clearer view.
+          <br />
+          <span className="text-neutral-500">A better decision.</span>
         </h1>
 
-        <p className="rise mx-auto mb-11 max-w-[46ch] text-center text-[0.95rem] leading-relaxed text-neutral-600"
+        <p className="rise mx-auto mb-10 max-w-[46ch] text-center text-[0.95rem] leading-relaxed text-neutral-600"
            style={{ ["--i" as any]: 2 }}>
           Grounded regulatory answers with citations, page references and
           clause-level support.
@@ -1684,7 +1692,8 @@ function WelcomeScreen({
 
         {/* Hairline label rather than a floating "Try asking:" line - the rule
             does the separating, the words just name the group. */}
-        <div className="rise mb-4 flex items-center gap-3" style={{ ["--i" as any]: 3 }}>
+        <div className="rise mb-4 flex items-center gap-4" style={{ ["--i" as any]: 3 }}>
+          <span className="h-px flex-1 bg-neutral-950/10" />
           <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-neutral-500">
             Start with
           </span>
@@ -1693,26 +1702,29 @@ function WelcomeScreen({
 
         {/* Exactly as many cells as there are suggestions. Entrance is CSS, so
             the cards are visible even if JS animation never runs. */}
-        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {suggestions.map(({ policy, topic, question }, i) => (
             <button
               key={question}
               type="button"
               onClick={() => onSuggestionClick(question)}
               style={{ ["--i" as any]: 4 + i }}
-              className="rise press group flex min-h-[5.75rem] w-full flex-col justify-start rounded-2xl border border-neutral-950/[0.08] bg-[#fbf9f5] p-4 text-left shadow-paper-xs transition-[background-color,border-color,box-shadow] duration-200 ease-settle hover:border-neutral-950/20 hover:bg-white hover:shadow-paper-md"
+              className="rise press group relative flex min-h-[6.5rem] w-full flex-col justify-start rounded-2xl border border-neutral-950/[0.08] bg-[#fbf9f5] p-5 pr-11 text-left shadow-paper-xs transition-[background-color,border-color,box-shadow] duration-200 ease-settle hover:border-neutral-950/20 hover:bg-white hover:shadow-paper-md"
             >
-              <span className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-neutral-400">
+              {/* Arrow parked top-right rather than on a row of its own at the
+                  bottom. On the draft that row added ~50px of empty height to
+                  every card and pushed the set below the fold. */}
+              <ArrowUpRightIcon
+                aria-hidden="true"
+                className="absolute right-4 top-4 h-3.5 w-3.5 text-neutral-300 transition-[transform,color] duration-200 ease-settle group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-neutral-700"
+              />
+              <span className="mb-2.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-neutral-400">
                 <span className="tabular-nums text-neutral-500">{policy}</span>
                 <span aria-hidden="true">·</span>
                 <span>{topic}</span>
               </span>
-              <span className="text-[0.875rem] leading-snug text-neutral-800">
+              <span className="text-[0.9rem] leading-snug text-neutral-800">
                 {question}
-              </span>
-              <span className="mt-auto flex items-center gap-1.5 pt-3 text-[11px] font-medium text-neutral-400 transition-colors group-hover:text-neutral-700">
-                Ask this
-                <ArrowUpRightIcon className="h-3 w-3 transition-transform duration-200 ease-settle group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
               </span>
             </button>
           ))}
