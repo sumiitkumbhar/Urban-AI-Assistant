@@ -1270,6 +1270,13 @@ export default function ChatInterface() {
           ) : (
             <AnimatePresence>
               {messages.map((message, index) => (
+                <div
+                  key={message.id}
+                  className="rise"
+                  // Cap the stagger: on a restored 40-message conversation an
+                  // uncapped cascade would take two seconds to finish drawing.
+                  style={{ ["--i" as any]: Math.min(index, 6) }}
+                >
                 <MessageBubble
                   key={message.id}
                   message={message}
@@ -1300,6 +1307,7 @@ export default function ChatInterface() {
                       : undefined
                   }
                 />
+                </div>
               ))}
             </AnimatePresence>
           )}
@@ -1325,13 +1333,13 @@ export default function ChatInterface() {
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={onKeyDown}
               placeholder="Ask anything"
-              className="w-full rounded-full border border-neutral-950/10 bg-white py-3.5 pl-11 pr-32 text-sm transition-all placeholder:text-neutral-500 shadow-[0_2px_10px_rgba(0,0,0,0.06),0_1px_2px_rgba(0,0,0,0.04)] focus:outline-none focus:ring-2 focus:ring-neutral-950/20 focus:shadow-[0_4px_16px_rgba(0,0,0,0.08)]"
+              className="w-full rounded-full border border-neutral-950/10 bg-[#fbf9f5] py-3.5 pl-11 pr-32 text-sm placeholder:text-neutral-500 shadow-paper-sm transition-[box-shadow,border-color,background-color] duration-200 ease-settle focus:outline-none focus:border-neutral-950/25 focus:bg-white focus:shadow-paper-md"
               disabled={isLoading}
             />
 
             <div className="absolute left-2 top-1/2 -translate-y-1/2">
               <label
-                className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border border-neutral-950/10 bg-neutral-100/80 text-neutral-800 hover:bg-neutral-200"
+                className="press flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border border-neutral-950/10 bg-neutral-100/80 text-neutral-800 hover:bg-neutral-200/90 hover:border-neutral-950/20"
                 title="Upload document"
                 aria-label="Upload document"
               >
@@ -1388,7 +1396,7 @@ export default function ChatInterface() {
                   isLoading ||
                   isUploadingDoc
                 }
-                className="flex h-8 w-8 items-center justify-center rounded-full bg-neutral-950 transition-all hover:bg-neutral-800 hover:scale-105 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:scale-100"
+                className="press flex h-8 w-8 items-center justify-center rounded-full bg-neutral-950 shadow-paper-sm hover:bg-neutral-800 hover:shadow-paper-md disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
                 aria-label="Send"
               >
                 <PaperAirplaneIcon className="h-4 w-4 text-white" />
@@ -1528,7 +1536,7 @@ export default function ChatInterface() {
               <button
                 type="button"
                 onClick={handleStartVoiceConversation}
-                className="inline-flex items-center gap-1.5 rounded-full border border-neutral-950/10 bg-neutral-100/80 px-3 py-1.5 text-[11px] text-neutral-700 transition hover:bg-neutral-200/90"
+                className="press inline-flex items-center gap-1.5 rounded-full border border-neutral-950/10 bg-neutral-100/80 px-3 py-1.5 text-[11px] text-neutral-700 hover:bg-neutral-200/90 hover:border-neutral-950/20"
               >
                 <MicIcon className="h-3.5 w-3.5" />
                 Start voice conversation
@@ -1538,7 +1546,7 @@ export default function ChatInterface() {
                   type="button"
                   onClick={() => setIsVoiceAgentOverlayOpen(true)}
                   title="Full-duplex voice - real barge-in, requires voice-agent/ running (see its README)"
-                  className="inline-flex items-center gap-1.5 rounded-full border border-neutral-950/10 bg-neutral-100/80 px-3 py-1.5 text-[11px] text-neutral-700 transition hover:bg-neutral-200/90"
+                  className="press inline-flex items-center gap-1.5 rounded-full border border-neutral-950/10 bg-neutral-100/80 px-3 py-1.5 text-[11px] text-neutral-700 hover:bg-neutral-200/90 hover:border-neutral-950/20"
                 >
                   <MicIcon className="h-3.5 w-3.5" />
                   Full-duplex voice (beta)

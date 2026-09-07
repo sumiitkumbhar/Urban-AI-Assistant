@@ -12,7 +12,7 @@ const ChatInterface = dynamic(() => import("@/components/chat/ChatInterface"), {
 // reference device. Every color cue in this app still lives in content
 // (confidence shading, source cards), never in the chrome itself.
 const RuledPaper = () => (
-  <div className="absolute inset-0 -z-10 h-full w-full bg-[#f7f4ee] bg-[linear-gradient(to_bottom,#00000030_1px,transparent_1px)] bg-[size:100%_30px] pointer-events-none" />
+  <div className="fixed inset-0 -z-10 h-full w-full bg-[#f7f4ee] bg-[linear-gradient(to_bottom,rgb(61_52_38_/_0.055)_1px,transparent_1px)] bg-[size:100%_32px] pointer-events-none" />
 );
 
 // A very soft vignette - paper photographed under uneven light rather than

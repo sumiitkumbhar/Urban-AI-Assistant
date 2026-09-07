@@ -8312,3 +8312,148 @@ html { font-size: 14px; }              /* global scale */
   0%, 100% { opacity: 0.5; transform: translate(-50%, -50%) scale(1); }
   50% { opacity: 1; transform: translate(-50%, -50%) scale(1.5); }
 }
+
+/* ===========================================================================
+   PREMIUM DESIGN LAYER  (appended 2026-09-07)
+   ---------------------------------------------------------------------------
+   Everything above this line is legacy. This block is the design system:
+   tokens, focus treatment, motion discipline. Scoped and additive so nothing
+   above changes behaviour.
+
+   The palette is deliberately unchanged - #f7f4ee stays. What changes is the
+   execution around it: tinted shadows instead of grey-black, one radius
+   system, real focus states, typographic detail, and motion that settles.
+   See DESIGN.md for the full language.
+   ======================================================================== */
+
+:root {
+  /* Ground and surfaces - the locked warm-paper palette */
+  --paper:          #f7f4ee;
+  --paper-raised:   #fbf9f5;   /* cards / composer, lifted off the ground */
+  --paper-sunken:   #f2efe7;   /* wells, code blocks, inset areas */
+
+  /* Ink - warm-tinted neutrals, never pure black on warm paper */
+  --ink:            #1c1a16;
+  --ink-secondary:  #4a453c;
+  --ink-muted:      #7a7367;
+  --ink-faint:      #a39b8d;
+
+  /* Hairlines carry most of the structure in a low-elevation design */
+  --rule:           rgb(61 52 38 / 0.10);
+  --rule-strong:    rgb(61 52 38 / 0.18);
+
+  /* One accent, locked. Ink-forward rather than a coloured brand button:
+     the content carries the colour (confidence, sources), the chrome does not. */
+  --accent:         #1c1a16;
+  --accent-contrast:#f7f4ee;
+
+  /* Radius system - documented rule, applied everywhere:
+     interactive pills = full | containers = 16px | inputs & chips = 12px */
+  --r-pill: 9999px;
+  --r-container: 1rem;
+  --r-control: 0.75rem;
+
+  /* Motion. One duration scale, one easing. */
+  --ease-settle: cubic-bezier(0.16, 1, 0.3, 1);
+  --t-fast: 140ms;
+  --t-base: 220ms;
+  --t-slow: 420ms;
+}
+
+/* Numerals in metrics, timings and confidence scores must not shift width as
+   they update - otherwise the footer visibly twitches on every answer. */
+.tabular,
+[data-metric],
+time {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Headline balance: prevents a single trailing word on its own line. */
+h1, h2, h3 {
+  text-wrap: balance;
+}
+p {
+  text-wrap: pretty;
+}
+
+/* One visible focus treatment for the whole app. Keyboard users get a clear
+   ring; mouse users never see it. Replaces any outline that was removed. */
+:where(a, button, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+  border-radius: var(--r-control);
+}
+
+/* Tactile press. A control that does not move on :active feels like an image
+   of a button rather than a button. */
+.press {
+  transition: transform var(--t-fast) var(--ease-settle),
+              background-color var(--t-fast) var(--ease-settle),
+              box-shadow var(--t-fast) var(--ease-settle);
+}
+.press:active {
+  transform: translateY(0.5px) scale(0.985);
+}
+
+/* Message entrance. Staggered via --i set per item, so the cascade comes from
+   CSS rather than a rAF loop or scroll listener. */
+.rise {
+  animation: riseIn 520ms var(--ease-settle) both;
+  animation-delay: calc(var(--i, 0) * 45ms);
+}
+@keyframes riseIn {
+  from { opacity: 0; transform: translate3d(0, 10px, 0) scale(0.995); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+/* Skeleton that matches the shape of the text it replaces, rather than a
+   generic spinner sitting in dead space. */
+.skeleton-line {
+  background: linear-gradient(
+    90deg,
+    rgb(61 52 38 / 0.06) 25%,
+    rgb(61 52 38 / 0.11) 37%,
+    rgb(61 52 38 / 0.06) 63%
+  );
+  background-size: 400% 100%;
+  animation: shimmer 1.6s ease-in-out infinite;
+  border-radius: 6px;
+}
+
+/* Selection picked from the ink, not the browser default blue, which would be
+   the only cool colour on an entirely warm page. */
+::selection {
+  background: rgb(28 26 22 / 0.14);
+  color: var(--ink);
+}
+
+/* Scrollbars: thin and warm, so they stop reading as a system artefact
+   pasted onto the surface. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(61 52 38 / 0.22) transparent;
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background-color: rgb(61 52 38 / 0.20);
+  border-radius: 9999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover { background-color: rgb(61 52 38 / 0.32); }
+
+/* Non-negotiable. Every animation above collapses to nothing for users who
+   have asked their OS for reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .rise { animation: none; opacity: 1; transform: none; }
+  .press:active { transform: none; }
+}
