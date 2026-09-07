@@ -111,20 +111,32 @@ python3 -c "from modelscope import snapshot_download; snapshot_download('iic/Cos
 export COSYVOICE_MODEL_DIR=./CosyVoice/pretrained_models/CosyVoice2-0.5B
 ```
 
-### 4. Choose a voice (recommended)
+### 4. Choose a voice (required)
 
 Unlike Chatterbox, CosyVoice2's zero-shot cloning needs **two** things: a
 short (~10s) clean reference clip, *and* a text transcript of exactly
-what's said in it. Drop the clip at
-`voice-service/reference_voice.wav` and set both:
+what's said in it. This step is not optional the way it sounds below:
+the CosyVoice2-0.5B checkpoint ships with **zero built-in speakers**
+(confirm with `curl localhost:8008/health` - `builtin_speakers` is `[]`),
+so without a configured reference clip, every `/speak` request returns
+503 and the app silently falls back to the browser's own robotic voice.
+There's no way to get CosyVoice2 output without doing this step.
 
-```bash
-export COSYVOICE_REFERENCE_VOICE=./reference_voice.wav
-export COSYVOICE_REFERENCE_PROMPT_TEXT="exactly what is said in the clip, transcribed"
+Drop the clip at `voice-service/reference_voice.wav`, then create
+`voice-service/.env` (gitignored, next to `app.py`) with:
+
+```
+COSYVOICE_REFERENCE_VOICE=./reference_voice.wav
+COSYVOICE_REFERENCE_PROMPT_TEXT=exactly what is said in the clip, transcribed
 ```
 
-If you skip this, `/speak` falls back to whatever speaker IDs (if any)
-ship with the model - check the `/health` endpoint to see what it found.
+`app.py` loads this file itself on startup (via `python-dotenv`), so it
+survives across terminal tabs and `uvicorn` restarts - unlike a plain
+`export COSYVOICE_REFERENCE_VOICE=...` in your shell, which only lives
+in that one terminal session and is gone the moment you open a new tab
+or restart the process. (If you prefer `export` anyway, that still
+works too - `.env` is just read first, then real env vars win if both
+are set.)
 
 ## Run it
 

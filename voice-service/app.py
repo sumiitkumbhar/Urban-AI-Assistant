@@ -30,12 +30,22 @@ from contextlib import asynccontextmanager
 
 import torch
 import torchaudio as ta
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("cosyvoice-service")
+
+# Load voice-service/.env (if present) before reading any env vars below.
+# This matters specifically for COSYVOICE_REFERENCE_VOICE /
+# COSYVOICE_REFERENCE_PROMPT_TEXT: a plain `export` in one terminal tab
+# doesn't survive into a new tab or a later `uvicorn` restart, which is
+# exactly how this service kept coming up with no cloned voice configured
+# despite having been exported earlier. A .env file next to this one
+# fixes that the same way .env.local already does for the Next.js app.
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 
 # The CosyVoice package isn't published to PyPI - it's used by putting the
 # repo (and its Matcha-TTS submodule) on sys.path, exactly as CosyVoice's

@@ -23,6 +23,7 @@
 # already do the right thing on a Mac (skip the Linux/CUDA-only wheels).
 conformer==0.3.2
 diffusers==0.29.0
+python-dotenv==1.0.1
 einops==0.8.0
 fastapi==0.115.6
 hydra-core==1.3.2

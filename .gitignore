@@ -13,6 +13,7 @@ node_modules
 voice-service/venv/
 voice-service/__pycache__/
 voice-service/*.wav
+voice-service/.env
 
 # Build artifacts
 tsconfig.tsbuildinfo
