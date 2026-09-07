@@ -761,6 +761,28 @@ Two consequences worth noting:
 Append an entry after every meaningful change. Format: what changed, files
 touched, what was tested, result.
 
+### 2026-09-07 — Proposal: local PostgreSQL + pgvector for the corpus
+- **Changed:** `docs/local-postgres-corpus-proposal.md` (new). **Proposal only —
+  no code changed, nothing migrated.**
+- **Tested:** Audited the actual Supabase coupling rather than assuming it.
+  Corpus usage is **4 call sites**: two `.rpc()` calls in
+  `app/api/rag-chat/route.ts` and two `.from().insert()` calls in
+  `lib/chromaIngest.ts`. Conversation memory (~11 sites) and uploaded documents
+  (~8 sites) are separate and stay on Supabase. `lib/supabase.ts` is 30 lines
+  with no auth/storage/realtime/RLS. Read both RPC bodies: they use only
+  `vector`/`<=>`, `tsvector`, `websearch_to_tsquery`, `ts_rank_cd`, generated
+  columns and `language sql` — all standard Postgres + pgvector, nothing
+  Supabase-specific. `pg@^8.16.3` is already a dependency.
+- **Result:** The split is a small change technically, and
+  `sql/2026-09-07-council-aware-retrieval.sql` runs unchanged on local Postgres.
+  **The real cost is deployment, not engineering:** a database on the Mac cannot
+  serve a public portfolio URL. Recommended resolution is a `CorpusRepository`
+  interface with two implementations selected by `CORPUS_BACKEND` — local
+  Postgres for development with no storage ceiling, Supabase free with a curated
+  30–60 council corpus for the public deploy. Also flagged: `halfvec` (2-byte
+  floats) roughly halves embedding storage on either backend, and HNSW replaces
+  the currently mistuned `ivfflat lists=100`. Awaiting approval before any code.
+
 ### 2026-09-07 — Council-aware retrieval: migration + council resolver
 - **Changed:** (a) `sql/2026-09-07-council-aware-retrieval.sql` — additive
   migration adding `scope`, `lpa_slugs`, `lpa_names`, `plan_status` and
