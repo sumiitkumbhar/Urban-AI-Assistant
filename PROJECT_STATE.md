@@ -842,6 +842,33 @@ Two consequences worth noting:
 Append an entry after every meaningful change. Format: what changed, files
 touched, what was tested, result.
 
+### 2026-09-07 — Auto-growing composer + corpus-grounded prompt cards
+- **Changed:** `components/chat/ChatInterface.tsx`, `app/globals.css`.
+- **Composer:** `<input>` → `<textarea>`. Rests at the same 46px, grows with the
+  text, caps at 168px then scrolls. Height measured from `scrollHeight` (never
+  counted from newlines — soft wraps and pasted text have none);
+  `useLayoutEffect` so the resize lands in the keystroke's frame; pill radius at
+  one line, 20px once grown; Enter sends, Shift+Enter breaks, `isComposing`
+  respected; side controls anchored bottom, not vertically centred.
+- **Prompt cards — a real correctness fix, not decoration.** The four
+  suggestions were two Green Belt questions plus two on sustainable development,
+  and were phrased for an NPPF edition **this database does not hold**. The
+  ingested document is the **restructured Framework using lettered policy codes**
+  (`S3`, `GB8`, `F5`, `HE6`, `Annex E`), not paragraph numbers — so a card asking
+  about "paragraph 11" would have retrieved nothing. Replaced with four
+  questions from four different chapters, each verified against the extracted
+  PDF text (`pdftotext` on `documents-to-ingest/National_Planning_Policy_Framework.pdf`)
+  before use. Cards now display the policy code and topic.
+- **Tested:** `tsc --noEmit` exit 0. Composer growth measured in a harness against
+  the app's own compiled Tailwind: 46px empty / 46px one line / 67px three lines
+  / capped at exactly 168px with `overflow-y: auto` beyond, radius switching
+  `9999px → 20px` at the threshold. Not tested in the running app — `next build`
+  is still blocked by the missing linux SWC binary.
+- **Result:** `7e8ad76`. **Push still fails.** GitHub is 403 at the proxy from the
+  device VM, and the cloud sandbox refuses to inject credentials for this repo
+  ("not in this session's authorized repository set"). **20 commits remain
+  unpushed on `main`.** Sumit must run `git push origin main` himself.
+
 ### 2026-09-07 — Reviewed the Codex UI branch (PR #2). NOT merged.
 
 **The branch forks from a different app than the one on this machine.** It is
