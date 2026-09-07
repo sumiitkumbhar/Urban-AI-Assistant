@@ -48,7 +48,7 @@ async function main() {
   const { data: docs, error } = await supabase
     .from("documents")
     .select("id, title, doc_type, region")
-    .ilike("title", "%National Planning Policy Framework%");
+    .ilike("title", "National Planning Policy Framework"); // exact match: the old "%...%" wildcard also caught unrelated docs whose title merely contained this phrase
 
   if (error) {
     console.error("Lookup failed:", error.message);
@@ -91,8 +91,9 @@ async function main() {
         title: "National Planning Policy Framework",
         jurisdictionKey: "uk",
         docType: "planning_policy",
-        scope: "national",
-        planStatus: "adopted",
+        // scope/planStatus omitted: the live `documents` table does not yet
+        // have these columns (sql/2026-09-07-council-aware-retrieval.sql has
+        // not been applied to production). Re-add once that migration runs.
       },
     ],
     { region: "uk" as any }
