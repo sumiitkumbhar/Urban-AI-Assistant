@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, MotionConfig, useReducedMotion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -550,12 +550,27 @@ export default function ChatInterface() {
     "auto" | "feasibility" | "permitting" | "risk"
   >("auto");
 
-  const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const reduceMotion = useReducedMotion();
+  const questions = messages.filter((message) => message.type === "user");
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isLoading]);
+    if (!sidebarOpen) return;
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setSidebarOpen(false);
+        document.getElementById("urban-menu-toggle")?.focus();
+      }
+    };
+    document.addEventListener("keydown", onEscape);
+    return () => document.removeEventListener("keydown", onEscape);
+  }, [sidebarOpen]);
+
+  useEffect(() => {
+    if (messages.length) endRef.current?.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "end" });
+  }, [messages, isLoading, reduceMotion]);
 
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -721,262 +736,225 @@ export default function ChatInterface() {
     }
   };
 
-  const onKeyDown: React.KeyboardEventHandler<HTMLInputElement> = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+  const onKeyDown: React.KeyboardEventHandler<HTMLTextAreaElement> = (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
-      handleSend();
+      void handleSend();
     }
   };
 
+  const newChat = () => {
+    if (isLoading) return;
+    if (messages.length && !window.confirm("Start a new chat? This conversation is not saved after you clear it.")) return;
+    setMessages([]);
+    setInputValue("");
+    setError(null);
+    setUploadedFile(null);
+    setDrawingFile(null);
+    setSidebarOpen(false);
+    inputRef.current?.focus();
+  };
+
+  const modeDescriptions = {
+    auto: "Include a location for more relevant guidance.",
+    feasibility: "Include the site location and what you want to build.",
+    permitting: "Specify the authority and the permission you need.",
+    risk: "Describe your project and the risks you want to explore.",
+  };
+
   return (
-    <div className="flex h-full flex-col bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-100">
-      <div className="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
-      <div className="mx-auto w-full max-w-7xl space-y-6 px-6 sm:px-8 lg:px-12">
-          {messages.length === 0 ? (
-            <WelcomeScreen onSuggestionClick={(s) => handleSend(s)} />
-          ) : (
-            <AnimatePresence>
-              {messages.map((message) => (
-                <MessageBubble
-                  key={message.id}
-                  message={message}
-                  setMessages={setMessages}
-                />
-              ))}
-            </AnimatePresence>
-          )}
-
-          {isLoading && <LoadingIndicator />}
-
-          {error && (
-            <div className="max-w-md rounded-lg border border-rose-700/40 bg-rose-950/40 px-3 py-2 text-xs text-rose-400">
-              Backend error: {error}
-            </div>
-          )}
-
-          <div ref={endRef} />
-        </div>
-      </div>
-
-      <div className="border-t border-white/5 bg-black/20 p-4 backdrop-blur-xl sm:p-6">
-      <div className="mx-auto w-full max-w-7xl px-6 sm:px-8 lg:px-12">
-          <div className="relative">
-            <input
-              type="text"
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyDown={onKeyDown}
-              placeholder="Ask anything"
-              className="w-full rounded-2xl border border-white/10 bg-white/5 py-4 pl-10 pr-32 text-sm transition-all placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500/50"
-              disabled={isLoading}
-            />
-
-            <div className="absolute left-2 top-1/2 -translate-y-1/2">
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={() => setIsModeMenuOpen((v) => !v)}
-                  className="flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-slate-900/80 text-base leading-none text-slate-200 hover:bg-slate-800"
-                  aria-label="Select mode"
-                >
-                  +
-                </button>
-
-                {isModeMenuOpen && (
-                  <div className="absolute bottom-10 left-0 w-44 rounded-xl border border-white/10 bg-slate-900/95 py-1 text-xs text-slate-100 shadow-lg">
-                    {[
-                      { id: "auto", label: "Auto (default)" },
-                      { id: "feasibility", label: "Feasibility" },
-                      { id: "permitting", label: "Permitting" },
-                      { id: "risk", label: "Risk review" },
-                    ].map((mode) => (
-                      <button
-                        key={mode.id}
-                        type="button"
-                        onClick={() => {
-                          setChatMode(
-                            mode.id as
-                              | "auto"
-                              | "feasibility"
-                              | "permitting"
-                              | "risk"
-                          );
-                          setIsModeMenuOpen(false);
-                        }}
-                        className={`flex w-full items-center justify-between px-3 py-2 hover:bg-white/10 ${
-                          chatMode === mode.id ? "text-purple-300" : ""
-                        }`}
-                      >
-                        <span>{mode.label}</span>
-                        {chatMode === mode.id && <span>•</span>}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-2">
-              <label
-                className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-xl border border-white/10 bg-slate-900/80 text-xs text-slate-300 hover:bg-slate-800/90"
-                title="Attach file"
-              >
-                <input
-                  type="file"
-                  onChange={handleFileUpload}
-                  className="hidden"
-                  accept=".pdf,.png,.jpg,.jpeg,.docx"
-                  disabled={isLoading}
-                />
-                <DocumentIcon className="h-4 w-4 text-slate-200" />
-              </label>
-
-              <button
-                type="button"
-                className="flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 bg-slate-900/80 text-xs text-slate-300 hover:bg-slate-800/90"
-                aria-label="Voice input"
-              >
-                🎤
-              </button>
-
-              <button
-                onClick={() => handleSend()}
-                disabled={
-                  (!inputValue.trim() && !uploadedFile && !drawingFile) ||
-                  isLoading
-                }
-                className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-r from-purple-600 to-blue-600 transition-all hover:from-purple-500 hover:to-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
-                aria-label="Send"
-              >
-                <PaperAirplaneIcon className="h-4 w-4 text-white" />
-              </button>
-            </div>
+    <MotionConfig reducedMotion="user" transition={{ type: "spring", stiffness: 320, damping: 32 }}>
+      <div className="urban-workspace">
+        <a href="#urban-composer" className="urban-skip">Skip to message</a>
+        {sidebarOpen && (
+          <button className="urban-scrim" aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />
+        )}
+        <aside className={`urban-sidebar ${sidebarOpen ? "is-open" : ""}`} aria-label="Workspace navigation">
+          <div className="urban-brand">
+            <span className="urban-brand-icon"><SparklesIcon className="h-5 w-5" /></span>
+            <span className="urban-wordmark">urban<span>ai</span></span>
+            <button className="urban-icon-button urban-mobile-close" aria-label="Close navigation" onClick={() => setSidebarOpen(false)}>×</button>
           </div>
-
-          {uploadedFile && (
-            <div className="mt-3 flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
-              <div className="min-w-0">
-                <p className="truncate text-xs text-slate-300">
-                  Uploaded:{" "}
-                  <span className="text-slate-200">{uploadedFile.name}</span>
-                </p>
-                <p className="text-[11px] text-slate-500">
-                  Next send will run compliance check with this file.
-                </p>
-              </div>
-
-              <button
-                onClick={() => setUploadedFile(null)}
-                className="rounded-lg border border-rose-400/20 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-300 transition hover:bg-rose-500/20 hover:text-rose-200"
-              >
-                Remove
-              </button>
+          <p className="urban-brand-caption">Planning & construction</p>
+          <button className="urban-new-chat" onClick={newChat} disabled={isLoading}>
+            <span aria-hidden="true">+</span> New conversation
+          </button>
+          <div className="urban-sidebar-section">
+            <div className="urban-section-label">This conversation <span>{questions.length || ""}</span></div>
+            <nav aria-label="Questions in this conversation">
+              {questions.length ? questions.map((question) => (
+                <button className="urban-question-link" key={question.id} onClick={() => {
+                  document.getElementById(question.id)?.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "start" });
+                  setSidebarOpen(false);
+                }}>
+                  <span className="urban-question-dot" aria-hidden="true" />
+                  <span>{question.content || "Document analysis"}</span>
+                </button>
+              )) : <p className="urban-sidebar-empty">Your questions will appear here as you explore.</p>}
+            </nav>
+          </div>
+          <div className="urban-sidebar-bottom">
+            <div className="urban-sidebar-note">
+              <DocumentIcon className="h-4 w-4" />
+              <span>Go from answer<br />to original source.</span>
             </div>
-          )}
+            <div className="urban-session-note">Current session only</div>
+          </div>
+        </aside>
 
-          {chatMode === "feasibility" && (
-            <div className="mt-3 space-y-2">
-              <label className="block text-xs text-slate-400">
-                Optional: Upload floor plan or site plan for automatic analysis
-                <input
-                  type="file"
-                  accept=".pdf,.png,.jpg,.jpeg"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) setDrawingFile(file);
-                  }}
-                  className="mt-1 block w-full text-xs text-slate-400 file:mr-4 file:rounded-lg file:border-0 file:bg-purple-600 file:px-4 file:py-2 file:text-xs file:text-white hover:file:bg-purple-500"
-                  disabled={isLoading}
-                />
-              </label>
+        <main className="urban-main" id="urban-main">
+          <header className="urban-header">
+            <div className="urban-header-path">
+              <button id="urban-menu-toggle" className="urban-icon-button urban-menu-toggle" aria-label="Open navigation" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(true)}>
+                <Svg className="h-5 w-5"><path d="M4 6h16M4 12h16M4 18h16" /></Svg>
+              </button>
+              <span className="urban-breadcrumb">Workspace</span>
+              <span className="urban-breadcrumb" aria-hidden="true">/</span>
+              <span>AI Assistant</span>
+            </div>
+            <button className="urban-header-new" onClick={newChat} disabled={isLoading}>
+              <span aria-hidden="true">+</span> New chat
+            </button>
+          </header>
 
-              {drawingFile && (
-                <div className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2">
-                  <div className="min-w-0">
-                    <p className="truncate text-xs text-slate-300">
-                      Drawing:{" "}
-                      <span className="text-slate-200">{drawingFile.name}</span>
-                    </p>
-                    <p className="text-[11px] text-slate-500">
-                      Will be analyzed for code compliance when you send
-                    </p>
-                  </div>
-
-                  <button
-                    onClick={() => setDrawingFile(null)}
-                    className="rounded-lg border border-rose-400/20 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-300 transition hover:bg-rose-500/20 hover:text-rose-200"
-                  >
-                    Remove
-                  </button>
+          <div className={`urban-conversation ${messages.length === 0 ? "is-empty" : ""}`}>
+            <div className="urban-thread">
+              {messages.length === 0 ? (
+                <WelcomeScreen onSuggestionClick={(suggestion) => {
+                  setInputValue(suggestion);
+                  inputRef.current?.focus();
+                }} />
+              ) : (
+                <AnimatePresence initial={false}>
+                  {messages.map((message) => (
+                    <MessageBubble key={message.id} message={message} setMessages={setMessages} />
+                  ))}
+                </AnimatePresence>
+              )}
+              <div role="status" aria-live="polite" aria-atomic="true">
+                {isLoading ? <LoadingIndicator /> : null}
+              </div>
+              {error && (
+                <div className="urban-error" role="alert">
+                  <strong>We couldn’t complete that request.</strong>
+                  <span>{error}</span>
                 </div>
               )}
+              <div ref={endRef} />
             </div>
-          )}
-
-          <div className="mt-2 text-left text-[11px] text-slate-400">
-            {chatMode === "auto" &&
-              "Mode: Auto – describe what you want; the assistant will choose Feasibility, Permitting, or Risk."}
-            {chatMode === "feasibility" &&
-              "Mode: Feasibility – share the site location, jurisdiction, and what you want to build."}
-            {chatMode === "permitting" &&
-              "Mode: Permitting – upload your submission pack and specify the authority/jurisdiction."}
-            {chatMode === "risk" &&
-              "Mode: Risk – provide project context/documents to analyze what could get rejected or delayed."}
           </div>
 
-          <p className="mt-3 text-center text-xs text-slate-500">
-            Enter to send. Shift+Enter for new line. AI can be wrong.
-          </p>
-        </div>
+          <footer className="urban-composer-area">
+            <div className="urban-composer-container">
+              <form className="urban-composer" onSubmit={(event) => { event.preventDefault(); void handleSend(); }}>
+                <label htmlFor="urban-composer" className="sr-only">Your message</label>
+                <textarea
+                  ref={inputRef}
+                  id="urban-composer"
+                  value={inputValue}
+                  rows={2}
+                  onChange={(event) => setInputValue(event.target.value)}
+                  onKeyDown={onKeyDown}
+                  placeholder="What would you like to understand?"
+                  disabled={isLoading}
+                  aria-describedby="urban-input-hint"
+                />
+                <div className="urban-composer-toolbar">
+                  <div className="urban-composer-tools">
+                    <button type="button" className="urban-icon-button" disabled aria-label="File upload unavailable in this version" title="File upload unavailable in this version">
+                      <DocumentIcon className="h-5 w-5" />
+                    </button>
+                    <span className="urban-toolbar-divider" />
+                    <label className="urban-mode">
+                      <span className="sr-only">Response mode</span>
+                      <select value={chatMode} disabled={isLoading} onChange={(event) => setChatMode(event.target.value as typeof chatMode)}>
+                        <option value="auto">Auto</option>
+                        <option value="feasibility">Feasibility</option>
+                        <option value="permitting">Permitting</option>
+                        <option value="risk">Risk review</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="urban-send-group">
+                    <span className="urban-key-hint"><kbd>↵</kbd> to send</span>
+                    <motion.button
+                      type="submit"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.94 }}
+                      className="urban-send"
+                      disabled={(!inputValue.trim() && !uploadedFile && !drawingFile) || isLoading}
+                      aria-label={isLoading ? "Waiting for response" : "Send message"}
+                    >
+                      <Svg className="h-5 w-5"><path d="M12 19V5m-6 6 6-6 6 6" /></Svg>
+                    </motion.button>
+                  </div>
+                </div>
+              </form>
+              <AnimatePresence>
+                {chatMode !== "auto" && (
+                  <motion.p key={chatMode} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="urban-mode-hint">
+                    {modeDescriptions[chatMode]}
+                  </motion.p>
+                )}
+              </AnimatePresence>
+              {chatMode === "feasibility" && (
+                <p className="urban-mode-hint">Drawing upload is unavailable in this version. Describe your site in the message.</p>
+              )}
+              {(drawingFile || uploadedFile) && (
+                <div className="urban-file-chip">
+                  <DocumentIcon className="h-4 w-4" />
+                  <span>{drawingFile?.name || uploadedFile?.name}</span>
+                  <button type="button" disabled={isLoading} onClick={() => { setDrawingFile(null); setUploadedFile(null); }}>Remove</button>
+                </div>
+              )}
+              <p id="urban-input-hint" className="urban-footer-note">
+                <span>Check original sources before making decisions.</span>
+                <span className="urban-newline-hint">Shift + Enter for a new line</span>
+              </p>
+            </div>
+          </footer>
+        </main>
       </div>
-    </div>
+    </MotionConfig>
   );
 }
 
-function WelcomeScreen({
-  onSuggestionClick,
-}: {
-  onSuggestionClick: (s: string) => void;
-}) {
+function WelcomeScreen({ onSuggestionClick }: { onSuggestionClick: (s: string) => void }) {
+  const topics = ["Firefighting access", "External fire spread", "Means of escape"];
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
+    <motion.section
+      className="urban-welcome"
+      initial={{ opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
-      className="py-12 text-center"
+      transition={{ duration: 0.65, ease: [0.16, 1, 0.3, 1] }}
+      aria-labelledby="urban-welcome-title"
     >
-      <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 to-purple-600 shadow-[0_0_48px_rgba(168,85,247,.4)]">
-        <SparklesIcon className="h-10 w-10 text-white" />
+      <div className="urban-welcome-heading">
+        <p className="urban-eyebrow">A little clarity. A better decision.</p>
+        <h1 id="urban-welcome-title">Your next question.<br /><span>A clearer perspective.</span></h1>
+        <p className="urban-welcome-description">Explore planning and construction guidance.<br className="urban-desktop-break" /> Follow the citations. Understand the details.</p>
       </div>
-
-      <h2 className="mb-4 text-4xl font-bold">
-        Welcome to{" "}
-        <span className="bg-gradient-to-r from-blue-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
-          Urban AI Assistant
-        </span>
-      </h2>
-
-      <p className="mb-12 text-lg text-slate-300">
-        Grounded regulatory answers with citations, page references, and
-        clause-level support
-      </p>
-
-      <p className="mb-4 text-sm text-slate-400">Try asking:</p>
-
-      <div className="mx-auto grid max-w-3xl grid-cols-1 gap-3">
-        {suggestions.map((suggestion, i) => (
+      <div className="urban-suggestions-heading"><span>Start with a question</span><span>Approved Document B</span></div>
+      <div className="urban-suggestions">
+        {suggestions.map((suggestion, index) => (
           <motion.button
-            key={i}
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ delay: 0.2 + i * 0.08 }}
+            key={suggestion}
+            className="urban-suggestion"
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.1 + index * 0.07, duration: 0.5 }}
+            whileHover={{ y: -4 }}
+            whileTap={{ scale: 0.98 }}
             onClick={() => onSuggestionClick(suggestion)}
-            className="w-full rounded-xl border border-white/10 bg-white/5 px-5 py-4 text-left text-sm text-slate-200 transition-all hover:border-white/20 hover:bg-white/10"
           >
-            "{suggestion}"
+            <span className={`urban-topic-mark topic-${index}`}><DocumentIcon className="h-5 w-5" /></span>
+            <span className="urban-suggestion-title">{topics[index]}</span>
+            <span className="urban-suggestion-copy">{suggestion}</span>
+            <span className="urban-suggestion-action">Explore question <span aria-hidden="true">↗</span></span>
           </motion.button>
         ))}
       </div>
-    </motion.div>
+    </motion.section>
   );
 }
 
@@ -1052,7 +1030,8 @@ function MessageBubble({
       initial={{ opacity: 0, y: 18 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -12 }}
-      className="w-full"
+      id={message.id}
+      className={`urban-message ${isUser ? "is-user" : "is-assistant"}`}
     >
       <div className="mx-auto w-full max-w-5xl">
       <div className={`flex gap-4 ${isUser ? "justify-end" : "justify-start"}`}>
@@ -1064,13 +1043,13 @@ function MessageBubble({
 
   <div className={`w-full ${isUser ? "max-w-2xl" : "max-w-5xl"}`}>
     <div
-      className={`px-6 py-5 rounded-2xl ${
+      className={`urban-message-surface px-6 py-5 rounded-2xl ${
         isUser
           ? "ml-auto max-w-[720px] border border-blue-500/20 bg-gradient-to-br from-blue-600/20 to-purple-600/20"
           : "w-full max-w-[980px] border border-white/10 bg-white/5"
       }`}
     >
-<div className="text-[15px] leading-7 text-slate-200">
+<div className="urban-answer-text text-slate-200">
   <ReactMarkdown
     remarkPlugins={[remarkGfm]}
     components={{
@@ -1211,21 +1190,23 @@ function MessageBubble({
 }
 
 function LoadingIndicator() {
+  const reduceMotion = useReducedMotion();
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-4">
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="urban-loading flex gap-4">
       <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-pink-500">
         <SparklesIcon className="h-5 w-5 text-white" />
       </div>
 
       <div className="flex-1">
         <div className="max-w-xs rounded-2xl border border-white/10 bg-white/5 px-6 py-4">
-          <div className="flex gap-2">
+          <p className="urban-loading-label">Preparing your answer</p>
+          <div className="flex gap-2" aria-hidden="true">
             {[0, 1, 2].map((i) => (
               <motion.div
                 key={i}
                 className="h-2 w-2 rounded-full bg-purple-400"
-                animate={{ scale: [1, 1.5, 1], opacity: [0.5, 1, 0.5] }}
-                transition={{ duration: 1, repeat: Infinity, delay: i * 0.2 }}
+                animate={reduceMotion ? { scale: 1, opacity: 0.7 } : { scale: [1, 1.5, 1], opacity: [0.5, 1, 0.5] }}
+                transition={reduceMotion ? { duration: 0 } : { duration: 1, repeat: Infinity, delay: i * 0.2 }}
               />
             ))}
           </div>

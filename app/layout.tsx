@@ -1,11 +1,9 @@
 import React from 'react'
-import { Inter } from 'next/font/google'
 import './globals.css'
-
-const inter = Inter({ subsets: ['latin'] })
+import './workspace.css'
 
 export const metadata = {
-  title: 'Urban Co-pilot - AI-Powered Construction Management',
+  title: 'Urban AI Assistant — Planning & Construction',
   description: 'Your intelligent assistant for urban planning & construction',
 }
 
@@ -15,8 +13,8 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en" className="ui-compact">
-      <body className={`${inter.className} antialiased`}>
+    <html lang="en" className="dark">
+      <body className="urban-body antialiased">
         {children}
       </body>
     </html>
