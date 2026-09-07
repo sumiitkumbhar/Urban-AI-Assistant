@@ -518,10 +518,177 @@ Options to analyse before proceeding (not applied — this needs a decision):
   return shape is unverified.
 - Actual page counts, and therefore the true corpus size.
 
+## 11c. Council-aware retrieval — design (2026-09-07)
+
+Status: **design only, nothing implemented.** Blocked on schema verification —
+see "Step 0" below. Scope is deliberately narrow: corpus architecture,
+provenance, council-aware retrieval, safe ingestion. No voice, UI, model,
+framework, feasibility or diagram work, and no broad refactor of the RAG route.
+
+### The target shape
+
+```
+                    USER QUESTION
+                         │
+                         ▼
+                  Determine scope          <- deterministic, no LLM call
+            ┌────────────┼────────────┐
+            ▼            ▼            ▼
+        NATIONAL       LOCAL       USER PDF
+          NPPF      correct LPA   uploaded doc
+            └────────────┼────────────┘
+                         ▼
+                  RERANK EVIDENCE          <- existing rerankers, unchanged
+                         ▼
+                  GROUNDED ANSWER          <- existing generation, unchanged
+                         ▼
+                  SOURCE CITATIONS         <- now with working source URLs
+```
+
+The failure mode being designed out: search everything, hope the reranker
+picks the right council. With hundreds of Local Plans in one undifferentiated
+index that is not reliable, and a wrong council's policy presented as
+authoritative is worse than no answer.
+
+### Step 0 — schema verification (BLOCKING, awaiting result)
+`sql/inspect-schema.sql` (read-only) must be run in the Supabase SQL Editor
+first. The assistant cannot reach Supabase — the project host returns
+`X-Proxy-Error: blocked-by-allowlist` — and the `documents`/`chunks` DDL is not
+in this repo, so every design decision below is provisional until the real
+columns, RPC bodies, indexes and constraints are known. Block 7 of that file
+answers the most urgent question: whether `documents.source_url` exists at all.
+If it does not, ingestion fails on its first insert.
+
+### 1. Canonical council identity
+Council identity must not depend on matching free text in titles.
+
+- `documents.scope text not null default 'local'` — `'national'` | `'local'`
+- `documents.lpa_slugs text[]` — canonical slugs, e.g. `{reading}`,
+  `{tower-hamlets}`. Empty/null for national documents.
+- `documents.lpa_names text[]` — human-readable, index-aligned with the slugs,
+  for display and citations.
+
+NPPF: `scope='national'`, `lpa_slugs = null`.
+Local Plan: `scope='local'`, `lpa_slugs = '{reading}'`.
+
+Slugs come from the tracker at ingestion time (the pipeline already knows which
+council a document belongs to — `row.jurisdiction_key` / `row.organisation_name`),
+never inferred afterwards from a title.
+
+### 2. Shared/joint plans — how the relationship works (answering the question asked)
+An array column, not duplicated chunks, and not a join table.
+
+One physical PDF → **one `documents` row → one set of `chunks`**. Authorities
+that share it are additional entries in that row's `lpa_slugs`:
+
+```
+Babergh and Mid Suffolk Joint Local Plan
+  documents.lpa_slugs = '{babergh, mid-suffolk}'
+  documents.lpa_names = '{Babergh District Council, Mid Suffolk District Council}'
+```
+
+Retrieval filters with array containment:
+`where filter_lpa_slug is null or d.lpa_slugs @> array[filter_lpa_slug]`,
+backed by `create index on documents using gin (lpa_slugs)`.
+
+Why an array rather than a `document_lpas` join table: the retrieval RPCs
+**already** `join documents d on d.id = c.document_id`, so the filter costs one
+extra indexed predicate and no new join. A join table is more normalised and
+would be the right call if per-authority attributes were needed (adoption date
+per council, lead authority), but nothing needs that yet. This is reversible —
+the array can be migrated to a join table later without touching chunks.
+
+The 22 shared-URL tracker rows collapse to ~11 documents ingested once each,
+with the participating councils listed in `lpa_slugs`. Chunks are never copied.
+
+### 3. Provenance / citations
+Both RPCs must return `d.source_url` alongside the existing `d.source_path`.
+The application prefers `source_url` when building `directLink`, falling back to
+`source_path` only when it already looks like a URL (current behaviour). Each
+citation then carries: council name, document title, document type, page number,
+source URL, and LPA slug.
+
+### 4. `filter_lpa_slug`, added alongside — not replacing — `filter_region`
+
+| Case | Question | Retrieval |
+|---|---|---|
+| A. Council-specific | "Reading's policy on tall buildings" | `scope='national'` OR `lpa_slugs @> {reading}`. Other councils excluded. |
+| B. National | "What does the NPPF say about Green Belt?" | `scope='national'` preferred; local plans not blended in. |
+| C. Comparison | "Compare Reading and Oxford on density" | `{reading, oxford}` ∪ national, evidence labelled by authority throughout. |
+| D. Locality-dependent, unspecified | "How many parking spaces are required?" | **Ask which council.** Never blend or invent local policy. National context may be offered alongside the question. |
+
+Case D is the one that most protects credibility, and it is a behaviour change
+rather than a filter: detect that the answer is authority-dependent, detect that
+no authority was given, and ask.
+
+### 5. Council detection — deterministic, reusing what exists
+`lib/domain-vocabulary.ts` already loads all 502 LPA names from
+`data/uk-lpa-tracker.csv` and resolves fuzzy/misheard variants
+("tower hamlet" → "Tower Hamlets", "Durrham" → "Durham"). Extending it to
+return a canonical slug turns the existing corrector into the council resolver —
+no new LLM call, per the requirement. It must handle "Reading",
+"Reading Borough", "Reading Borough Council" → `reading`.
+
+Ambiguity (e.g. bare "Newcastle" → Newcastle-upon-Tyne vs Newcastle-under-Lyme)
+resolves to a clarifying question, never a guess.
+
+### 6. Idempotency
+- `documents.content_sha256 text` — SHA-256 of the downloaded PDF bytes.
+- `documents.source_url text` — the canonical URL.
+- Unique constraint on `content_sha256`.
+
+Re-run behaviour: same hash already present → **skip** (no re-embedding, no
+duplicate chunks). Same URL, different hash → the council republished the
+document; record it explicitly as a new version and mark the previous one
+superseded, rather than silently appending a second copy.
+
+### 7. Plan status
+`documents.plan_status text not null default 'unknown'` —
+`adopted` | `emerging` | `superseded` | `unknown`.
+
+The tracker does not carry reliable adoption status, so everything ingested now
+is `unknown`. **No status will be fabricated.** `local_plan_udp` and
+`*_saved_policies` rows are *candidates* for `superseded` but will not be
+auto-labelled on a naming guess.
+
+### 8. Policies Maps excluded from this phase
+The 40 `local_plan_policies_map` rows stay in the tracker, untouched, and are
+skipped by ingestion. They are spatial documents; PDF text extraction is the
+wrong tool. Future GIS/spatial capability, not deleted.
+
+### Pilot (only after Step 0 and implementation type-check)
+Five councils plus the national layer: Reading, Manchester, Birmingham, one
+London borough, one smaller district/unitary — plus NPPF.
+
+Definition of done is behavioural, not "TypeScript passes":
+Reading question → Reading + national, zero other councils; Manchester question
+→ Manchester + national, zero Reading; unspecified locality → asks which
+council; national question → national sources; comparison → both councils with
+separated provenance; every citation resolves to the correct source document.
+
 ## 12. Change log
 
 Append an entry after every meaningful change. Format: what changed, files
 touched, what was tested, result.
+
+### 2026-09-07 — Council-aware retrieval: design + schema inspection SQL
+- **Changed:** Added `sql/inspect-schema.sql` (read-only) and recorded the
+  council-aware retrieval design in section 11c: canonical `lpa_slugs`/`scope`
+  identity, shared-plan modelling via an array column (one document, one set of
+  chunks, never duplicated), provenance fix so citations return `source_url`,
+  an optional `filter_lpa_slug` alongside the existing region filter, the four
+  retrieval cases including "ask which council" for unspecified locality,
+  deterministic council detection reusing `lib/domain-vocabulary.ts`, content-hash
+  idempotency, and `plan_status` defaulting to `unknown`.
+- **Files:** `sql/inspect-schema.sql` (new), `PROJECT_STATE.md`.
+- **Tested:** Confirmed the live schema cannot be inspected from here — the
+  Supabase project host returns `X-Proxy-Error: blocked-by-allowlist`. No schema
+  changes made, nothing guessed.
+- **Result:** Design ready for review. **Implementation is blocked on Step 0**:
+  `sql/inspect-schema.sql` must be run in the Supabase SQL Editor and its output
+  returned, because the `documents`/`chunks` DDL is not in this repo. Block 7 in
+  particular determines whether `documents.source_url` exists — if it does not,
+  ingestion fails on its first insert.
 
 ### 2026-09-07 — Council corpus: ingestion audit + title bug fix
 - **Changed:** Audited the full ingestion path before downloading anything (see
