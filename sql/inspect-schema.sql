@@ -6,6 +6,10 @@
 -- is designed against it, because the documents/chunks DDL is not in this repo
 -- and the assistant's network cannot reach Supabase to look.
 --
+-- TIP: sql/inspect-schema-oneshot.sql runs all of this as ONE query returning
+-- a single JSON cell - easier to copy. Use this file only if you prefer to run
+-- the checks separately.
+--
 -- Run each block and send back the output. Block 5 is also the "database size
 -- before" baseline for the pilot storage measurement.
 -- =============================================================================
