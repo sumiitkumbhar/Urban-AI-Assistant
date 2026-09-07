@@ -1,0 +1,118 @@
+/*
+ * Layout and motion only.
+ * All colours, backgrounds, borders, shadows and gradients remain supplied by
+ * the original Tailwind classes and globals.css. Do not add palette overrides.
+ */
+.urban-polish { min-height: 0; height: 100%; }
+.urban-polish .urban-header {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-shrink: 0; min-height: 76px; gap: 16px; padding: 16px 40px;
+}
+.urban-polish .urban-brand {
+  display: flex; align-items: center; gap: 12px;
+  font-size: 17px; font-weight: 600; letter-spacing: -.025em;
+}
+.urban-polish .urban-new-chat {
+  display: flex; align-items: center; gap: 8px;
+  min-height: 44px; padding: 10px 16px; font-size: 14px;
+}
+.urban-polish .urban-new-chat > span { font-size: 20px; line-height: 1; }
+.urban-polish .urban-scroll {
+  min-height: 0; overscroll-behavior: contain; scrollbar-gutter: stable;
+  padding: 32px 40px 24px;
+}
+.urban-polish .urban-thread { max-width: 1060px; padding: 0; }
+.urban-polish .urban-empty { display: flex; }
+.urban-polish .urban-empty .urban-thread { margin: auto; }
+.urban-polish .urban-welcome { padding: 32px 0 28px; }
+.urban-polish .urban-welcome > div:first-child {
+  width: 64px; height: 64px; margin-bottom: 28px; border-radius: 20px;
+}
+.urban-polish .urban-welcome > div:first-child svg { width: 30px; height: 30px; }
+.urban-polish .urban-heading {
+  font-size: clamp(38px, 4.2vw, 62px); line-height: 1.1;
+  letter-spacing: -.045em; font-weight: 600; margin: 0 0 24px;
+}
+.urban-polish .urban-welcome-description {
+  max-width: 620px; margin: 0 auto 38px; font-size: 17px; line-height: 1.7;
+}
+.urban-polish .urban-suggestions {
+  grid-template-columns: repeat(3, minmax(0, 1fr)); max-width: 940px;
+  gap: 16px; margin-top: 20px;
+}
+.urban-polish .urban-suggestion {
+  position: relative; display: flex; flex-direction: column; gap: 14px;
+  min-height: 182px; padding: 24px; border-radius: 18px;
+  font-size: 15px; line-height: 1.65;
+  transition-property: background-color, border-color;
+  transition-duration: 200ms;
+}
+.urban-polish .urban-suggestion-label {
+  display: block; font-size: 16px; font-weight: 600; letter-spacing: -.015em;
+}
+.urban-polish .urban-suggestion-arrow {
+  display: block; margin-top: auto; align-self: flex-end; font-size: 20px;
+}
+.urban-polish .urban-composer-area {
+  flex-shrink: 0; max-height: 50dvh; overflow-y: auto; padding: 24px 40px;
+}
+.urban-polish .urban-composer-width { max-width: 1060px; padding: 0; }
+.urban-polish .urban-composer textarea {
+  display: block; min-height: 132px; max-height: 260px;
+  resize: vertical; padding: 20px 24px 70px; border-radius: 22px;
+  font-size: 17px; line-height: 1.6; transition-duration: 200ms;
+}
+.urban-polish .urban-composer-left { bottom: 12px; left: 16px; }
+.urban-polish .urban-composer-right { bottom: 12px; right: 16px; gap: 10px; }
+.urban-polish .urban-composer button[aria-label],
+.urban-polish .urban-composer label[title] {
+  width: 44px; height: 44px; min-height: 44px; border-radius: 12px;
+}
+.urban-polish .urban-composer button[aria-label] { transition: transform 200ms; }
+.urban-polish .urban-composer button[aria-label]:not(:disabled):active { transform: scale(.94); }
+.urban-polish #urban-mode-options { bottom: 52px; z-index: 20; width: 190px; }
+.urban-polish #urban-mode-options button { min-height: 44px; font-size: 14px; }
+.urban-polish .urban-composer-width > .text-left { font-size: 13px; line-height: 1.6; margin-top: 12px; }
+.urban-polish .urban-composer-width > p { font-size: 12px; line-height: 1.6; }
+.urban-polish .urban-message { margin-bottom: 32px; overflow-wrap: anywhere; }
+.urban-polish .urban-message-surface { padding: 24px; border-radius: 20px; }
+.urban-polish .urban-message-surface > div { font-size: 16px; line-height: 1.8; }
+.urban-polish .urban-message pre,
+.urban-polish .urban-message table { display: block; max-width: 100%; overflow-x: auto; }
+.urban-polish .urban-message td,
+.urban-polish .urban-message th { padding: 8px 12px; }
+.urban-polish .urban-message ul { padding-left: 24px; list-style-type: disc; }
+.urban-polish .urban-message ol { padding-left: 24px; list-style-type: decimal; }
+.urban-polish button:focus-visible,
+.urban-polish label:focus-within { outline-style: solid; outline-width: 2px; outline-offset: 4px; }
+@media (max-width: 900px) {
+  .urban-polish .urban-header { min-height: 68px; padding: 12px 24px; }
+  .urban-polish .urban-scroll { padding: 24px; }
+  .urban-polish .urban-composer-area { padding: 20px 24px; }
+  .urban-polish .urban-suggestion { padding: 20px; font-size: 14px; }
+  .urban-polish .urban-suggestion-label { font-size: 15px; }
+}
+@media (max-width: 600px) {
+  .urban-polish .urban-header { min-height: 64px; padding: 10px 16px; gap: 10px; }
+  .urban-polish .urban-brand { font-size: 15px; gap: 8px; }
+  .urban-polish .urban-new-chat { font-size: 13px; padding: 8px 12px; }
+  .urban-polish .urban-scroll { padding: 20px 16px; }
+  .urban-polish .urban-welcome { padding: 16px 0; }
+  .urban-polish .urban-heading { font-size: clamp(32px, 8vw, 42px); }
+  .urban-polish .urban-welcome-description { font-size: 16px; margin-bottom: 28px; }
+  .urban-polish .urban-suggestions { grid-template-columns: 1fr; gap: 12px; }
+  .urban-polish .urban-suggestion { min-height: 0; padding: 18px 42px 18px 18px; gap: 6px; border-radius: 14px; }
+  .urban-polish .urban-suggestion-arrow { position: absolute; right: 18px; top: 18px; }
+  .urban-polish .urban-composer-area { padding: 16px 12px max(12px, env(safe-area-inset-bottom)); }
+  .urban-polish .urban-composer textarea { padding: 18px 18px 66px; min-height: 124px; font-size: 16px; }
+  .urban-polish .urban-composer-left { left: 10px; bottom: 10px; }
+  .urban-polish .urban-composer-right { right: 10px; bottom: 10px; gap: 8px; }
+  .urban-polish .urban-message-surface { padding: 16px; }
+  .urban-polish .urban-message > div > div { gap: 10px; }
+  .urban-polish .urban-message > div > div > .flex-shrink-0 { width: 30px; height: 30px; border-radius: 9px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .urban-polish *, .urban-polish *::before, .urban-polish *::after {
+    animation: none !important; transition: none !important; scroll-behavior: auto !important;
+  }
+}

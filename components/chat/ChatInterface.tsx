@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, MotionConfig, useReducedMotion } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -552,10 +552,24 @@ export default function ChatInterface() {
 
   const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const reduceMotion = useReducedMotion();
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isLoading]);
+    if (!isModeMenuOpen) return;
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsModeMenuOpen(false);
+        document.getElementById("urban-mode-toggle")?.focus();
+      }
+    };
+    document.addEventListener("keydown", onEscape);
+    return () => document.removeEventListener("keydown", onEscape);
+  }, [isModeMenuOpen]);
+
+  useEffect(() => {
+    if (messages.length) endRef.current?.scrollIntoView({ behavior: reduceMotion ? "auto" : "smooth", block: "end" });
+  }, [messages, isLoading, reduceMotion]);
 
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -721,19 +735,43 @@ export default function ChatInterface() {
     }
   };
 
-  const onKeyDown: React.KeyboardEventHandler<HTMLInputElement> = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+  const onKeyDown: React.KeyboardEventHandler<HTMLTextAreaElement> = (e) => {
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSend();
     }
   };
 
   return (
-    <div className="flex h-full flex-col bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-100">
-      <div className="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
-      <div className="mx-auto w-full max-w-7xl space-y-6 px-6 sm:px-8 lg:px-12">
+    <MotionConfig reducedMotion="user">
+    <div className="urban-polish flex h-full flex-col bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-slate-100">
+      <header className="urban-header border-b border-white/5">
+        <div className="urban-brand">
+          <SparklesIcon className="h-5 w-5" />
+          <span>Urban AI Assistant</span>
+        </div>
+        <motion.button
+          whileTap={{ scale: 0.96 }}
+          className="urban-new-chat rounded-xl border border-white/10 bg-white/5 text-slate-200 hover:border-white/20 hover:bg-white/10"
+          disabled={isLoading || messages.length === 0}
+          onClick={() => {
+            if (!window.confirm("Start a new chat? This conversation is not saved after you clear it.")) return;
+            setMessages([]);
+            setError(null);
+            setInputValue("");
+            setUploadedFile(null);
+            setDrawingFile(null);
+            setIsModeMenuOpen(false);
+            inputRef.current?.focus();
+          }}
+        >
+          <span aria-hidden="true">+</span> New chat
+        </motion.button>
+      </header>
+      <div className={`urban-scroll flex-1 overflow-y-auto px-4 py-6 sm:px-6 ${messages.length === 0 ? "urban-empty" : ""}`}>
+      <div className="urban-thread mx-auto w-full max-w-7xl space-y-6 px-6 sm:px-8 lg:px-12">
           {messages.length === 0 ? (
-            <WelcomeScreen onSuggestionClick={(s) => handleSend(s)} />
+            <WelcomeScreen onSuggestionClick={(s) => { setInputValue(s); inputRef.current?.focus(); }} />
           ) : (
             <AnimatePresence>
               {messages.map((message) => (
@@ -746,10 +784,10 @@ export default function ChatInterface() {
             </AnimatePresence>
           )}
 
-          {isLoading && <LoadingIndicator />}
+          <div role="status" aria-live="polite" aria-atomic="true">{isLoading && <LoadingIndicator />}</div>
 
           {error && (
-            <div className="max-w-md rounded-lg border border-rose-700/40 bg-rose-950/40 px-3 py-2 text-xs text-rose-400">
+            <div role="alert" className="max-w-md rounded-lg border border-rose-700/40 bg-rose-950/40 px-3 py-2 text-xs text-rose-400">
               Backend error: {error}
             </div>
           )}
@@ -758,32 +796,38 @@ export default function ChatInterface() {
         </div>
       </div>
 
-      <div className="border-t border-white/5 bg-black/20 p-4 backdrop-blur-xl sm:p-6">
-      <div className="mx-auto w-full max-w-7xl px-6 sm:px-8 lg:px-12">
-          <div className="relative">
-            <input
-              type="text"
+      <div className="urban-composer-area border-t border-white/5 bg-black/20 p-4 backdrop-blur-xl sm:p-6">
+      <div className="urban-composer-width mx-auto w-full max-w-7xl px-6 sm:px-8 lg:px-12">
+          <div className="urban-composer relative">
+            <label htmlFor="urban-message-input" className="sr-only">Your question</label>
+            <textarea
+              id="urban-message-input"
+              ref={inputRef}
+              rows={3}
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={onKeyDown}
-              placeholder="Ask anything"
+              placeholder="Ask a question about planning or construction…"
               className="w-full rounded-2xl border border-white/10 bg-white/5 py-4 pl-10 pr-32 text-sm transition-all placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500/50"
               disabled={isLoading}
             />
 
-            <div className="absolute left-2 top-1/2 -translate-y-1/2">
+            <div className="urban-composer-left absolute left-2 bottom-2">
               <div className="relative">
                 <button
                   type="button"
                   onClick={() => setIsModeMenuOpen((v) => !v)}
                   className="flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-slate-900/80 text-base leading-none text-slate-200 hover:bg-slate-800"
+                  id="urban-mode-toggle"
                   aria-label="Select mode"
+                  aria-expanded={isModeMenuOpen}
+                  aria-controls="urban-mode-options"
                 >
                   +
                 </button>
 
                 {isModeMenuOpen && (
-                  <div className="absolute bottom-10 left-0 w-44 rounded-xl border border-white/10 bg-slate-900/95 py-1 text-xs text-slate-100 shadow-lg">
+                  <div id="urban-mode-options" className="absolute bottom-10 left-0 w-44 rounded-xl border border-white/10 bg-slate-900/95 py-1 text-xs text-slate-100 shadow-lg">
                     {[
                       { id: "auto", label: "Auto (default)" },
                       { id: "feasibility", label: "Feasibility" },
@@ -816,7 +860,7 @@ export default function ChatInterface() {
               </div>
             </div>
 
-            <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-2">
+            <div className="urban-composer-right absolute right-2 bottom-2 flex items-center gap-2">
               <label
                 className="flex h-8 w-8 cursor-pointer items-center justify-center rounded-xl border border-white/10 bg-slate-900/80 text-xs text-slate-300 hover:bg-slate-800/90"
                 title="Attach file"
@@ -824,7 +868,8 @@ export default function ChatInterface() {
                 <input
                   type="file"
                   onChange={handleFileUpload}
-                  className="hidden"
+                  className="sr-only"
+                  aria-label="Attach file"
                   accept=".pdf,.png,.jpg,.jpeg,.docx"
                   disabled={isLoading}
                 />
@@ -834,9 +879,11 @@ export default function ChatInterface() {
               <button
                 type="button"
                 className="flex h-8 w-8 items-center justify-center rounded-xl border border-white/10 bg-slate-900/80 text-xs text-slate-300 hover:bg-slate-800/90"
-                aria-label="Voice input"
+                aria-label="Voice input unavailable in this version"
+                title="Voice input unavailable in this version"
+                disabled
               >
-                🎤
+                <Svg className="h-4 w-4"><rect x="9" y="2" width="6" height="12" rx="3" /><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-3 0h6" /></Svg>
               </button>
 
               <button
@@ -930,6 +977,7 @@ export default function ChatInterface() {
         </div>
       </div>
     </div>
+    </MotionConfig>
   );
 }
 
@@ -942,37 +990,42 @@ function WelcomeScreen({
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="py-12 text-center"
+      transition={{ duration: 0.65, ease: [0.16, 1, 0.3, 1] }}
+      className="urban-welcome py-12 text-center"
     >
       <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-500 to-purple-600 shadow-[0_0_48px_rgba(168,85,247,.4)]">
         <SparklesIcon className="h-10 w-10 text-white" />
       </div>
 
-      <h2 className="mb-4 text-4xl font-bold">
-        Welcome to{" "}
+      <h1 className="urban-heading mb-4 text-4xl font-bold">
+        A clearer view.<br />
         <span className="bg-gradient-to-r from-blue-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
-          Urban AI Assistant
+          A better decision.
         </span>
-      </h2>
+      </h1>
 
-      <p className="mb-12 text-lg text-slate-300">
+      <p className="urban-welcome-description mb-12 text-lg text-slate-300">
         Grounded regulatory answers with citations, page references, and
         clause-level support
       </p>
 
       <p className="mb-4 text-sm text-slate-400">Try asking:</p>
 
-      <div className="mx-auto grid max-w-3xl grid-cols-1 gap-3">
+      <div className="urban-suggestions mx-auto grid max-w-3xl grid-cols-1 gap-3">
         {suggestions.map((suggestion, i) => (
           <motion.button
             key={i}
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
-            transition={{ delay: 0.2 + i * 0.08 }}
+            transition={{ delay: 0.15 + i * 0.07, duration: 0.4 }}
+            whileHover={{ y: -4 }}
+            whileTap={{ scale: 0.98 }}
             onClick={() => onSuggestionClick(suggestion)}
-            className="w-full rounded-xl border border-white/10 bg-white/5 px-5 py-4 text-left text-sm text-slate-200 transition-all hover:border-white/20 hover:bg-white/10"
+            className="urban-suggestion w-full rounded-xl border border-white/10 bg-white/5 px-5 py-4 text-left text-sm text-slate-200 transition-all hover:border-white/20 hover:bg-white/10"
           >
-            "{suggestion}"
+            <span className="urban-suggestion-label">{["Firefighting access", "External fire spread", "Means of escape"][i]}</span>
+            <span>{suggestion}</span>
+            <span className="urban-suggestion-arrow" aria-hidden="true">↗</span>
           </motion.button>
         ))}
       </div>
@@ -1052,7 +1105,7 @@ function MessageBubble({
       initial={{ opacity: 0, y: 18 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, y: -12 }}
-      className="w-full"
+      className={`urban-message w-full ${isUser ? "urban-user-message" : "urban-assistant-message"}`}
     >
       <div className="mx-auto w-full max-w-5xl">
       <div className={`flex gap-4 ${isUser ? "justify-end" : "justify-start"}`}>
@@ -1064,7 +1117,7 @@ function MessageBubble({
 
   <div className={`w-full ${isUser ? "max-w-2xl" : "max-w-5xl"}`}>
     <div
-      className={`px-6 py-5 rounded-2xl ${
+      className={`urban-message-surface px-6 py-5 rounded-2xl ${
         isUser
           ? "ml-auto max-w-[720px] border border-blue-500/20 bg-gradient-to-br from-blue-600/20 to-purple-600/20"
           : "w-full max-w-[980px] border border-white/10 bg-white/5"
@@ -1211,6 +1264,7 @@ function MessageBubble({
 }
 
 function LoadingIndicator() {
+  const reduceMotion = useReducedMotion();
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex gap-4">
       <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-pink-500">
@@ -1219,13 +1273,14 @@ function LoadingIndicator() {
 
       <div className="flex-1">
         <div className="max-w-xs rounded-2xl border border-white/10 bg-white/5 px-6 py-4">
-          <div className="flex gap-2">
+          <span className="sr-only">Preparing your answer</span>
+          <div className="flex gap-2" aria-hidden="true">
             {[0, 1, 2].map((i) => (
               <motion.div
                 key={i}
                 className="h-2 w-2 rounded-full bg-purple-400"
-                animate={{ scale: [1, 1.5, 1], opacity: [0.5, 1, 0.5] }}
-                transition={{ duration: 1, repeat: Infinity, delay: i * 0.2 }}
+                animate={reduceMotion ? { scale: 1, opacity: 0.7 } : { scale: [1, 1.5, 1], opacity: [0.5, 1, 0.5] }}
+                transition={reduceMotion ? { duration: 0 } : { duration: 1, repeat: Infinity, delay: i * 0.2 }}
               />
             ))}
           </div>
