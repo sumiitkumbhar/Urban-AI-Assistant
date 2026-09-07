@@ -7,12 +7,18 @@
 // + Document/Web source separation + inline citations + references block
 // =============================================================================
 
-import { createClient } from "@supabase/supabase-js";
-import { GoogleGenAI } from "@google/genai";
+import { getSupabase } from "@/lib/supabase";
+import { generateEmbedding } from "@/lib/embeddings";
 import Groq from "groq-sdk";
 import { NextResponse } from "next/server";
 import { detectDiagramIntent } from "@/lib/diagram-intent-detector";
 import { loadQuestionPatterns } from "@/lib/question-patterns-store";
+import {
+  searchUserDocumentChunks,
+  getAllUserDocumentChunks,
+  type UserDocChunkMatch,
+} from "@/lib/userDocuments";
+import { correctDomainTerms } from "@/lib/domain-vocabulary";
 
 export const runtime = "nodejs";
 
@@ -21,7 +27,25 @@ export const runtime = "nodejs";
 // =============================================================================
 
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY || "";
-const GROQ_CHAT_MODEL = "llama-3.3-70b-versatile";
+// Google Programmable Search Engine (Custom Search JSON API) - free, no
+// credit card required for the 100 queries/day tier. Preferred web-fallback
+// provider; Tavily above is used only if these aren't set.
+const GOOGLE_CSE_API_KEY = process.env.GOOGLE_CSE_API_KEY || "";
+const GOOGLE_CSE_ID = process.env.GOOGLE_CSE_ID || "";
+// llama-3.3-70b-versatile / llama-3.1-8b-instant both 404 as
+// model_not_found (confirmed via a live error from Groq) - Groq moved the
+// Llama models to Enterprise-only. Per Groq's own rate-limits docs, the
+// models still on the free (no billing, just capped) plan are the
+// openai/gpt-oss-* models, groq/compound(-mini), and a couple of
+// small/audio models. Using the smaller 20b variant deliberately - lighter
+// model, more headroom under the free-tier rate cap before it throttles,
+// which matters now that a single request makes several Groq calls
+// (rerank, generate, groundedness). Overridable via env so a future swap
+// (e.g. to openai/gpt-oss-120b for better quality) is just a .env.local
+// change, no code deploy - check console.groq.com/docs/rate-limits while
+// logged into the account that owns GROQ_API_KEY for the current free list.
+const GROQ_CHAT_MODEL =
+  process.env.GROQ_CHAT_MODEL || "openai/gpt-oss-20b";
 
 // Clients below are constructed lazily (on first use inside a request),
 // not at module load. Next.js's build step ("Collecting page data")
@@ -32,35 +56,9 @@ const GROQ_CHAT_MODEL = "llama-3.3-70b-versatile";
 // this to request time lets the app build without secrets and fail with
 // a clear error only if a request actually comes in unconfigured.
 
-// Typed as `any`: this matches how the original eager
-// `const supabase = createClient(...)` was consumed elsewhere in this file
-// (no Database generic was ever supplied). `ReturnType<typeof createClient>`
-// resolves the generic differently and made `.rpc()`'s argument type collapse
-// to `undefined`, so it is avoided here rather than fighting it.
-let _supabase: any = null;
-function getSupabase() {
-  if (!_supabase) {
-    const url = process.env.SUPABASE_URL;
-    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
-    if (!url || !key) {
-      throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
-    }
-    _supabase = createClient(url, key);
-  }
-  return _supabase;
-}
-
-let _ai: GoogleGenAI | null = null;
-function getAI() {
-  if (!_ai) {
-    const key = process.env.GOOGLE_API_KEY;
-    if (!key) {
-      throw new Error("Missing GOOGLE_API_KEY");
-    }
-    _ai = new GoogleGenAI({ apiKey: key });
-  }
-  return _ai;
-}
+// getSupabase() now lives in lib/supabase.ts (shared with the new
+// /api/conversations routes) - same lazy-construction behavior as before,
+// just deduplicated instead of redefined per route file.
 
 let _groq: Groq | null = null;
 function getGroq() {
@@ -131,6 +129,10 @@ interface EnhancedChunk {
   distance: number;
   indexed_at: string;
   updated_at: string | null;
+  // Set by rerankWithGroq() for whichever top candidates it scored;
+  // undefined for chunks it didn't reach. rankRetrievedChunks() folds
+  // this into its finalScore when present.
+  _llmRelevance?: number;
 }
 
 interface TransformedCitation {
@@ -152,6 +154,13 @@ interface TransformedCitation {
 
 interface RagRequest {
   query: string;
+  // Conversation memory (optional - see sql/chat_history_setup.sql and
+  // lib/visitorId.ts): visitorId scopes saved chats per-browser with no
+  // login; conversationId continues an existing one. Both absent means
+  // "don't persist this turn" - the chat still answers exactly as before
+  // this feature existed.
+  conversationId?: string;
+  visitorId?: string;
   region?: "india" | "uk" | "usa" | null;
   topK?: number;
   threshold?: number;
@@ -169,6 +178,13 @@ interface RagRequest {
     useClass?: string;
   };
   drawingFile?: File | Blob | string;
+  // Set by the chat UI when the user is in hands-free voice conversation
+  // (see lib/useVoiceChat.ts / components/chat/ChatInterface.tsx). When
+  // true, the response also includes a short, natural, spoken-style
+  // rewrite of the answer (data.speechText) - the on-screen `answer`
+  // itself is unchanged, still fully cited, for anyone reading rather
+  // than listening.
+  voiceMode?: boolean;
 }
 
 type DiagramKind = "annotated_object" | "buildable_envelope";
@@ -206,11 +222,20 @@ interface RagResponse {
     }>;
     feasibilityReport?: any;
     drawingValidation?: any;
+    speechText?: string;
+    // Domain terms the speech recognizer (or a typo) mangled, corrected
+    // before retrieval - see lib/domain-vocabulary.ts. Surfaced so a wrong
+    // guess is visible and challengeable rather than silently changing
+    // which question got answered.
+    corrections?: Array<{ from: string; to: string; confidence: number }>;
   };
   metadata?: {
     processing_time?: number;
     confidence?: number;
     webFallbackUsed?: boolean;
+    groundedness?: number | null;
+    unsupportedClaims?: string[];
+    conversationId?: string;
   };
   error?: string;
 }
@@ -219,41 +244,8 @@ interface RagResponse {
 // HELPERS
 // =============================================================================
 
-const GEMINI_EMBEDDING_MODEL =
-  process.env.GEMINI_EMBEDDING_MODEL || "gemini-embedding-001";
-
-// The Supabase `chunks.embedding` column is vector(768) (chosen to keep
-// storage/compute cheap on the free tier), but gemini-embedding-001 defaults
-// to 3072 dimensions. Requesting outputDimensionality here truncates to match
-// the column - without it, every query vector would be 3072-dim and Postgres
-// would reject the RPC call outright with a dimension mismatch.
-const EMBEDDING_DIMENSIONS = 768;
-
-async function generateEmbedding(text: string): Promise<number[]> {
-  const cleanText = text.trim();
-  if (!cleanText) {
-    throw new Error("Cannot generate embedding for empty text");
-  }
-
-  const response = await getAI().models.embedContent({
-    model: GEMINI_EMBEDDING_MODEL,
-    contents: cleanText,
-    config: { outputDimensionality: EMBEDDING_DIMENSIONS },
-  });
-
-  const values = response.embeddings?.[0]?.values;
-  if (!values?.length) {
-    throw new Error("Embedding API returned no values");
-  }
-
-  // Google's docs: gemini-embedding-001 does NOT auto-normalize truncated
-  // (non-3072-dim) output the way newer models do, so it must be normalized
-  // to unit length manually here to match how the ingestion pipeline must
-  // also normalize before storing (see lib/chromaIngest.ts).
-  const raw = Array.from(values);
-  const norm = Math.sqrt(raw.reduce((sum, v) => sum + v * v, 0));
-  return norm > 0 ? raw.map((v) => v / norm) : raw;
-}
+// GEMINI_EMBEDDING_MODEL, EMBEDDING_DIMENSIONS, generateEmbedding now live in
+// lib/embeddings.ts (shared with the ingestion pipeline - see import above).
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -296,11 +288,16 @@ function mapDocKindToCitationKind(docKind: string): string {
     standard: "technical_standard",
     guideline: "technical_standard",
     rate: "rate_schedule",
+    user_upload: "user_upload",
   };
   return kindMap[String(docKind || "").toLowerCase()] || "government_doc";
 }
 
 function buildDocSourceLabel(chunk: EnhancedChunk, index: number): string {
+  if (chunk.doc_kind === "user_upload") {
+    const page = chunk.page_from ? ` • p.${chunk.page_from}` : "";
+    return `Your upload${page}`;
+  }
   const page = chunk.page_from ? `p.${chunk.page_from}` : "p.n/a";
   const clause = chunk.clause_label ? `, Cl.${chunk.clause_label}` : "";
   return `D${index + 1} • ${page}${clause}`;
@@ -316,7 +313,13 @@ function stripChunkMetadata(text: string) {
     .replace(/\[KEYWORDS\]:?[^\n]*/gi, "")
     .replace(/\[NEXT_PAGE\]:?[^\n]*/gi, "")
     .replace(/\[PREV_PAGE\]:?[^\n]*/gi, "")
-    .replace(/\s{2,}/g, " ")
+    // Only squash runs of horizontal whitespace, not newlines - this
+    // function is also run on the final generated answer (see
+    // sanitizeEvidenceText's callers), whose markdown structure
+    // (### headings, paragraph breaks, lists) depends on blank lines.
+    // Collapsing \s (which matches \n too) used to flatten "### Notes"
+    // straight into the previous sentence with no line break at all.
+    .replace(/[ \t]{2,}/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
@@ -387,7 +390,10 @@ function normalizeSentenceSpacing(text: string) {
     .replace(/([a-z])([A-Z]{2,})/g, "$1 $2")
     .replace(/([a-z])\(/g, "$1 (")
     .replace(/\)\(/g, ") (")
-    .replace(/\s{2,}/g, " ")
+    // Same reasoning as stripChunkMetadata above - preserve newlines so
+    // this stays safe to run on generated answer markdown, not just
+    // citation excerpts.
+    .replace(/[ \t]{2,}/g, " ")
     .trim();
 }
 
@@ -534,8 +540,9 @@ function dedupeCitations(
   citations: TransformedCitation[]
 ): TransformedCitation[] {
   const seen = new Set<string>();
+  const kept: TransformedCitation[] = [];
 
-  return citations.filter((c) => {
+  for (const c of citations) {
     const normalizedExcerpt = (c.excerpt || "")
       .toLowerCase()
       .replace(/\s+/g, " ")
@@ -550,10 +557,26 @@ function dedupeCitations(
       normalizedExcerpt,
     ].join("|");
 
-    if (seen.has(key)) return false;
+    if (seen.has(key)) continue;
     seen.add(key);
-    return true;
-  });
+
+    // Beyond exact-ish repeats, two citations can quote substantially
+    // the same passage from slightly different chunk-window offsets -
+    // that key above treats them as distinct sources, but to someone
+    // reading the Sources panel they're the same evidence twice. Drop
+    // the later, lower-ranked one (wordOverlapRatio is defined alongside
+    // diversifyChunks() above).
+    const isNearDuplicateOfKept = kept.some(
+      (k) =>
+        wordOverlapRatio(k.fullText || k.excerpt || "", c.fullText || c.excerpt || "") >=
+        0.72
+    );
+    if (isNearDuplicateOfKept) continue;
+
+    kept.push(c);
+  }
+
+  return kept;
 }
 
 function calculateConfidence(avgDistance: number, chunkCount: number): number {
@@ -656,6 +679,24 @@ function isThresholdQuery(query: string): boolean {
     q.includes("18m") ||
     q.includes("firefighting shaft") ||
     q.includes("regulation 38")
+  );
+}
+
+// "Summarize this document" (and similar: overview, tl;dr, key/main
+// points, rundown, brief me) needs different retrieval and selection
+// behavior from a normal question - see the STEP 1.25 retrieval merge
+// and chooseChunksForAnswer() below, both of which check this.
+function isSummarizeIntent(query: string): boolean {
+  const q = lower(query);
+  return (
+    q.includes("summar") || // summary/summarize/summarise/summarising
+    q.includes("overview") ||
+    q.includes("tl;dr") ||
+    q.includes("tldr") ||
+    q.includes("key points") ||
+    q.includes("main points") ||
+    q.includes("rundown") ||
+    q.includes("brief me")
   );
 }
 
@@ -817,6 +858,57 @@ function reRankByCitations(
   });
 }
 
+// --- DIVERSITY ---
+// The retrieval pool often contains several chunks that are really the
+// same passage seen through overlapping chunk windows (or a clause
+// repeated near-verbatim in two places in a document). Left alone, those
+// crowd out genuinely different evidence in both what the model reads
+// and what shows up in the Sources panel. wordOverlapRatio is a cheap,
+// dependency-free stand-in for a real similarity model - fine at this
+// scale (a few dozen short chunks per request) and good enough to catch
+// "this is basically the same paragraph again".
+function wordOverlapRatio(a: string, b: string): number {
+  const wordsOf = (s: string) =>
+    new Set(
+      lower(s)
+        .slice(0, 500)
+        .split(/\W+/)
+        .filter((w) => w.length > 3)
+    );
+
+  const setA = wordsOf(a);
+  const setB = wordsOf(b);
+  if (setA.size === 0 || setB.size === 0) return 0;
+
+  let overlap = 0;
+  for (const w of setA) if (setB.has(w)) overlap++;
+
+  return overlap / Math.min(setA.size, setB.size);
+}
+
+// Greedy diversity pass over already-ranked chunks: keeps relevance
+// order intact, but a chunk that's a near-duplicate of one already kept
+// gets deferred to the end of the list rather than dropped outright - so
+// if an answer genuinely needs that many sources, nothing is lost, it's
+// just no longer competing with its own near-duplicate for the first N
+// slots that chooseChunksForAnswer() and the Sources panel actually use.
+function diversifyChunks(
+  chunks: EnhancedChunk[],
+  similarityThreshold = 0.72
+): EnhancedChunk[] {
+  const kept: EnhancedChunk[] = [];
+  const deferred: EnhancedChunk[] = [];
+
+  for (const chunk of chunks) {
+    const isNearDuplicate = kept.some(
+      (k) => wordOverlapRatio(k.content || "", chunk.content || "") >= similarityThreshold
+    );
+    (isNearDuplicate ? deferred : kept).push(chunk);
+  }
+
+  return [...kept, ...deferred];
+}
+
 function rankRetrievedChunks(
   query: string,
   chunks: EnhancedChunk[]
@@ -973,7 +1065,12 @@ function rankRetrievedChunks(
       penalty += 0.1;
     }
 
-    const finalScore = 1 - chunk.distance + boost - penalty;
+    const llmBoost =
+      typeof chunk._llmRelevance === "number"
+        ? (chunk._llmRelevance / 10) * 0.3
+        : 0;
+
+    const finalScore = 1 - chunk.distance + boost - penalty + llmBoost;
 
     return {
       ...chunk,
@@ -1026,9 +1123,52 @@ function shouldUseWebFallback(query: string, chunks: EnhancedChunk[]): boolean {
   return avgDistance > 0.55;
 }
 
-async function fetchWebFallback(query: string): Promise<TransformedCitation[]> {
-  if (!TAVILY_API_KEY) return [];
+async function fetchWebFallbackViaGoogleCSE(
+  query: string
+): Promise<TransformedCitation[]> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
 
+  try {
+    const url = new URL("https://www.googleapis.com/customsearch/v1");
+    url.searchParams.set("key", GOOGLE_CSE_API_KEY);
+    url.searchParams.set("cx", GOOGLE_CSE_ID);
+    url.searchParams.set("q", query);
+    url.searchParams.set("num", "3");
+
+    const res = await fetch(url.toString(), { signal: controller.signal });
+    if (!res.ok) return [];
+
+    const json = await res.json();
+    const items = Array.isArray(json?.items) ? json.items : [];
+
+    return items.map((r: any, index: number) => ({
+      id: `W${index + 1}`,
+      title: r.title || `Web Source ${index + 1}`,
+      type: "web",
+      sourceType: "web",
+      pageNumber: undefined,
+      clauseNumber: undefined,
+      section: undefined,
+      fullText: sanitizeEvidenceText(r.snippet || ""),
+      excerpt: buildExcerpt(r.snippet || "", 220),
+      confidence: 62,
+      lastUpdated: new Date().toISOString(),
+      directLink: r.link,
+      sourceLabel: `W${index + 1} • taken from web`,
+      _raw: r,
+    }));
+  } catch (error) {
+    console.error("Web fallback (Google CSE) failed:", error);
+    return [];
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fetchWebFallbackViaTavily(
+  query: string
+): Promise<TransformedCitation[]> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8000);
 
@@ -1071,11 +1211,23 @@ async function fetchWebFallback(query: string): Promise<TransformedCitation[]> {
       _raw: r,
     }));
   } catch (error) {
-    console.error("Web fallback failed:", error);
+    console.error("Web fallback (Tavily) failed:", error);
     return [];
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function fetchWebFallback(query: string): Promise<TransformedCitation[]> {
+  // Google Custom Search is the preferred provider (free, no card required).
+  // Tavily is used only as a fallback if someone configures it instead/also.
+  if (GOOGLE_CSE_API_KEY && GOOGLE_CSE_ID) {
+    return fetchWebFallbackViaGoogleCSE(query);
+  }
+  if (TAVILY_API_KEY) {
+    return fetchWebFallbackViaTavily(query);
+  }
+  return [];
 }
 
 function buildDocumentContext(chunks: EnhancedChunk[]): string {
@@ -1100,6 +1252,16 @@ function chooseChunksForAnswer(
   query: string,
   chunks: EnhancedChunk[]
 ): EnhancedChunk[] {
+  if (isSummarizeIntent(query)) {
+    const docChunks = chunks.filter((c) => c.doc_kind === "user_upload");
+    if (docChunks.length) {
+      const corpusChunks = chunks
+        .filter((c) => c.doc_kind !== "user_upload")
+        .slice(0, 8);
+      return [...docChunks, ...corpusChunks];
+    }
+  }
+
   const top = chunks.slice(0, 8);
 
   if (isRequirementDefinitionQuery(query)) {
@@ -1412,7 +1574,15 @@ function hasJurisdictionMismatch(
 
 function getTopSimilarityScore(chunks: EnhancedChunk[]): number {
   if (!chunks.length) return 0;
-  return 1 - (chunks[0].distance ?? 1);
+  // Deliberately NOT chunks[0]: chunks is sorted by a keyword-boosted
+  // finalScore (see rankRetrievedChunks), not by raw distance, so index 0
+  // is not guaranteed to be the best actual semantic match. Take the max
+  // raw similarity across all retrieved chunks instead, matching how each
+  // citation's own confidence badge is computed.
+  return chunks.reduce(
+    (max, c) => Math.max(max, 1 - (c.distance ?? 1)),
+    0
+  );
 }
 
 function isOutsideDatasetQuery(query: string): boolean {
@@ -1422,6 +1592,9 @@ function isOutsideDatasetQuery(query: string): boolean {
 
   return false;
 }
+
+const WEB_FALLBACK_NOTICE =
+  "> \u26A0\uFE0F This wasn't found in the indexed regulatory documents. The answer below is based on a general web search instead \u2014 see the [W#] sources for where it came from.";
 
 function buildOutsideDatasetAnswer(): string {
   return `
@@ -1951,30 +2124,8 @@ Query: ${query}`;
 // SEARCH + ANSWER GENERATION
 // =============================================================================
 
-async function searchRAG(
-  query: string,
-  region: "india" | "uk" | "usa" | null,
-  topK = 25,
-  threshold = 0.3
-): Promise<EnhancedChunk[]> {
-  const optimizedQuery = optimizeQuery(query);
-  const embedding = await generateEmbedding(optimizedQuery);
-
-  const { data, error } = await getSupabase().rpc("match_rag_chunks", {
-    query_embedding: embedding,
-    match_threshold: 1 - threshold,
-    match_count: topK,
-    filter_region: region || null,
-  });
-
-  if (error) {
-    console.error("searchRAG RPC error:", error);
-    throw new Error(`RAG search failed: ${error.message}`);
-  }
-
-  const rows = Array.isArray(data) ? data : [];
-
-  return rows.map((row: any) => ({
+function mapRagRow(row: any): EnhancedChunk {
+  return {
     id: Number(row.id),
     region: String(row.region || ""),
     jurisdiction: String(row.jurisdiction || row.region || ""),
@@ -2025,7 +2176,219 @@ async function searchRAG(
         : Number(row.distance ?? 1),
     indexed_at: String(row.indexed_at || new Date().toISOString()),
     updated_at: row.updated_at ?? null,
-  }));
+  };
+}
+
+// Maps a per-conversation user-upload chunk (lib/userDocuments.ts,
+// UserDocChunkMatch) into the same EnhancedChunk shape corpus chunks use,
+// so it can flow through reranking/generation/citation-building unchanged.
+// Negative ids keep these visually distinct from corpus chunk ids (both
+// come from separate bigserial sequences and could otherwise collide) -
+// nothing here actually keys off chunk.id, but it costs nothing to be safe.
+function mapUserDocRow(row: UserDocChunkMatch): EnhancedChunk {
+  return {
+    id: -row.id,
+    region: "",
+    jurisdiction: "",
+    doc_title: row.doc_filename,
+    doc_path: "",
+    doc_kind: "user_upload",
+    doc_authority: null,
+    doc_publication_date: null,
+    doc_version: null,
+    page_from: row.page_number,
+    page_to: row.page_number,
+    line_from: null,
+    line_to: null,
+    citation_type: null,
+    citation_value: null,
+    citation_full: null,
+    clause_label: null,
+    all_clauses: null,
+    section_heading: null,
+    section_hierarchy: null,
+    cross_refs: null,
+    table_refs: null,
+    schedule_refs: null,
+    annexure_refs: null,
+    has_table: false,
+    has_formula: false,
+    keywords: null,
+    topic: null,
+    subtopic: null,
+    content: row.content,
+    distance: row.distance,
+    indexed_at: new Date().toISOString(),
+    updated_at: null,
+  };
+}
+
+// Reciprocal Rank Fusion: combines two independently-ranked lists (dense
+// vector similarity, and Postgres full-text ts_rank) by RANK POSITION
+// rather than raw score - the two scores live on incomparable scales
+// (cosine distance vs. a text-frequency rank), but "how far down each
+// list is this result" is directly comparable. A chunk that shows up
+// well-ranked in both lists floats to the top; one that only one search
+// method found still gets a fair shot instead of being dropped. k=60 is
+// the standard RRF constant from the original paper - it just controls
+// how quickly rank position stops mattering as you go deeper into a list.
+const RRF_K = 60;
+
+function fuseWithRRF(vectorRows: any[], fulltextRows: any[]): any[] {
+  const scores = new Map<string, number>();
+  const rowById = new Map<string, any>();
+
+  vectorRows.forEach((row, rank) => {
+    const id = String(row.id);
+    scores.set(id, (scores.get(id) || 0) + 1 / (RRF_K + rank + 1));
+    rowById.set(id, row);
+  });
+
+  fulltextRows.forEach((row, rank) => {
+    const id = String(row.id);
+    scores.set(id, (scores.get(id) || 0) + 1 / (RRF_K + rank + 1));
+    // A chunk full-text search found that vector search didn't surface
+    // still needs a row to map from - match_rag_chunks_fulltext computes
+    // a real cosine distance for it too, so it's just as usable.
+    if (!rowById.has(id)) rowById.set(id, row);
+  });
+
+  return Array.from(scores.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([id]) => rowById.get(id));
+}
+
+async function searchRAG(
+  query: string,
+  region: "india" | "uk" | "usa" | null,
+  topK = 25,
+  threshold = 0.3
+): Promise<EnhancedChunk[]> {
+  const optimizedQuery = optimizeQuery(query);
+  const embedding = await generateEmbedding(optimizedQuery);
+
+  const [vectorResult, fulltextResult] = await Promise.all([
+    getSupabase().rpc("match_rag_chunks", {
+      query_embedding: embedding,
+      match_threshold: 1 - threshold,
+      match_count: topK,
+      filter_region: region || null,
+    }),
+    getSupabase().rpc("match_rag_chunks_fulltext", {
+      query_text: optimizedQuery,
+      query_embedding: embedding,
+      match_count: topK,
+      filter_region: region || null,
+    }),
+  ]);
+
+  if (vectorResult.error) {
+    console.error("searchRAG vector RPC error:", vectorResult.error);
+    throw new Error(`RAG search failed: ${vectorResult.error.message}`);
+  }
+
+  const vectorRows = Array.isArray(vectorResult.data) ? vectorResult.data : [];
+
+  // Full-text is an enhancement, not a hard requirement: if
+  // match_rag_chunks_fulltext isn't installed yet (sql/hybrid_search_setup.sql
+  // not run) or errors for any other reason, fall back to vector-only
+  // results instead of failing the whole request.
+  let fulltextRows: any[] = [];
+  if (fulltextResult.error) {
+    console.warn(
+      "searchRAG fulltext RPC error (falling back to vector-only):",
+      fulltextResult.error.message
+    );
+  } else {
+    fulltextRows = Array.isArray(fulltextResult.data)
+      ? fulltextResult.data
+      : [];
+  }
+
+  console.log(
+    "⏱️ hybrid search:",
+    vectorRows.length,
+    "vector hits,",
+    fulltextRows.length,
+    "full-text hits"
+  );
+
+  return fuseWithRRF(vectorRows, fulltextRows).map(mapRagRow);
+}
+
+// LLM-as-reranker (Groq): scores the top candidates for how directly they
+// answer the query, so the final ordering reflects actual relevance
+// rather than only rank-fused retrieval position. Only touches the top
+// `limit` chunks (reranking is only worth the API call where it can
+// change what gets used) and never reorders on its own - it just attaches
+// a 0-10 _llmRelevance score, which rankRetrievedChunks() below folds
+// into its own finalScore alongside the existing domain-specific boosts.
+// Fails safe: any error just returns the chunks unmodified.
+async function rerankWithGroq(
+  query: string,
+  chunks: EnhancedChunk[],
+  limit = 15
+): Promise<EnhancedChunk[]> {
+  if (!chunks.length) return chunks;
+
+  const candidates = chunks.slice(0, limit);
+  const rest = chunks.slice(limit);
+
+  try {
+    const listing = candidates
+      .map((c, i) => `[${i}] ${buildExcerpt(c.content, 300)}`)
+      .join("\n\n");
+
+    const completion = await getGroq().chat.completions.create({
+      model: GROQ_CHAT_MODEL,
+      messages: [
+        {
+          role: "system",
+          content:
+            'You are a relevance-ranking judge for a document retrieval system. Score each numbered excerpt 0-10 for how directly it helps answer the QUESTION - 10 means it directly and specifically answers it, 0 means it is unrelated. Respond with JSON only, no other text: {"scores": [{"index": <int>, "score": <int 0-10>}, ...]} covering every index given.',
+        },
+        {
+          role: "user",
+          content: `QUESTION:\n${query}\n\nEXCERPTS:\n${listing}`,
+        },
+      ],
+      temperature: 0,
+      // gpt-oss models spend part of max_tokens on internal reasoning before
+      // emitting the final JSON content, so this needs real headroom above
+      // the old 800 (which was silently starving the JSON output). Also ask
+      // the model to keep reasoning light and out of the response entirely.
+      max_tokens: 1500,
+      top_p: 1,
+      reasoning_effort: "low",
+      include_reasoning: false,
+    } as any);
+
+    const raw = completion.choices?.[0]?.message?.content?.trim() || "";
+    const jsonText = extractFirstJsonObject(raw);
+    if (!jsonText) return chunks;
+
+    const parsed = JSON.parse(jsonText);
+    const scoreByIndex = new Map<number, number>();
+    if (Array.isArray(parsed?.scores)) {
+      for (const s of parsed.scores) {
+        const idx = Number(s?.index);
+        const score = Number(s?.score);
+        if (Number.isInteger(idx) && Number.isFinite(score)) {
+          scoreByIndex.set(idx, Math.max(0, Math.min(10, score)));
+        }
+      }
+    }
+
+    const scoredCandidates = candidates.map((c, i) => ({
+      ...c,
+      _llmRelevance: scoreByIndex.has(i) ? scoreByIndex.get(i) : undefined,
+    }));
+
+    return [...scoredCandidates, ...rest];
+  } catch (error) {
+    console.error("rerankWithGroq failed (continuing without it):", error);
+    return chunks;
+  }
 }
 
 async function generateAnswer(
@@ -2033,7 +2396,8 @@ async function generateAnswer(
   chunks: EnhancedChunk[],
   webCitations: TransformedCitation[],
   feasibilitySection = "",
-  drawingValidation?: any
+  drawingValidation?: any,
+  conversationContext = ""
 ): Promise<{
   answerMarkdown: string;
   missingCoverage: Array<{
@@ -2067,7 +2431,7 @@ You must follow these rules strictly:
 9. If document evidence is strong, do not rely on web.
 10. If feasibility or drawing data is provided, explain it without changing numeric values.`;
 
-  const userPrompt = `
+  const userPrompt = `${conversationContext}
 User query:
 ${query}
 
@@ -2218,7 +2582,7 @@ Return JSON only in this exact shape:
       answerMarkdown,
       missingCoverage,
     };
-  } catch (error) {
+  } catch (error: any) {
     console.error("generateAnswer failed:", error);
 
     return {
@@ -2231,6 +2595,500 @@ Return JSON only in this exact shape:
       ],
     };
   }
+}
+
+// =============================================================================
+// BASIC-INTELLIGENCE FALLBACK (general / meta / conversational questions)
+// =============================================================================
+//
+// The RAG pipeline above is deliberately strict: if nothing in the indexed
+// regulatory corpus (and no web fallback) supports an answer, it used to
+// dead-end into a canned "outside the indexed dataset" refusal - even for
+// questions that were never regulatory lookups to begin with, e.g. "hi",
+// "what can you do", or "if I upload a document can you tell me about it?".
+// Those deserve a normal, direct answer, not a retrieval-failure message.
+// This path handles them: no chunks, no citations, no invented clause
+// numbers - just the assistant answering as itself, honestly noting when a
+// specific regulatory fact isn't something it has indexed material on.
+const BASIC_ASSISTANT_SYSTEM_PROMPT = `You are the assistant embedded in Urban AI Assistant, a tool for construction regulations, urban planning, and real estate development across India, UK, and USA.
+
+What this tool can actually do (answer accurately about these when asked):
+- Answer regulatory/planning questions by searching an indexed corpus of official documents (building codes, planning policy, local plans) and citing them.
+- Let a user upload a document (e.g. a site plan, a letter, a planning document) into the current conversation; once uploaded, the assistant can search and summarize it and combine it with the regulatory corpus.
+- In Feasibility mode, accept an uploaded drawing/plan file and run a feasibility/setback/compliance check against it.
+- Generate diagrams (buildable envelopes, setbacks, plot layouts) when asked.
+
+You are being asked a question the strict document-retrieval pipeline could NOT answer from the indexed corpus or the web (either because it's a general/conversational/meta question rather than a lookup, or because the corpus genuinely has nothing relevant indexed yet).
+
+Rules:
+1. If this is a greeting, small talk, or a question about what the tool/you can do or how to use it, answer directly and helpfully and accurately based on the capability list above - do not say it's "outside the indexed dataset."
+2. If this is a genuine factual/regulatory question you have general knowledge about, you may answer from general knowledge, but say plainly that this isn't sourced from the indexed regulatory documents and should be verified against an official source before being relied on.
+3. Never invent specific clause numbers, page numbers, or exact figures and present them as being from an indexed document - you have no document context in this path.
+4. Keep the answer concise, natural, and in markdown. Do not fabricate citations like [D1] or [W1] - there are none here.`;
+
+async function generateBasicAnswer(
+  query: string,
+  conversationContext = ""
+): Promise<{
+  answerMarkdown: string;
+  missingCoverage: Array<{
+    questionPart: string;
+    resolvedFrom: "document" | "web" | "unresolved";
+  }>;
+}> {
+  try {
+    const userPrompt = `${conversationContext}
+User query:
+${query}
+
+Return JSON only in this exact shape:
+{
+  "answerMarkdown": "markdown answer, no [D#]/[W#] citations"
+}`.trim();
+
+    const completion = await getGroq().chat.completions.create({
+      model: GROQ_CHAT_MODEL,
+      messages: [
+        { role: "system", content: BASIC_ASSISTANT_SYSTEM_PROMPT },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.4,
+      max_tokens: 900,
+      top_p: 1,
+    });
+
+    const raw = completion.choices?.[0]?.message?.content?.trim() || "";
+    const jsonText = extractFirstJsonObject(raw);
+    const parsed = jsonText ? JSON.parse(jsonText) : null;
+
+    const answerMarkdown =
+      typeof parsed?.answerMarkdown === "string" && parsed.answerMarkdown.trim()
+        ? parsed.answerMarkdown.trim()
+        : raw || buildPartialCoverageAnswer();
+
+    return {
+      answerMarkdown,
+      missingCoverage: [
+        {
+          questionPart: query,
+          resolvedFrom: "unresolved",
+        },
+      ],
+    };
+  } catch (error) {
+    console.error("generateBasicAnswer failed:", error);
+    return {
+      answerMarkdown: buildOutsideDatasetAnswer(),
+      missingCoverage: [
+        {
+          questionPart: query,
+          resolvedFrom: "unresolved",
+        },
+      ],
+    };
+  }
+}
+
+// =============================================================================
+// VOICE-MODE HUMANIZER
+// =============================================================================
+//
+// generateAnswer()/generateBasicAnswer() write a correct, citation-backed
+// answer meant to be READ on screen. Speaking that same text verbatim
+// sounds like a document being read aloud (headings, citation brackets,
+// bullet lists) rather than a person talking - the exact gap between a
+// cascaded voice pipeline and something like ChatGPT's voice mode. This
+// takes the already-verified answer and asks the model to say the same
+// thing the way a knowledgeable person would say it out loud in a normal
+// conversation: short, warm, no new facts, nothing removed that changes
+// the meaning. Failure just means the caller falls back to the plain
+// stripped-markdown version (see lib/useVoiceChat.ts's sanitizeForSpeech)
+// - never blocks the text answer that's already been generated.
+async function humanizeForSpeech(
+  query: string,
+  answerMarkdown: string
+): Promise<string | null> {
+  try {
+    const completion = await getGroq().chat.completions.create({
+      model: GROQ_CHAT_MODEL,
+      messages: [
+        {
+          role: "system",
+          content: `You turn a written, cited regulatory answer into something a knowledgeable person would say OUT LOUD in a normal spoken conversation.
+
+Rules:
+1. Keep every fact, number, and conclusion exactly as given - never add, remove, or soften anything material.
+2. Drop section headings, citation markers like [D1]/[W1], and any "References" list - those are for reading, not listening.
+3. Turn bullet/numbered lists into a natural spoken sentence or two ("There are a couple of things here - first ..., and also ...").
+4. Keep it short: 2-5 sentences for a normal answer. Only go longer if the source answer is genuinely long and detailed.
+5. Warm, direct, conversational tone - like a knowledgeable colleague answering out loud, not a document being read.
+6. Plain text only - no markdown, no headers, no brackets.
+7. Sound like a person actually talking, not reading a script: a natural spoken filler ("so," "um," "you know") is fine at a real thinking-pause, but use it sparingly - at most once per answer, never mid-fact, and skip it entirely if the answer is already short and confident. Lean on commas, dashes, and short sentences for natural breathing rhythm instead of forcing fillers in.`,
+        },
+        {
+          role: "user",
+          content: `User asked: ${query}
+
+Written answer to convert:
+${answerMarkdown}`,
+        },
+      ],
+      temperature: 0.5,
+      max_tokens: 400,
+      top_p: 1,
+    });
+
+    const raw = completion.choices?.[0]?.message?.content?.trim();
+    return raw || null;
+  } catch (error) {
+    console.error("humanizeForSpeech failed:", error);
+    return null;
+  }
+}
+
+// =============================================================================
+// GROUNDEDNESS CHECK (LLM-as-judge, Ragas-style "faithfulness")
+// =============================================================================
+//
+// generateAnswer() writes an answer from retrieved chunks, but "the top
+// chunk was semantically close to the question" (topSimilarity / confidence)
+// is not the same claim as "the answer we wrote is actually backed by that
+// chunk." This runs a second, cheap Groq call whose ONLY job is to grade
+// the already-written answer against the same source excerpts it was
+// written from, and flag any claim that isn't actually supported. It never
+// throws into the main response path - any failure just yields a null
+// score, which the frontend can treat as "not available."
+async function checkGroundedness(
+  query: string,
+  answerMarkdown: string,
+  chunks: EnhancedChunk[],
+  webCitations: TransformedCitation[]
+): Promise<{ groundedness: number | null; unsupportedClaims: string[] }> {
+  try {
+    const documentContext = buildStrictDocumentContext(chunks);
+    const webContext = buildWebContext(webCitations);
+
+    if (!documentContext.trim() && !webContext.trim()) {
+      return { groundedness: null, unsupportedClaims: [] };
+    }
+
+    const systemPrompt = `You are a strict fact-checking judge. You do NOT answer questions - you only grade whether an already-written ANSWER is actually backed by the given SOURCE EXCERPTS.
+
+Score groundedness 0-100:
+- 100 = every substantive claim in the ANSWER is directly supported by the SOURCE EXCERPTS.
+- 50 = some claims are supported, others are not backed by the excerpts (invented, assumed, or from general knowledge instead of the excerpts).
+- 0 = the ANSWER is unsupported by, or contradicts, the SOURCE EXCERPTS.
+
+Do not reward good writing, confident tone, or plausibility. Only reward factual grounding in the given excerpts. List any specific claims in the ANSWER that are NOT backed by the excerpts (empty array if none).
+
+Respond with JSON only, no other text, no markdown fencing:
+{"groundedness": <integer 0-100>, "unsupportedClaims": ["short claim", "..."]}`;
+
+    const userPrompt = `QUESTION:
+${query}
+
+SOURCE EXCERPTS:
+${documentContext || "(none)"}
+${webContext ? `
+${webContext}` : ""}
+
+ANSWER TO GRADE:
+${answerMarkdown}`;
+
+    const completion = await getGroq().chat.completions.create({
+      model: GROQ_CHAT_MODEL,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0,
+      // Same reasoning-token starvation risk as rerankWithGroq: gpt-oss
+      // models can burn the whole max_tokens budget on hidden reasoning
+      // before writing the JSON verdict, so this needs real headroom above
+      // the old 500, plus explicitly keeping reasoning light and separate.
+      max_tokens: 1200,
+      top_p: 1,
+      reasoning_effort: "low",
+      include_reasoning: false,
+    } as any);
+
+    const raw = completion.choices?.[0]?.message?.content?.trim() || "";
+    const jsonText = extractFirstJsonObject(raw);
+    if (!jsonText) return { groundedness: null, unsupportedClaims: [] };
+
+    const parsed = JSON.parse(jsonText);
+
+    const groundedness =
+      typeof parsed?.groundedness === "number" && Number.isFinite(parsed.groundedness)
+        ? Math.max(0, Math.min(100, Math.round(parsed.groundedness)))
+        : null;
+
+    const unsupportedClaims: string[] = Array.isArray(parsed?.unsupportedClaims)
+      ? parsed.unsupportedClaims
+          .filter((c: any) => typeof c === "string" && c.trim())
+          .slice(0, 5)
+      : [];
+
+    return { groundedness, unsupportedClaims };
+  } catch (error) {
+    console.error("checkGroundedness failed:", error);
+    return { groundedness: null, unsupportedClaims: [] };
+  }
+}
+
+// =============================================================================
+// CONVERSATION MEMORY
+// =============================================================================
+// Per-browser (no login) saved, resumable chats - see
+// sql/chat_history_setup.sql and lib/visitorId.ts. Everything below is
+// best-effort and additive: with no visitorId, or if persistence fails
+// for any reason, the chat still answers exactly as it did before this
+// feature existed - none of this can turn a working answer into a
+// broken request.
+
+interface ConversationTurn {
+  role: "user" | "assistant";
+  content: string;
+}
+
+const CONVERSATION_HISTORY_LIMIT = 8;
+
+async function loadRecentMessages(
+  conversationId: string
+): Promise<ConversationTurn[]> {
+  try {
+    const { data, error } = await getSupabase()
+      .from("chat_messages")
+      .select("role, content, created_at")
+      .eq("conversation_id", conversationId)
+      .order("created_at", { ascending: false })
+      .limit(CONVERSATION_HISTORY_LIMIT);
+
+    if (error || !data) return [];
+
+    return data
+      .slice()
+      .reverse()
+      .map((row: any) => ({ role: row.role, content: row.content }));
+  } catch (error) {
+    console.error(
+      "loadRecentMessages failed (continuing without history):",
+      error
+    );
+    return [];
+  }
+}
+
+// Rewrites a follow-up like "what about for listed buildings?" into a
+// standalone question before it's used for retrieval - hybrid search on
+// the bare fragment alone would retrieve poorly, since pronouns and
+// ellipsis don't embed or full-text-match against anything. Only called
+// when real prior history exists; skipped entirely for a conversation's
+// first message, so a single-turn chat behaves exactly as before this
+// feature existed.
+async function condenseFollowUpQuery(
+  history: ConversationTurn[],
+  query: string
+): Promise<string> {
+  if (!history.length) return query;
+
+  try {
+    const transcript = history
+      .map(
+        (turn) =>
+          `${turn.role === "user" ? "User" : "Assistant"}: ${turn.content}`
+      )
+      .join("\n")
+      .slice(-3000);
+
+    const completion = await getGroq().chat.completions.create({
+      model: GROQ_CHAT_MODEL,
+      messages: [
+        {
+          role: "system",
+          content:
+            "Given a conversation history and a follow-up message, rewrite the follow-up as a standalone question that contains all the context a search engine would need - resolve pronouns and implicit references using the history. If the follow-up is already a standalone question, return it unchanged. Respond with ONLY the rewritten question, no explanation, no quotes.",
+        },
+        {
+          role: "user",
+          content: `CONVERSATION HISTORY:\n${transcript}\n\nFOLLOW-UP MESSAGE:\n${query}`,
+        },
+      ],
+      temperature: 0,
+      max_tokens: 200,
+      top_p: 1,
+      reasoning_effort: "low",
+      include_reasoning: false,
+    } as any);
+
+    const rewritten = completion.choices?.[0]?.message?.content?.trim();
+    return rewritten && rewritten.length > 0 ? rewritten : query;
+  } catch (error) {
+    console.error(
+      "condenseFollowUpQuery failed (falling back to raw query):",
+      error
+    );
+    return query;
+  }
+}
+
+// A short, budget-capped transcript folded into generateAnswer()'s prompt
+// so the written answer stays conversationally coherent (resolving "that"
+// naturally, not repeating context back) even though retrieval already
+// ran on a separately condensed standalone query above.
+function buildConversationContextForPrompt(
+  history: ConversationTurn[]
+): string {
+  if (!history.length) return "";
+
+  const transcript = history
+    .slice(-6)
+    .map(
+      (turn) =>
+        `${turn.role === "user" ? "User" : "Assistant"}: ${turn.content}`
+    )
+    .join("\n")
+    .slice(-2000);
+
+  return `\n\nRecent conversation (for context only - answer the current question, don't repeat this back):\n${transcript}\n`;
+}
+
+// Resolves which conversation this turn belongs to: continues
+// requestedConversationId if it's real and owned by this visitor,
+// otherwise starts a fresh one titled from the first message. Returns
+// null (never throws) if persistence isn't configured or fails, so the
+// caller can just skip saving this turn.
+async function ensureConversation(
+  visitorId: string,
+  requestedConversationId: string,
+  firstMessagePreview: string
+): Promise<string | null> {
+  try {
+    if (requestedConversationId) {
+      const { data, error } = await getSupabase()
+        .from("conversations")
+        .select("id, visitor_id")
+        .eq("id", requestedConversationId)
+        .maybeSingle();
+
+      if (!error && data && data.visitor_id === visitorId) {
+        return requestedConversationId;
+      }
+      // Requested id doesn't exist, or belongs to a different visitor -
+      // fall through and start a fresh conversation rather than failing
+      // the whole chat request over a stale or tampered id.
+    }
+
+    const title = firstMessagePreview.trim().slice(0, 60) || "New conversation";
+    const { data, error } = await getSupabase()
+      .from("conversations")
+      .insert({ visitor_id: visitorId, title })
+      .select("id")
+      .single();
+
+    if (error || !data) return null;
+    return data.id;
+  } catch (error) {
+    console.error(
+      "ensureConversation failed (continuing without persistence):",
+      error
+    );
+    return null;
+  }
+}
+
+async function persistConversationTurn(
+  conversationId: string,
+  userQuery: string,
+  assistantAnswer: string,
+  assistantMetadata: Record<string, any>
+) {
+  try {
+    const supabase = getSupabase();
+
+    await supabase.from("chat_messages").insert([
+      { conversation_id: conversationId, role: "user", content: userQuery },
+      {
+        conversation_id: conversationId,
+        role: "assistant",
+        content: assistantAnswer,
+        metadata: assistantMetadata,
+      },
+    ]);
+
+    await supabase
+      .from("conversations")
+      .update({ updated_at: new Date().toISOString() })
+      .eq("id", conversationId);
+  } catch (error) {
+    console.error(
+      "persistConversationTurn failed (chat still answered fine):",
+      error
+    );
+  }
+}
+
+// =============================================================================
+// GREETING / SMALL-TALK FAST PATH
+// =============================================================================
+//
+// Bypasses the entire RAG pipeline (vector search, LLM reranking,
+// generateAnswer, the groundedness-check LLM call, and - in voice mode -
+// the humanizeForSpeech LLM call) for messages that are unmistakably just
+// a greeting, thanks, goodbye, or a "what can you do" capability question.
+// Previously these were only *answered* well (see the "if this is a
+// greeting..." instruction in the main prompt below) after already paying
+// for the full pipeline - this makes them instant instead.
+//
+// Deliberately conservative: matches the WHOLE message against a short
+// list of near-exact patterns, never a prefix - "hi, can you tell me
+// about loft conversions" must still go through full retrieval. A message
+// long enough to plausibly contain a real question (see MAX_LENGTH) never
+// even reaches the pattern list.
+const GREETING_FAST_PATH_MAX_LENGTH = 40;
+
+const GREETING_FAST_PATH_PATTERNS: { test: RegExp; reply: string }[] = [
+  {
+    test: /^(hi|hello|hey|hiya|yo|howdy)( there)?[!.]*$/,
+    reply:
+      "Hi there! I can help with UK planning and building regulations questions - what would you like to know?",
+  },
+  {
+    test: /^good (morning|afternoon|evening)[!.]*$/,
+    reply: "Good to hear from you! What can I help you with today?",
+  },
+  {
+    test: /^(how are you( doing)?|what'?s up|how'?s it going)[?!.]*$/,
+    reply: "I'm doing well, thanks for asking! What can I help you with?",
+  },
+  {
+    test: /^(thanks|thank you|thx|cheers|ta)[!.]*$/,
+    reply: "You're welcome! Let me know if there's anything else you need.",
+  },
+  {
+    test: /^(bye|goodbye|see you|see ya|later|take care)[!.]*$/,
+    reply: "Take care! Come back anytime you have a planning or building regs question.",
+  },
+  {
+    test: /^(ok|okay|cool|got it|great|nice one|alright)[!.]*$/,
+    reply: "Great - let me know what you'd like to look into.",
+  },
+  {
+    test: /^(who are you|what are you|what can you do|what can you help( me)? with|how does this work)[?!.]*$/,
+    reply:
+      "I'm Urban AI Assistant - I answer questions about UK planning and building regulations using indexed council and government documents, with citations back to the source. Ask me anything from permitted development to fire safety requirements and I'll look it up.",
+  },
+];
+
+function matchGreetingFastPath(rawQuery: string): string | null {
+  const normalized = rawQuery.trim().toLowerCase();
+  if (!normalized || normalized.length > GREETING_FAST_PATH_MAX_LENGTH) {
+    return null;
+  }
+  for (const { test, reply } of GREETING_FAST_PATH_PATTERNS) {
+    if (test.test(normalized)) return reply;
+  }
+  return null;
 }
 
 // =============================================================================
@@ -2258,6 +3116,9 @@ export async function POST(req: Request) {
             | "permitting"
             | "risk") || "auto",
         drawingFile: (form.get("drawingFile") as File) || undefined,
+        conversationId: (form.get("conversationId") as string) || undefined,
+        visitorId: (form.get("visitorId") as string) || undefined,
+        voiceMode: form.get("voiceMode") === "true",
       };
     } else {
       body = (await req.json()) as RagRequest;
@@ -2273,7 +3134,87 @@ export async function POST(req: Request) {
       );
     }
 
-    const query = body.query;
+    const rawQuery = body.query;
+
+    // See GREETING FAST PATH above. Trade-off, taken deliberately: a
+    // fast-pathed turn is NOT saved to conversation history (that write
+    // happens further down, alongside searchRAG), so a follow-up
+    // immediately after "Hi" won't see it in context. Acceptable for small
+    // talk this low-stakes, and it's what keeps this genuinely instant
+    // rather than one Supabase round-trip away from instant.
+    const greetingFastPathReply = matchGreetingFastPath(rawQuery);
+    if (greetingFastPathReply) {
+      const fastPathVoiceMode = body.voiceMode === true;
+      return NextResponse.json({
+        success: true,
+        answer: greetingFastPathReply,
+        data: {
+          citations: [],
+          query: rawQuery,
+          region: body.region ?? null,
+          resultsCount: 0,
+          references: { documents: [], web: [] },
+          speechText: fastPathVoiceMode ? greetingFastPathReply : undefined,
+        },
+        metadata: {
+          processing_time: Date.now() - start,
+          confidence: 1,
+          webFallbackUsed: false,
+        },
+      } satisfies RagResponse);
+    }
+
+    // Speech-to-text mangles domain jargon - "NPPF" comes back as "NPP" -
+    // and because the transcript feeds BOTH retrieval and the answer
+    // prompt, an uncorrected one makes the reply confidently discuss the
+    // wrong term throughout. Correcting here, before anything downstream
+    // reads `query`, fixes retrieval and the answer's wording in one move.
+    // Only ever swaps in vocabulary this corpus actually contains; never
+    // touches ordinary English. See lib/domain-vocabulary.ts.
+    const { correctedQuery: query, corrections: termCorrections } =
+      correctDomainTerms(rawQuery, { voiceMode: body.voiceMode === true });
+
+    if (termCorrections.length) {
+      console.log(
+        "🔤 Corrected domain terms:",
+        termCorrections.map((c) => `${c.from} -> ${c.to}`).join(", ")
+      );
+    }
+
+    const visitorId =
+      typeof body.visitorId === "string" ? body.visitorId.trim() : "";
+    const requestedConversationId =
+      typeof body.conversationId === "string" ? body.conversationId.trim() : "";
+
+    // conversationId stays null (and everything below becomes a no-op)
+    // whenever visitorId is absent - callers that don't opt into
+    // conversation memory get the exact same stateless behavior as
+    // before this feature existed.
+    let conversationId: string | null = null;
+    let conversationHistory: ConversationTurn[] = [];
+
+    if (visitorId) {
+      conversationId = await ensureConversation(
+        visitorId,
+        requestedConversationId,
+        query
+      );
+      if (conversationId) {
+        conversationHistory = await loadRecentMessages(conversationId);
+      }
+    }
+
+    // Retrieval gets a coreference-resolved standalone question when this
+    // is a genuine follow-up; every other use of `query` below (diagram
+    // intent, region detection, the generation prompt itself) keeps the
+    // user's original wording untouched.
+    const retrievalQuery = conversationHistory.length
+      ? await condenseFollowUpQuery(conversationHistory, query)
+      : query;
+
+    const conversationContext = buildConversationContextForPrompt(
+      conversationHistory
+    );
 
     const knownPatterns = await loadQuestionPatterns();
     const diagramIntent = detectDiagramIntent(query, knownPatterns);
@@ -2305,6 +3246,7 @@ export async function POST(req: Request) {
     }
 
     const mode = body.mode ?? "auto";
+    const voiceMode = body.voiceMode === true;
 
     let feasibilitySection = "";
     let feasibilityReport: any | undefined = undefined;
@@ -2391,20 +3333,83 @@ export async function POST(req: Request) {
     }
 
     console.log("⏱️ STEP 1: starting searchRAG");
-    let chunks = await searchRAG(query, region, topK, threshold);
+    let chunks = await searchRAG(retrievalQuery, region, topK, threshold);
     console.log("⏱️ STEP 1 DONE: searchRAG returned", chunks.length, "chunks");
 
+    // Merge in any documents the visitor uploaded earlier in THIS
+    // conversation (lib/userDocuments.ts) - e.g. a site plan or letter
+    // attached above, so "what can be done here as per NPPF" is answered
+    // from both that upload and the shared regulatory corpus together.
+    // A conversation with no uploads costs one cheap existence check and
+    // nothing more (see searchUserDocumentChunks). Merged in ahead of the
+    // reranker so the LLM relevance pass judges corpus and upload chunks
+    // on equal footing rather than favoring one set by construction.
+    if (conversationId) {
+      console.log("⏱️ STEP 1.25: searching uploaded documents for this conversation");
+      const summarizeIntent = isSummarizeIntent(query);
+      const userDocMatches = summarizeIntent
+        ? await getAllUserDocumentChunks(conversationId)
+        : await searchUserDocumentChunks(conversationId, retrievalQuery);
+      if (userDocMatches.length) {
+        console.log("⏱️ STEP 1.25 DONE:", userDocMatches.length, "uploaded-document chunks");
+        chunks = [...chunks, ...userDocMatches.map(mapUserDocRow)];
+
+        if (summarizeIntent) {
+          // The literal query ("summarize this", "give me an overview",
+          // etc.) carries no content of its own to search the corpus
+          // with, so build a second query from the document's own text
+          // and use THAT to pull in genuinely relevant regulatory/
+          // database material - this is what lets the summary actually
+          // reference the shared corpus instead of generic top hits.
+          const docGistQuery = userDocMatches
+            .slice(0, 6)
+            .map((c) => c.content)
+            .join("\n\n")
+            .slice(0, 4000);
+          if (docGistQuery.trim()) {
+            const docGroundedCorpus = await searchRAG(
+              docGistQuery,
+              region,
+              topK,
+              threshold
+            );
+            const seenIds = new Set(chunks.map((c) => c.id));
+            for (const c of docGroundedCorpus) {
+              if (!seenIds.has(c.id)) {
+                chunks.push(c);
+                seenIds.add(c.id);
+              }
+            }
+            console.log(
+              "⏱️ STEP 1.25b DONE: document-grounded corpus search added",
+              docGroundedCorpus.length,
+              "candidate chunks"
+            );
+          }
+        }
+      }
+    }
+
+    console.log("⏱️ STEP 1.5: LLM reranking (Groq)");
+    chunks = await rerankWithGroq(retrievalQuery, chunks);
+    console.log("⏱️ STEP 1.5 DONE: LLM reranking complete");
+
     console.log("⏱️ STEP 2: reranking");
-    chunks = reRankByCitations(chunks, query);
-    chunks = reRankByKeywords(chunks, query);
-    chunks = rankRetrievedChunks(query, chunks);
+    chunks = reRankByCitations(chunks, retrievalQuery);
+    chunks = reRankByKeywords(chunks, retrievalQuery);
+    chunks = rankRetrievedChunks(retrievalQuery, chunks);
+    chunks = diversifyChunks(chunks);
     console.log("⏱️ STEP 2 DONE: reranking complete");
 
     console.log("⏱️ STEP 3: document-region filtering");
     const requestedDocRegion = detectRequestedDocumentRegion(query);
     if (requestedDocRegion) {
+      // A visitor's own upload has no region (it isn't part of the
+      // region-tagged shared corpus) and must never be dropped here just
+      // because the question happens to mention a region like "NPPF" ->
+      // uk - that's exactly the case this feature exists for.
       const filtered = chunks.filter(
-        (c) => lower(c.region) === requestedDocRegion
+        (c) => c.doc_kind === "user_upload" || lower(c.region) === requestedDocRegion
       );
       if (filtered.length) {
         chunks = filtered;
@@ -2654,6 +3659,7 @@ These values were extracted directly from fragmented table-related chunks. They 
 
     console.log("⏱️ STEP 6: preparing answer gating");
     const topSimilarity = getTopSimilarityScore(chunks);
+    console.log("⏱️ STEP 6 INFO: topSimilarity =", topSimilarity.toFixed(3));
     const jurisdictionMismatch = hasJurisdictionMismatch(query, chunks);
     const explicitlyOutside = isOutsideDatasetQuery(query);
 
@@ -2664,24 +3670,44 @@ These values were extracted directly from fragmented table-related chunks. They 
         resolvedFrom: "document" | "web" | "unresolved";
       }>;
     };
+    // Tracks whether answerResult actually came from generateAnswer() (i.e.
+    // is real LLM-written prose worth grading) vs. one of the canned
+    // outside-dataset / partial-coverage messages, which there's no point
+    // spending an extra Groq call to fact-check.
+    let usedGeneratedAnswer = false;
 
-    if (!chunks.length || explicitlyOutside || jurisdictionMismatch) {
-      console.log("⏱️ STEP 6 RESULT: outside-dataset / mismatch fallback");
+    const noDocumentCoverage =
+      !chunks.length || explicitlyOutside || jurisdictionMismatch;
+
+    if (noDocumentCoverage && !webCitations.length) {
+      console.log("⏱️ STEP 6 RESULT: no document/web coverage - answering via basic-intelligence fallback");
       documentCitations = [];
+      usedGeneratedAnswer = true;
+      answerResult = await generateBasicAnswer(query, conversationContext);
+    } else if (noDocumentCoverage) {
+      // Not covered by the indexed documents, but the web fallback found
+      // something — answer from web context only and say so explicitly,
+      // rather than discarding the web results we already fetched.
+      console.log("⏱️ STEP 6 RESULT: web-only fallback answer");
+      documentCitations = [];
+      usedGeneratedAnswer = true;
+      const webAnswer = await generateAnswer(
+        query,
+        [],
+        webCitations,
+        feasibilitySection,
+        drawingValidation,
+        conversationContext
+      );
       answerResult = {
-        answerMarkdown: buildOutsideDatasetAnswer(),
-        missingCoverage: [
-          {
-            questionPart: query,
-            resolvedFrom: "unresolved",
-          },
-        ],
+        answerMarkdown: `${WEB_FALLBACK_NOTICE}\n\n${webAnswer.answerMarkdown}`,
+        missingCoverage: webAnswer.missingCoverage,
       };
     } else if (
       !isComparisonQuery(query) &&
       !isTableQuery(query) &&
       !isThresholdQuery(query) &&
-      topSimilarity < 0.72
+      topSimilarity < 0.65
     ) {
       console.log("⏱️ STEP 6 RESULT: partial-coverage fallback");
       answerResult = {
@@ -2695,12 +3721,14 @@ These values were extracted directly from fragmented table-related chunks. They 
       };
     } else {
       console.log("⏱️ STEP 7: calling generateAnswer");
+      usedGeneratedAnswer = true;
       answerResult = await generateAnswer(
         query,
         chunks,
         webCitations,
         feasibilitySection,
-        drawingValidation
+        drawingValidation,
+        conversationContext
       );
       console.log("⏱️ STEP 7 DONE: generateAnswer returned");
     }
@@ -2728,17 +3756,47 @@ These values were extracted directly from fragmented table-related chunks. They 
     const dirtyPenalty = Math.min(18, dirtyChunkCount * 4);
     confidence = Math.max(0, confidence - dirtyPenalty);
 
-    if (!chunks.length || explicitlyOutside || jurisdictionMismatch) {
+    if ((!chunks.length || explicitlyOutside || jurisdictionMismatch) && !webCitations.length) {
       confidence = 0;
+    } else if ((!chunks.length || explicitlyOutside || jurisdictionMismatch) && webCitations.length > 0) {
+      // Web-only answer: cap it below anything document-grounded, but don't
+      // zero it out - it's a real (if unverified-against-our-corpus) answer.
+      confidence = Math.min(confidence || 45, 45);
     } else if (
       !isComparisonQuery(query) &&
       !isTableQuery(query) &&
       !isThresholdQuery(query) &&
-      topSimilarity < 0.72
+      topSimilarity < 0.65
     ) {
       confidence = Math.min(confidence, 25);
     } else if (answerFailedReliably) {
       confidence = Math.min(confidence, 25);
+    }
+
+    console.log("⏱️ STEP 6.5: checking groundedness");
+    let groundedness: number | null = null;
+    let unsupportedClaims: string[] = [];
+
+    if (usedGeneratedAnswer) {
+      const groundingChunks = noDocumentCoverage
+        ? []
+        : chooseChunksForAnswer(query, chunks);
+      const groundingResult = await checkGroundedness(
+        query,
+        answerResult.answerMarkdown,
+        groundingChunks,
+        webCitations
+      );
+      groundedness = groundingResult.groundedness;
+      unsupportedClaims = groundingResult.unsupportedClaims;
+      console.log(
+        "⏱️ STEP 6.5 DONE: groundedness =",
+        groundedness,
+        "unsupportedClaims =",
+        unsupportedClaims.length
+      );
+    } else {
+      console.log("⏱️ STEP 6.5 SKIPPED: no generated answer to grade");
     }
 
     let diagram: DiagramPayload | undefined;
@@ -2783,6 +3841,11 @@ These values were extracted directly from fragmented table-related chunks. They 
       .replace(/\n#{1,6}\s+References[\s\S]*$/i, "")
       .trim();
 
+    console.log("⏱️ STEP 8: voiceMode =", voiceMode);
+    const speechText = voiceMode
+      ? (await humanizeForSpeech(query, finalAnswer)) || undefined
+      : undefined;
+
     const response: RagResponse = {
       success: true,
       answer: finalAnswer,
@@ -2801,13 +3864,34 @@ These values were extracted directly from fragmented table-related chunks. They 
         missingCoverage: answerResult.missingCoverage,
         feasibilityReport,
         drawingValidation,
+        speechText,
+        corrections: termCorrections.length ? termCorrections : undefined,
       },
       metadata: {
         processing_time,
         confidence,
         webFallbackUsed: webCitations.length > 0,
+        groundedness,
+        unsupportedClaims,
+        conversationId: conversationId || undefined,
       },
     };
+
+    if (conversationId) {
+      // Stored in the same raw shape the client's own extraction helpers
+      // (extractRawCitations/mapBackendCitations, extractDiagram in
+      // ChatInterface.tsx) already know how to normalize, so reopening a
+      // saved conversation renders the exact same citations/diagram/badges
+      // as the live response did - see handleSelectConversation.
+      await persistConversationTurn(conversationId, query, finalAnswer, {
+        processingtime: processing_time,
+        confidence,
+        groundedness,
+        unsupportedClaims,
+        citations: allCitations,
+        diagram: diagram || undefined,
+      });
+    }
 
     return NextResponse.json(response, { status: 200 });
   } catch (e: any) {

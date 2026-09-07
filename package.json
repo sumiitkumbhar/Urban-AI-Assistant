@@ -14,10 +14,13 @@
     "extract-questions": "tsx scripts/extract-questions-from-pdf.ts",
     "analyze-questions": "tsx scripts/analyze-questions.ts",
     "process-dataset": "npm run extract-questions && npm run analyze-questions",
+    "ingest:councils": "tsx scripts/ingest-council-plans.ts",
     "postinstall": "patch-package"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.52.0",
+    "@pipecat-ai/client-js": "^1.13.0",
+    "@pipecat-ai/websocket-transport": "^1.7.1",
     "@chroma-core/default-embed": "^0.1.9",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",

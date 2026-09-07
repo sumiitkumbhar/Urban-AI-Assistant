@@ -1,0 +1,9 @@
+# Urban AI Assistant - voice-agent (Pipecat) requirements.
+#
+# Picks the right local-Whisper backend automatically: MLX (Apple's Metal,
+# fast) on Apple Silicon, faster-whisper (CPU) everywhere else - see
+# bot.py's make_stt_service() and README.md.
+pipecat-ai[silero,websocket,runner,mlx-whisper]; sys_platform == "darwin" and platform_machine == "arm64"
+pipecat-ai[silero,websocket,runner,whisper]; sys_platform != "darwin" or platform_machine != "arm64"
+
+aiohttp>=3.9

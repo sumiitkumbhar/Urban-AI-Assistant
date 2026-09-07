@@ -19,21 +19,23 @@ Urban AI Assistant is a prototype application that answers planning and construc
 
 ## Current capabilities
 
-- Retrieval-augmented question answering
-- Document-grounded responses with inline citations
-- Clause and page reference support
-- Source inspection panel
+- **Hybrid retrieval** - combines pgvector semantic search with Postgres full-text search, merged via Reciprocal Rank Fusion (RRF), so both "what this means" and exact-term matches surface strong candidates
+- **LLM reranking** - a second-pass Groq call re-scores the top candidates for relevance to the actual question before anything reaches the answer generator
+- **Groundedness verification** - every generated answer is independently graded by an LLM-as-judge pass (Ragas-faithfulness-style) that scores 0-100 and flags any claim not actually backed by the retrieved sources
+- **Two-signal confidence UI** - retrieval confidence and groundedness are shown as separate, distinctly-colored badges rather than one conflated number, so it's clear whether an answer failed because of weak sources vs. an unsupported claim
+- Document-grounded responses with inline, page/clause-level citations and an expandable source-inspection panel (ranked by confidence, with extracted requirement/condition/exception buckets per source)
+- Automatic fallback to live web search, clearly labeled, when the indexed corpus doesn't cover a query
 - Basic feasibility and regulatory assistance workflows
 - Selected UK/US-oriented validation utilities
+- Runs entirely on free-tier APIs (Groq, Google Gemini embeddings, Supabase) by design - no paid usage tiers required to run or extend it
 
 ## Tech stack
 
-- Next.js
-- TypeScript
-- Tailwind CSS
-- Supabase
-- Groq
-- Google embeddings
+- Next.js 14 (App Router) + TypeScript
+- Tailwind CSS, Framer Motion
+- Supabase (Postgres + pgvector) for the chunk store, semantic search, and full-text search
+- Groq (`openai/gpt-oss-20b`, free tier) for generation, reranking, and groundedness scoring
+- Google Gemini embeddings for the vector index
 
 ## Status
 

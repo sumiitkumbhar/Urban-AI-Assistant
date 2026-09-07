@@ -35,9 +35,9 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    await ingestMultiplePdfs(files, { region })
+    const results = await ingestMultiplePdfs(files, { region })
 
-    return NextResponse.json({ ok: true, ingested: files.length })
+    return NextResponse.json({ ok: true, ingested: files.length, results })
   } catch (err: any) {
     console.error('Ingest error:', err)
     return NextResponse.json(

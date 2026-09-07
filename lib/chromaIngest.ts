@@ -1,51 +1,265 @@
 // lib/chromaIngest.ts
 //
-// STATUS: stub.
+// Real implementation of the PDF ingestion pipeline. Called by
+// app/api/rag/ingest/route.ts, which hands us parsed multipart PDF files
+// plus an optional region hint.
 //
-// app/api/rag/ingest/route.ts imports `ingestMultiplePdfs` from this file,
-// but no implementation of it existed anywhere in the repo — the module
-// itself was missing, which broke the TypeScript build for the whole
-// project (`npm run build` / `npm run type-check` failed with
-// "Cannot find module '@/lib/chromaIngest'").
+// Pipeline per file:
+//   1. Extract text per page with pdf-parse (custom pagerender hook so we
+//      keep page boundaries, not just one big blob of text).
+//   2. Classify the document with classifyDoc() (app/api/rag/corpus.ts) to
+//      get docType / jurisdictionKey / topics from the title.
+//   3. Insert one row into `documents` for the file.
+//   4. Split each page into ~1000-character chunks (paragraph-aware, small
+//      overlap), embed each chunk with the SAME model/dimension/normalization
+//      used at query time (lib/embeddings.ts - this consistency matters a
+//      lot for retrieval quality), and insert into `chunks`.
 //
-// This stub restores a clean build and makes /api/rag/ingest fail with a
-// clear, honest error instead of crashing the build. It does NOT
-// implement real ingestion. The retrieval side (app/api/rag-chat) expects
-// rows in a Supabase table with columns like doc_title, doc_path,
-// doc_kind, page_from/page_to, clause_label, citation_type/value,
-// section_heading, keywords, content, and a vector `embedding` column
-// produced by the same Gemini embedding model used at query time
-// (see GEMINI_EMBEDDING_MODEL / generateEmbedding in app/api/rag-chat/route.ts).
-//
-// To make ingestion real:
-//   1. Parse each PDF into page/clause-level chunks (pdf-parse / pdfjs-dist
-//      are already installed for this).
-//   2. Classify each doc with classifyDoc() from app/api/rag/corpus.ts.
-//   3. Embed each chunk with the same embedding model/config as the query
-//      path (ai.models.embedContent with GEMINI_EMBEDDING_MODEL).
-//   4. Upsert the chunks + embeddings into your Supabase table via
-//      SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY.
+// This intentionally does NOT try to detect clause/section numbers with
+// fancy regexes across arbitrary regulatory documents - that's a rabbit
+// hole. It stores page-level chunks with real page numbers, which is what
+// the query path (app/api/rag-chat/route.ts) actually uses for citations
+// (page_from / page_to). Section/clause fields are left null unless a
+// simple heading pattern is obviously present.
 
-import type { Region } from "@/app/api/rag/corpus";
+import { createClient } from "@supabase/supabase-js";
+import { generateEmbedding } from "@/lib/embeddings";
+import { classifyDoc, normalizeRegion, type Region } from "@/app/api/rag/corpus";
 
 export interface IngestFile {
   name: string;
   buffer: Buffer;
+  // Optional per-file overrides. When omitted, behavior is unchanged
+  // from before this field existed: title comes from the filename and
+  // jurisdiction/docType come from classifyDoc()'s title-substring
+  // guessing. Batch/bulk ingestion (many councils' Local Plans in one
+  // run) should always set these explicitly - classifyDoc() has no way
+  // to know WHICH council a generically-named "Local Plan.pdf" belongs
+  // to, and its one "local_plan" branch hardcodes a single jurisdiction.
+  title?: string;
+  jurisdictionKey?: string;
+  docType?: string;
+  sourceUrl?: string;
 }
 
 export interface IngestOptions {
   region?: Region;
 }
 
+const CHUNK_TARGET_CHARS = 1100;
+const CHUNK_OVERLAP_CHARS = 150;
+
+let _supabase: any = null;
+function getSupabase() {
+  if (!_supabase) {
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (!url || !key) {
+      throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+    }
+    _supabase = createClient(url, key);
+  }
+  return _supabase;
+}
+
+function titleFromFilename(name: string): string {
+  const base = name.replace(/\.pdf$/i, "");
+  // Handle names like "National_Planning_Policy_Framework" -> "National Planning Policy Framework"
+  return base
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function extractPages(buffer: Buffer): Promise<string[]> {
+  // pdf-parse's default behavior concatenates all page text into one
+  // string. Passing a custom pagerender lets us also capture each page's
+  // text individually as it's rendered, while still returning the text so
+  // pdf-parse's own bookkeeping (ret.text, numrender) keeps working.
+  const pdfParse = require("pdf-parse");
+  const pages: string[] = [];
+
+  const render_options = {
+    normalizeWhitespace: false,
+    disableCombineTextItems: false,
+  };
+
+  await pdfParse(buffer, {
+    pagerender: (pageData: any) =>
+      pageData.getTextContent(render_options).then((textContent: any) => {
+        let lastY: number | undefined;
+        let text = "";
+        for (const item of textContent.items) {
+          if (lastY === item.transform[5] || lastY === undefined) {
+            text += item.str;
+          } else {
+            text += "\n" + item.str;
+          }
+          lastY = item.transform[5];
+        }
+        pages.push(text);
+        return text;
+      }),
+  });
+
+  return pages;
+}
+
+function chunkPageText(pageText: string): string[] {
+  const cleaned = pageText.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+  if (!cleaned) return [];
+
+  // Split on paragraph breaks first, then greedily pack paragraphs into
+  // ~CHUNK_TARGET_CHARS chunks so we don't cut mid-sentence when we can
+  // avoid it. A small overlap is carried into the next chunk so a claim
+  // that straddles a chunk boundary is still retrievable from either side.
+  const paragraphs = cleaned.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  if (!paragraphs.length) return [];
+
+  const chunks: string[] = [];
+  let current = "";
+
+  for (const para of paragraphs) {
+    if (current && (current.length + para.length + 1) > CHUNK_TARGET_CHARS) {
+      chunks.push(current.trim());
+      const overlapStart = Math.max(0, current.length - CHUNK_OVERLAP_CHARS);
+      current = current.slice(overlapStart);
+    }
+    current = current ? `${current}\n${para}` : para;
+  }
+  if (current.trim()) chunks.push(current.trim());
+
+  // A single paragraph longer than the target on its own - hard-split it.
+  return chunks.flatMap((c) => {
+    if (c.length <= CHUNK_TARGET_CHARS * 1.5) return [c];
+    const pieces: string[] = [];
+    for (let i = 0; i < c.length; i += CHUNK_TARGET_CHARS) {
+      pieces.push(c.slice(i, i + CHUNK_TARGET_CHARS));
+    }
+    return pieces;
+  });
+}
+
+async function embedWithRetry(text: string, attempts = 3): Promise<number[]> {
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await generateEmbedding(text);
+    } catch (err) {
+      lastErr = err;
+      // Gentle backoff for free-tier rate limits (429s).
+      await new Promise((r) => setTimeout(r, 1200 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
+
+async function ingestOnePdf(
+  file: IngestFile,
+  options: IngestOptions
+): Promise<{ file: string; document_id: number; chunks: number }> {
+  const title = file.title || titleFromFilename(file.name);
+  const classification = classifyDoc(title);
+  const jurisdictionKey = file.jurisdictionKey || classification.jurisdictionKey;
+  const docType = file.docType || classification.docType;
+  const region = normalizeRegion(options.region || jurisdictionKey || "usa");
+
+  const supabase = getSupabase();
+
+  const { data: docRow, error: docError } = await supabase
+    .from("documents")
+    .insert({
+      title,
+      region,
+      jurisdiction_level: jurisdictionKey || null,
+      doc_type: docType,
+      source_path: file.name,
+      source_url: file.sourceUrl || null,
+      year: null,
+      citation_ref: title,
+      updated_at: new Date().toISOString().slice(0, 10),
+    })
+    .select("id")
+    .single();
+
+  if (docError || !docRow) {
+    throw new Error(
+      `Failed to insert documents row for ${file.name}: ${docError?.message || "unknown error"}`
+    );
+  }
+
+  const documentId = docRow.id as number;
+  const pages = await extractPages(file.buffer);
+
+  const rows: Array<{
+    document_id: number;
+    chunk_index: number;
+    content: string;
+    page: string;
+    page_label: string;
+    clause: null;
+    clause_label: null;
+    section: null;
+    region: string;
+    doc_type: string;
+  }> = [];
+
+  pages.forEach((pageText, pageIdx) => {
+    const pageNumber = pageIdx + 1;
+    const pageChunks = chunkPageText(pageText);
+    pageChunks.forEach((content) => {
+      rows.push({
+        document_id: documentId,
+        chunk_index: rows.length,
+        content,
+        page: String(pageNumber),
+        page_label: `Page ${pageNumber}`,
+        clause: null,
+        clause_label: null,
+        section: null,
+        region,
+        doc_type: docType,
+      });
+    });
+  });
+
+  // Embed sequentially with a small delay between calls to stay well
+  // within the Gemini free-tier rate limit, and insert in batches so a
+  // single failed request doesn't lose already-embedded work.
+  const BATCH_SIZE = 20;
+  let insertedCount = 0;
+
+  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+    const batch = rows.slice(i, i + BATCH_SIZE);
+    const embedded = [];
+    for (const row of batch) {
+      const embedding = await embedWithRetry(row.content);
+      embedded.push({ ...row, embedding });
+      await new Promise((r) => setTimeout(r, 150));
+    }
+
+    const { error: insertError } = await supabase.from("chunks").insert(embedded);
+    if (insertError) {
+      throw new Error(
+        `Failed inserting chunks ${i}-${i + batch.length} for ${file.name}: ${insertError.message}`
+      );
+    }
+    insertedCount += embedded.length;
+  }
+
+  return { file: file.name, document_id: documentId, chunks: insertedCount };
+}
+
 export async function ingestMultiplePdfs(
   files: IngestFile[],
-  _options: IngestOptions = {}
-): Promise<never> {
-  throw new Error(
-    `Document ingestion is not implemented yet (lib/chromaIngest.ts is a stub). ` +
-      `Received ${files.length} file(s): ${files
-        .map((f) => f.name)
-        .join(", ")}. ` +
-      `Populate the Supabase corpus table directly, or implement ingestMultiplePdfs().`
-  );
+  options: IngestOptions = {}
+): Promise<Array<{ file: string; document_id: number; chunks: number }>> {
+  const results = [];
+  for (const file of files) {
+    // Sequential, not parallel: keeps us under Gemini's free-tier rate
+    // limit and makes a partial failure easy to reason about (you'll know
+    // exactly which file it stopped on).
+    results.push(await ingestOnePdf(file, options));
+  }
+  return results;
 }

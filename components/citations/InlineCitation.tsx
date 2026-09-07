@@ -119,9 +119,9 @@ export default function InlineCitation({
     const el = document.getElementById(`citation-card-${citation.id}`);
     if (el) {
       el.scrollIntoView({ behavior: "smooth", block: "center" });
-      el.classList.add("ring-2", "ring-blue-400/60");
+      el.classList.add("ring-2", "ring-neutral-950/50");
       window.setTimeout(() => {
-        el.classList.remove("ring-2", "ring-blue-400/60");
+        el.classList.remove("ring-2", "ring-neutral-950/50");
       }, 1400);
     }
     setOpen(false);
@@ -129,7 +129,7 @@ export default function InlineCitation({
 
   if (!citation) {
     return (
-      <span className="inline-flex align-middle rounded-md border border-white/10 bg-white/5 px-1.5 py-0.5 text-[11px] text-slate-300">
+      <span className="inline-flex align-middle rounded-lg border border-neutral-950/10 bg-neutral-950/5 px-1.5 py-0.5 text-[11px] text-neutral-700">
         {token}
       </span>
     );
@@ -142,7 +142,10 @@ export default function InlineCitation({
         onMouseEnter={() => setOpen(true)}
         onMouseLeave={() => setOpen(false)}
         onClick={handleJump}
-        className="inline-flex rounded-md border border-blue-400/20 bg-blue-500/10 px-1.5 py-0.5 text-[11px] font-medium text-blue-300 transition hover:bg-blue-500/15"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        aria-label={`Citation ${token}: ${citation.title}. Show source details.`}
+        className="inline-flex rounded-lg border border-neutral-950/20 bg-neutral-950/[0.08] px-1.5 py-0.5 text-[11px] font-medium text-neutral-900 transition hover:bg-neutral-950/15"
       >
         {token}
       </button>
@@ -151,14 +154,19 @@ export default function InlineCitation({
         <div
           onMouseEnter={() => setOpen(true)}
           onMouseLeave={() => setOpen(false)}
-          className="absolute left-0 top-7 z-50 w-80 rounded-xl border border-white/10 bg-slate-950/95 p-3 shadow-2xl backdrop-blur-xl"
+          // A fixed 320px popover anchored to the left edge of an inline
+          // citation token overflows the viewport on phones, since the
+          // token can sit anywhere in a paragraph. Below the sm breakpoint
+          // it's centered under the token instead and capped at 85% of
+          // the viewport width, so it can never force horizontal scroll.
+          className="absolute left-1/2 top-7 z-50 w-[85vw] max-w-[20rem] -translate-x-1/2 rounded-2xl border border-neutral-950/10 bg-neutral-50/95 p-3 shadow-2xl backdrop-blur-xl sm:left-0 sm:w-80 sm:max-w-none sm:translate-x-0"
         >
           <div className="mb-2 flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <p className="truncate text-xs font-semibold text-white">
+              <p className="truncate text-xs font-semibold text-neutral-950">
                 {citation.title}
               </p>
-              <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-slate-400">
+              <div className="mt-1 flex flex-wrap gap-2 text-[11px] text-neutral-600">
                 {citation.pageNumber ? <span>Page {citation.pageNumber}</span> : null}
                 {citation.clauseNumber ? <span>Clause {citation.clauseNumber}</span> : null}
                 {citation.section ? (
@@ -167,20 +175,20 @@ export default function InlineCitation({
               </div>
             </div>
 
-            <span className="shrink-0 rounded-full border border-amber-400/20 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
+            <span className="shrink-0 rounded-full border border-neutral-950/20 bg-neutral-950/[0.08] px-2 py-0.5 text-[11px] text-neutral-900">
               {Math.round(citation.confidence || 0)}%
             </span>
           </div>
 
           {preview ? (
-            <p className="mb-3 text-xs leading-5 text-slate-300">{preview}</p>
+            <p className="mb-3 text-xs leading-5 text-neutral-700">{preview}</p>
           ) : null}
 
           <div className="flex items-center gap-2">
             <button
               type="button"
               onClick={handleJump}
-              className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-[11px] text-slate-200 transition hover:bg-white/10"
+              className="rounded-xl border border-neutral-950/10 bg-neutral-950/5 px-2.5 py-1.5 text-[11px] text-neutral-800 transition hover:bg-neutral-950/10"
             >
               Jump to source
             </button>
@@ -190,7 +198,7 @@ export default function InlineCitation({
                 href={citation.directLink}
                 target="_blank"
                 rel="noreferrer"
-                className="rounded-lg border border-blue-400/20 bg-blue-500/10 px-2.5 py-1.5 text-[11px] text-blue-300 transition hover:bg-blue-500/15"
+                className="rounded-xl border border-neutral-950/15 bg-neutral-950/[0.06] px-2.5 py-1.5 text-[11px] text-neutral-900 transition hover:bg-neutral-950/12"
               >
                 Open link
               </a>

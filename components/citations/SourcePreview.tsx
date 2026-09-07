@@ -82,7 +82,7 @@ export default function SourcePreview({ text }: Props) {
   if (!cleaned) return null;
 
   return (
-    <div className="mt-2 whitespace-pre-wrap break-words rounded-lg border border-white/10 bg-black/20 p-3 text-xs leading-6 text-slate-300">
+    <div className="mt-2 whitespace-pre-wrap break-words rounded-xl border border-neutral-950/10 bg-neutral-950/[0.03] p-3 text-xs leading-6 text-neutral-700">
       {cleaned}
     </div>
   );

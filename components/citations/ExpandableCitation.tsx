@@ -24,6 +24,69 @@ interface ExpandableCitationProps {
   index: number;
   expanded: boolean;
   onToggle: () => void;
+  // The question this citation is evidence for (the preceding user
+  // message). Used only to highlight the terms the user actually asked
+  // about inside the excerpt text below - purely a reading aid.
+  queryText?: string;
+}
+
+const HIGHLIGHT_STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "but", "of", "in", "on", "at", "to",
+  "for", "is", "are", "was", "were", "be", "been", "being", "what",
+  "does", "do", "did", "how", "when", "where", "which", "who", "why",
+  "with", "about", "say", "says", "this", "that", "these", "those",
+  "can", "could", "should", "would", "will", "shall", "must", "may",
+  "it", "its", "as", "by", "from", "into", "than", "then", "there",
+]);
+
+function extractQueryTerms(queryText?: string): string[] {
+  if (!queryText) return [];
+
+  const seen = new Set<string>();
+  const terms: string[] = [];
+
+  for (const raw of queryText.match(/[A-Za-z0-9][A-Za-z0-9''-]*/g) || []) {
+    const term = raw.toLowerCase();
+    if (term.length < 3) continue;
+    if (HIGHLIGHT_STOPWORDS.has(term)) continue;
+    if (seen.has(term)) continue;
+    seen.add(term);
+    terms.push(raw);
+    if (terms.length >= 10) break;
+  }
+
+  return terms;
+}
+
+function escapeRegExp(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Wraps occurrences of any highlight term in <mark>, case-insensitively,
+// on whole-ish word boundaries so "site" doesn't also light up inside
+// "opposite". Falls back to the plain string when there's nothing to
+// highlight or the text is empty.
+function highlightText(text: string, terms: string[]): React.ReactNode {
+  if (!text || terms.length === 0) return text;
+
+  const pattern = terms.map(escapeRegExp).join("|");
+  const re = new RegExp(`\\b(${pattern})\\b`, "gi");
+  const segments = text.split(re);
+
+  if (segments.length === 1) return text;
+
+  return segments.map((segment, i) =>
+    i % 2 === 1 ? (
+      <mark
+        key={i}
+        className="rounded-md bg-neutral-950/20 px-0.5 text-neutral-950"
+      >
+        {segment}
+      </mark>
+    ) : (
+      <React.Fragment key={i}>{segment}</React.Fragment>
+    )
+  );
 }
 
 type EvidenceBucket = {
@@ -311,24 +374,48 @@ function extractComplianceBuckets(lines: string[]): EvidenceBucket[] {
   return buckets;
 }
 
-function getConfidenceTone(confidence: number) {
-  if (confidence >= 85) {
+// Thresholds are calibrated to how our retrieval actually scores real
+// matches: cosine-similarity confidence for genuinely relevant chunks
+// typically lands in the 65-90% band, so an 85/60 cutoff left almost
+// every solid citation labeled "medium." 75/55 reflects that a citation
+// in the 75%+ range is a strong match here, not a borderline one.
+export function getConfidenceTier(
+  confidence: number
+): "high" | "medium" | "low" {
+  if (confidence >= 75) return "high";
+  if (confidence >= 55) return "medium";
+  return "low";
+}
+
+// Same meter convention used everywhere else in this app: brightness
+// scales with the tier (High is a solid fill, Low is barely visible),
+// since the High/Medium/Low text label is the real signal, not hue.
+export function getConfidenceTone(confidence: number) {
+  const tier = getConfidenceTier(confidence);
+
+  if (tier === "high") {
     return {
-      chip: "border-emerald-400/25 bg-emerald-500/10 text-emerald-300",
-      dot: "bg-emerald-400",
+      tier,
+      label: "High",
+      chip: "border-neutral-950/30 bg-neutral-950/12 text-neutral-950",
+      dot: "bg-neutral-950",
     };
   }
 
-  if (confidence >= 60) {
+  if (tier === "medium") {
     return {
-      chip: "border-amber-400/25 bg-amber-500/10 text-amber-300",
-      dot: "bg-amber-400",
+      tier,
+      label: "Medium",
+      chip: "border-neutral-950/18 bg-neutral-950/6 text-neutral-700",
+      dot: "bg-neutral-600",
     };
   }
 
   return {
-    chip: "border-rose-400/25 bg-rose-500/10 text-rose-300",
-    dot: "bg-rose-400",
+    tier,
+    label: "Low",
+    chip: "border-neutral-950/10 bg-neutral-950/4 text-neutral-500",
+    dot: "bg-neutral-400",
   };
 }
 
@@ -338,42 +425,47 @@ function getTypeLabel(type: string) {
   if (type === "technical_standard") return "Standard";
   if (type === "rate_schedule") return "Schedule";
   if (type === "web") return "Web";
+  if (type === "user_upload") return "Your upload";
   return type || "Source";
 }
 
+// These four are categories, not a scale (the main rule vs. its
+// conditions vs. its exceptions vs. general supporting text) - so
+// they're differentiated by weight and border style instead of a
+// brightness gradient, which is reserved for actual meters above.
 function bucketToneClasses(tone: EvidenceBucket["tone"]) {
   if (tone === "primary") {
     return {
-      wrap: "border-blue-400/15 bg-blue-500/[0.04]",
-      title: "text-blue-300",
-      dot: "bg-blue-400",
+      wrap: "border-neutral-950/20 bg-neutral-950/[0.05]",
+      title: "text-neutral-950",
+      dot: "bg-neutral-950",
     };
   }
 
   if (tone === "condition") {
     return {
-      wrap: "border-amber-400/15 bg-amber-500/[0.04]",
-      title: "text-amber-300",
-      dot: "bg-amber-400",
+      wrap: "border-neutral-950/12 bg-neutral-950/[0.03]",
+      title: "text-neutral-700",
+      dot: "bg-neutral-600",
     };
   }
 
   if (tone === "exception") {
     return {
-      wrap: "border-rose-400/15 bg-rose-500/[0.04]",
-      title: "text-rose-300",
-      dot: "bg-rose-400",
+      wrap: "border-dashed border-neutral-950/15 bg-neutral-950/[0.03]",
+      title: "text-neutral-800",
+      dot: "bg-neutral-700",
     };
   }
 
   return {
-    wrap: "border-white/10 bg-white/[0.02]",
-    title: "text-slate-300",
-    dot: "bg-slate-400",
+    wrap: "border-neutral-950/10 bg-neutral-950/[0.02]",
+    title: "text-neutral-700",
+    dot: "bg-neutral-600",
   };
 }
 
-function renderEvidenceLine(line: string, key: string) {
+function renderEvidenceLine(line: string, key: string, terms: string[] = []) {
   const trimmed = line.trim();
 
   if (looksLikeClause(trimmed)) {
@@ -384,10 +476,10 @@ function renderEvidenceLine(line: string, key: string) {
     return (
       <p
         key={key}
-        className="break-words [overflow-wrap:anywhere] border-l-2 border-blue-400/40 pl-3 text-blue-200"
+        className="break-words [overflow-wrap:anywhere] border-l-2 border-neutral-950/40 pl-3 text-neutral-800"
       >
-        <span className="font-semibold text-blue-300">{clause}</span>{" "}
-        <span className="text-slate-200">{rest}</span>
+        <span className="font-semibold text-neutral-950">{clause}</span>{" "}
+        <span className="text-neutral-800">{highlightText(rest, terms)}</span>
       </p>
     );
   }
@@ -396,10 +488,10 @@ function renderEvidenceLine(line: string, key: string) {
     return (
       <div
         key={key}
-        className="relative break-words [overflow-wrap:anywhere] pl-5 text-slate-200"
+        className="relative break-words [overflow-wrap:anywhere] pl-5 text-neutral-800"
       >
-        <span className="absolute left-0 top-[10px] h-1.5 w-1.5 rounded-full bg-slate-400" />
-        {trimmed.slice(2).trim()}
+        <span className="absolute left-0 top-[10px] h-1.5 w-1.5 rounded-full bg-neutral-600" />
+        {highlightText(trimmed.slice(2).trim(), terms)}
       </div>
     );
   }
@@ -408,17 +500,17 @@ function renderEvidenceLine(line: string, key: string) {
     return (
       <div
         key={key}
-        className="relative break-words [overflow-wrap:anywhere] pl-5 text-slate-200"
+        className="relative break-words [overflow-wrap:anywhere] pl-5 text-neutral-800"
       >
-        <span className="absolute left-0 top-[10px] h-1.5 w-1.5 rounded-full bg-slate-400" />
-        {trimmed.replace(/^[•\-]\s*/, "")}
+        <span className="absolute left-0 top-[10px] h-1.5 w-1.5 rounded-full bg-neutral-600" />
+        {highlightText(trimmed.replace(/^[•\-]\s*/, ""), terms)}
       </div>
     );
   }
 
   if (looksLikeNumericPoint(trimmed)) {
     return (
-      <div key={key} className="text-sm font-semibold text-slate-400">
+      <div key={key} className="text-sm font-semibold text-neutral-600">
         {trimmed.replace(/\.$/, "")}.
       </div>
     );
@@ -428,7 +520,7 @@ function renderEvidenceLine(line: string, key: string) {
     return (
       <p
         key={key}
-        className="break-words [overflow-wrap:anywhere] font-semibold text-fuchsia-300"
+        className="break-words [overflow-wrap:anywhere] font-semibold uppercase tracking-wide text-neutral-700"
       >
         {trimmed}
       </p>
@@ -439,7 +531,7 @@ function renderEvidenceLine(line: string, key: string) {
     return (
       <p
         key={key}
-        className="break-words [overflow-wrap:anywhere] font-semibold tracking-wide text-purple-300"
+        className="break-words [overflow-wrap:anywhere] font-semibold tracking-wide text-neutral-700"
       >
         {trimmed}
       </p>
@@ -447,8 +539,8 @@ function renderEvidenceLine(line: string, key: string) {
   }
 
   return (
-    <p key={key} className="break-words [overflow-wrap:anywhere] text-slate-200">
-      {trimmed}
+    <p key={key} className="break-words [overflow-wrap:anywhere] text-neutral-800">
+      {highlightText(trimmed, terms)}
     </p>
   );
 }
@@ -499,7 +591,9 @@ export default function ExpandableCitation({
   index,
   expanded,
   onToggle,
+  queryText,
 }: ExpandableCitationProps) {
+  const highlightTerms = useMemo(() => extractQueryTerms(queryText), [queryText]);
   const [pagePreviewOpen, setPagePreviewOpen] = useState(false);
   const [pagePreviewLoading, setPagePreviewLoading] = useState(false);
   const [pagePreviewUrl, setPagePreviewUrl] = useState<string | null>(null);
@@ -616,51 +710,69 @@ export default function ExpandableCitation({
   };
 
 
+  const accentBar =
+    tone.tier === "high"
+      ? "bg-neutral-950/80"
+      : tone.tier === "medium"
+      ? "bg-neutral-600/70"
+      : "bg-neutral-400/70";
+
   return (
-    <div className="rounded-2xl border border-white/10 bg-white/[0.04] transition-all duration-200 hover:border-white/15 hover:bg-white/[0.06]">
+    <div className="relative overflow-hidden rounded-3xl border border-neutral-950/10 bg-neutral-950/[0.04] shadow-[0_1px_3px_rgba(0,0,0,0.04),0_1px_2px_rgba(0,0,0,0.03)] transition-all duration-200 hover:border-neutral-950/15 hover:bg-neutral-950/[0.06] hover:shadow-[0_2px_8px_rgba(0,0,0,0.05),0_1px_2px_rgba(0,0,0,0.03)]">
+      <span
+        aria-hidden="true"
+        className={`absolute inset-y-0 left-0 w-[3px] ${accentBar}`}
+      />
       <button
         type="button"
         onClick={onToggle}
-        className="group w-full px-4 py-3 text-left"
+        aria-expanded={expanded}
+        aria-label={`${expanded ? "Collapse" : "Expand"} source: ${
+          citation.title || "Untitled source"
+        }`}
+        className="group w-full py-3 pl-5 pr-4 text-left"
       >
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0 flex-1">
             <div className="mb-2 flex items-center gap-2">
-              <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-full border border-white/10 bg-white/10 px-2 text-[11px] font-semibold text-slate-200">
+              <span className="inline-flex h-6 min-w-6 items-center justify-center rounded-full border border-neutral-950/10 bg-neutral-950/10 px-2 text-[11px] font-semibold text-neutral-800">
                 {index + 1}
               </span>
 
-              <h4 className="truncate text-sm font-semibold text-white transition group-hover:text-blue-300">
+              <h4 className="truncate text-sm font-semibold text-neutral-950 transition group-hover:text-neutral-700">
                 {citation.title || "Untitled source"}
               </h4>
             </div>
 
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-neutral-600">
               {citation.pageNumber ? <span>Page {citation.pageNumber}</span> : null}
               {citation.clauseNumber ? <span>Clause {citation.clauseNumber}</span> : null}
               {citation.section ? (
-                <span className="max-w-[280px] truncate text-slate-500">
+                <span className="max-w-[280px] truncate text-neutral-500">
                   {citation.section}
                 </span>
               ) : null}
             </div>
 
             {previewText ? (
-              <p className="mt-2 line-clamp-2 text-xs leading-5 text-slate-300/90">
-                {previewText}
+              <p className="mt-2 line-clamp-2 text-xs leading-5 text-neutral-700/90">
+                {highlightText(previewText, highlightTerms)}
               </p>
             ) : null}
           </div>
 
           <div className="flex shrink-0 flex-col items-end gap-2">
             <span
-              className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium ${tone.chip}`}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium ${tone.chip}`}
             >
               <span className={`h-1.5 w-1.5 rounded-full ${tone.dot}`} />
-              {Math.round(citation.confidence || 0)}%
+              <span className="font-mono">{Math.round(citation.confidence || 0)}%</span>
+              <span className="text-[9px] font-semibold uppercase tracking-wide opacity-80">
+                {tone.label}
+              </span>
             </span>
 
-            <span className="rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] text-slate-300">
+            <span className="rounded-full border border-neutral-950/10 bg-neutral-950/5 px-2.5 py-1 text-[11px] text-neutral-700">
               {getTypeLabel(citation.type)}
             </span>
           </div>
@@ -676,14 +788,14 @@ export default function ExpandableCitation({
             transition={{ duration: 0.22 }}
             className="overflow-visible"
           >
-            <div className="border-t border-white/10 bg-black/10 px-4 py-4">
+            <div className="border-t border-neutral-950/10 bg-neutral-950/[0.02] px-4 py-4">
               <div className="mb-3 flex flex-wrap items-center gap-2">
                 {citation.directLink ? (
                   <a
                     href={citation.directLink}
                     target="_blank"
                     rel="noreferrer"
-                    className="inline-flex items-center rounded-lg border border-blue-400/20 bg-blue-500/10 px-3 py-1.5 text-xs text-blue-300 transition hover:bg-blue-500/15"
+                    className="inline-flex items-center rounded-xl border border-neutral-950/15 bg-neutral-950/[0.06] px-3 py-1.5 text-xs text-neutral-900 transition hover:bg-neutral-950/12"
                   >
                     Open source
                   </a>
@@ -695,7 +807,7 @@ citation.directLink.startsWith("http") ? (
                   <button
                     type="button"
                     onClick={loadPagePreview}
-                    className="inline-flex items-center rounded-lg border border-purple-400/20 bg-purple-500/10 px-3 py-1.5 text-xs text-purple-300 transition hover:bg-purple-500/15"
+                    className="inline-flex items-center rounded-xl border border-neutral-950/15 bg-neutral-950/[0.06] px-3 py-1.5 text-xs text-neutral-900 transition hover:bg-neutral-950/12"
                   >
                     {pagePreviewLoading
                       ? "Loading page..."
@@ -708,28 +820,28 @@ citation.directLink.startsWith("http") ? (
                   onClick={() =>
                     navigator.clipboard.writeText(rawDisplayText || cleanedFullText)
                   }
-                  className="inline-flex items-center rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-200 transition hover:bg-white/10"
+                  className="inline-flex items-center rounded-xl border border-neutral-950/10 bg-neutral-950/5 px-3 py-1.5 text-xs text-neutral-800 transition hover:bg-neutral-950/10"
                 >
                   Copy text
                 </button>
 
                 {rawLikelyTruncated ? (
-                  <span className="inline-flex items-center rounded-lg border border-amber-400/20 bg-amber-500/10 px-3 py-1.5 text-xs text-amber-300">
+                  <span className="inline-flex items-center rounded-xl border border-dashed border-neutral-950/20 bg-neutral-950/[0.05] px-3 py-1.5 text-xs text-neutral-800">
                     Source text appears truncated upstream
                   </span>
                 ) : null}
               </div>
 
               {pagePreviewError ? (
-                <div className="mb-3 rounded-xl border border-rose-400/20 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+                <div className="mb-3 rounded-2xl border border-neutral-950/25 bg-neutral-950/10 px-3 py-2 text-xs text-neutral-950">
                   {pagePreviewError}
                 </div>
               ) : null}
 
 {pagePreviewOpen && pagePreviewUrl ? (
-  <div className="mb-4 rounded-2xl border border-white/10 bg-black/20 p-3">
+  <div className="mb-4 rounded-3xl border border-neutral-950/10 bg-neutral-950/[0.03] p-3">
     <div className="mb-3 flex items-center justify-between gap-3">
-      <p className="text-xs text-slate-400">
+      <p className="text-xs text-neutral-600">
         Source page preview — Page {citation.pageNumber}
       </p>
 
@@ -737,7 +849,7 @@ citation.directLink.startsWith("http") ? (
         href={pagePreviewUrl}
         target="_blank"
         rel="noreferrer"
-        className="inline-flex items-center rounded-lg border border-blue-400/20 bg-blue-500/10 px-3 py-1.5 text-xs text-blue-300 transition hover:bg-blue-500/15"
+        className="inline-flex items-center rounded-xl border border-neutral-950/15 bg-neutral-950/[0.06] px-3 py-1.5 text-xs text-neutral-900 transition hover:bg-neutral-950/12"
       >
         Open full page
       </a>
@@ -746,23 +858,23 @@ citation.directLink.startsWith("http") ? (
     <iframe
       src={pagePreviewUrl}
       title={`Preview of page ${citation.pageNumber}`}
-      className="h-[720px] w-full rounded-lg border border-white/10 bg-white"
+      className="h-[720px] w-full rounded-xl border border-neutral-950/10 bg-white"
     />
   </div>
 ) : null}
 
               {shouldUseRawFallback ? (
-                <div className="rounded-2xl border border-amber-400/15 bg-amber-500/[0.04] p-4">
+                <div className="rounded-3xl border border-dashed border-neutral-950/20 bg-neutral-950/[0.05] p-4">
                   <div className="mb-3 flex items-center gap-2">
-                    <span className="h-2 w-2 rounded-full bg-amber-400" />
-                    <h5 className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-300">
+                    <span className="h-2 w-2 rounded-full bg-neutral-600" />
+                    <h5 className="text-xs font-semibold uppercase tracking-[0.14em] text-neutral-700">
                       Raw extract
                     </h5>
                   </div>
 
                   <div className="space-y-2 text-[12px] leading-7">
                     {rawParagraphs.slice(0, 40).map((line, i) =>
-                      renderEvidenceLine(line, `${citation.id}-raw-${i}`)
+                      renderEvidenceLine(line, `${citation.id}-raw-${i}`, highlightTerms)
                     )}
                   </div>
                 </div>
@@ -774,7 +886,7 @@ citation.directLink.startsWith("http") ? (
                     return (
                       <div
                         key={`${citation.id}-bucket-${bucketIndex}`}
-                        className={`rounded-2xl border p-4 ${bucketTone.wrap}`}
+                        className={`rounded-3xl border p-4 ${bucketTone.wrap}`}
                       >
                         <div className="mb-3 flex items-center gap-2">
                           <span className={`h-2 w-2 rounded-full ${bucketTone.dot}`} />
@@ -791,7 +903,8 @@ citation.directLink.startsWith("http") ? (
                           {bucket.lines.map((line, lineIndex) =>
                             renderEvidenceLine(
                               line,
-                              `${citation.id}-${bucketIndex}-${lineIndex}`
+                              `${citation.id}-${bucketIndex}-${lineIndex}`,
+                              highlightTerms
                             )
                           )}
                         </div>

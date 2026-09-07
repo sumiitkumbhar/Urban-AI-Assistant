@@ -7,3 +7,22 @@ node_modules
 .env.test.local
 *.log
 .DS_Store
+
+# Chatterbox voice service (voice-service/) - Python venv, cache, and any
+# personal reference-voice clip shouldn't be committed.
+voice-service/venv/
+voice-service/__pycache__/
+voice-service/*.wav
+
+# Build artifacts
+tsconfig.tsbuildinfo
+
+# Python (voice-agent mirrors voice-service above)
+voice-agent/venv/
+__pycache__/
+*.pyc
+
+# Throwaway patch scripts from earlier AI-assisted edits - not part of the
+# project. Safe to delete from the working tree at any time.
+scripts/_tmp_*.py
+scripts/_to_delete/
