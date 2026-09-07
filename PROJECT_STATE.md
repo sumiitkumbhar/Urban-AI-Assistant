@@ -366,9 +366,12 @@ Ordered by value for effort.
    requirements.txt` then `uvicorn app:app --port 8008`. This is the single
    biggest quality jump available (natural voice instead of the robotic browser
    one) and it has never been executed. Capture the first error if it fails.
-2. **Runtime-verify the two 2026-09-06 backend changes.** Say "hi" (should return
-   instantly, no `STEP 1` in the dev-server log) and ask about "NPPF" by voice
-   (should show the amber correction note and use NPPF throughout).
+2. **Run the stabilisation harness on the Mac.** `RAG_TIMING=1` in `.env.local`,
+   `npm run dev`, then `node scripts/stabilization-test.mjs`. This covers
+   Priority 2 (fast path + correction, 8 checks) and Priority 4 (17 RAG
+   questions + a conversation-memory pair) and writes
+   `stabilization-report.json`. The dev-server output carries the Priority 5
+   `⏱️ TIMING` lines.
 3. **Confirm `next build` completes on macOS.** ROOT CAUSE OF THE EARLIER HANG
    FOUND (2026-09-07): the assistant's shell runs in a **linux/arm64** VM, but
    `node_modules/@next/` contains only `swc-darwin-arm64` (installed on the Mac).
@@ -396,6 +399,49 @@ Ordered by value for effort.
 
 Append an entry after every meaningful change. Format: what changed, files
 touched, what was tested, result.
+
+### 2026-09-07 — Priority 5 instrumentation + P2/P4 test harness
+- **Changed:** (a) Added opt-in per-stage latency instrumentation to
+  `app/api/rag-chat/route.ts`, off unless `RAG_TIMING=1`. Marks sit next to the
+  STEP logs that already existed, so it measures the current flow rather than
+  reshaping it — no refactor of the 3,900-line route. Emits one
+  `⏱️ TIMING {...}` line per request with per-stage milliseconds, the slowest
+  stage, and the total. Stages covered: term correction, conversation memory +
+  condense, embedding/vector/keyword search, Groq rerank, local rerank, region
+  filter, web fallback, answer generation, post-generation assembly,
+  groundedness, voice rewrite. (b) Added `scripts/stabilization-test.mjs`, a
+  dependency-free harness that runs Priority 2 and Priority 4 against a live
+  dev server and writes `stabilization-report.json`.
+- **Files:** `app/api/rag-chat/route.ts` (14 insertions),
+  `scripts/stabilization-test.mjs` (new), `.gitignore`.
+- **Tested:** `tsc --noEmit` clean (exit 0); `node --check` on the harness.
+- **Result:** Instrumentation and harness are in place. **No latency numbers
+  and no P2/P4 results yet** — see the blocker below.
+
+### 2026-09-07 — BLOCKER: the assistant cannot execute this app
+Recorded because it determines who can complete Priorities 2, 4, 5 and 6.
+
+The assistant's shell is an isolated **linux/arm64** VM. Two independent hard
+blocks, both verified today:
+
+1. **No runnable Next.js.** `node_modules/@next/` contains only
+   `swc-darwin-arm64` (installed on the Mac). `next dev` exits with "Failed to
+   load SWC binary for linux/arm64"; `next build` stalls with no output — which
+   is exactly what the earlier "16-minute hang" was. Installing the linux binary
+   requires the npm registry, which is blocked.
+2. **No network to any service the app needs.** `api.groq.com`,
+   `generativelanguage.googleapis.com`, `supabase.co` and `api.tavily.com` all
+   return `X-Proxy-Error: blocked-by-allowlist`. PyPI is blocked too, which is
+   why `voice-service/` has never run.
+
+Consequence: Priorities 2, 4, 5 and 6 can only be executed on the Mac itself.
+Everything that does not need to run the app (Priorities 1, 3, the P5
+instrumentation, and the P7 diagnosis) was completed by the assistant.
+
+**To unblock, on the Mac:** add `RAG_TIMING=1` to `.env.local`, run
+`npm run dev`, then `node scripts/stabilization-test.mjs`. Send back
+`stabilization-report.json` plus the dev-server output (which carries the
+`⏱️ TIMING` lines).
 
 ### 2026-09-07 — Priority 3: gate UI for functionality with no backend
 - **Changed:** Added a `FEATURES` flag block to `ChatInterface.tsx` and gated

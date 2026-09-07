@@ -3029,6 +3029,61 @@ async function persistConversationTurn(
 }
 
 // =============================================================================
+// STAGE TIMING (development instrumentation)
+// =============================================================================
+//
+// Opt-in per-stage latency measurement, off unless RAG_TIMING=1 is set. It
+// exists because the pipeline runs up to four sequential Groq calls plus an
+// embedding and two DB queries, and "the chatbot is slow" is not actionable
+// without knowing which of those dominates.
+//
+// Deliberately additive: marks are recorded next to the STEP logs that were
+// already there, so this measures the existing flow rather than reshaping it.
+// Set RAG_TIMING=1 in .env.local, ask a few questions, read the ⏱️ TIMING
+// line in the dev-server output. Each number is milliseconds for that stage
+// alone (delta from the previous mark), not cumulative.
+
+const RAG_TIMING = process.env.RAG_TIMING === "1";
+
+interface StageTimer {
+  mark: (label: string) => void;
+  report: (meta?: Record<string, unknown>) => void;
+}
+
+function createStageTimer(): StageTimer {
+  const start = Date.now();
+  let last = start;
+  const stages: Array<[string, number]> = [];
+
+  return {
+    mark(label: string) {
+      if (!RAG_TIMING) return;
+      const now = Date.now();
+      stages.push([label, now - last]);
+      last = now;
+    },
+    report(meta: Record<string, unknown> = {}) {
+      if (!RAG_TIMING) return;
+      const total = Date.now() - start;
+      const slowest = stages.reduce<[string, number]>(
+        (acc, s) => (s[1] > acc[1] ? s : acc),
+        ["none", 0]
+      );
+      console.log(
+        "⏱️ TIMING " +
+          JSON.stringify({
+            total_ms: total,
+            slowest_stage: slowest[0],
+            slowest_ms: slowest[1],
+            stages: Object.fromEntries(stages),
+            ...meta,
+          })
+      );
+    },
+  };
+}
+
+// =============================================================================
 // GREETING / SMALL-TALK FAST PATH
 // =============================================================================
 //
@@ -3097,6 +3152,7 @@ function matchGreetingFastPath(rawQuery: string): string | null {
 
 export async function POST(req: Request) {
   const start = Date.now();
+  const timer = createStageTimer();
 
   try {
     let body: RagRequest;
@@ -3144,6 +3200,8 @@ export async function POST(req: Request) {
     // rather than one Supabase round-trip away from instant.
     const greetingFastPathReply = matchGreetingFastPath(rawQuery);
     if (greetingFastPathReply) {
+      timer.mark("greeting_fast_path");
+      timer.report({ path: "greeting_fast_path" });
       const fastPathVoiceMode = body.voiceMode === true;
       return NextResponse.json({
         success: true,
@@ -3173,6 +3231,8 @@ export async function POST(req: Request) {
     // touches ordinary English. See lib/domain-vocabulary.ts.
     const { correctedQuery: query, corrections: termCorrections } =
       correctDomainTerms(rawQuery, { voiceMode: body.voiceMode === true });
+
+    timer.mark("term_correction");
 
     if (termCorrections.length) {
       console.log(
@@ -3211,6 +3271,8 @@ export async function POST(req: Request) {
     const retrievalQuery = conversationHistory.length
       ? await condenseFollowUpQuery(conversationHistory, query)
       : query;
+
+    timer.mark("conversation_memory_and_condense");
 
     const conversationContext = buildConversationContextForPrompt(
       conversationHistory
@@ -3335,6 +3397,7 @@ export async function POST(req: Request) {
     console.log("⏱️ STEP 1: starting searchRAG");
     let chunks = await searchRAG(retrievalQuery, region, topK, threshold);
     console.log("⏱️ STEP 1 DONE: searchRAG returned", chunks.length, "chunks");
+    timer.mark("embedding_and_vector_and_keyword_search");
 
     // Merge in any documents the visitor uploaded earlier in THIS
     // conversation (lib/userDocuments.ts) - e.g. a site plan or letter
@@ -3393,6 +3456,7 @@ export async function POST(req: Request) {
     console.log("⏱️ STEP 1.5: LLM reranking (Groq)");
     chunks = await rerankWithGroq(retrievalQuery, chunks);
     console.log("⏱️ STEP 1.5 DONE: LLM reranking complete");
+    timer.mark("groq_rerank");
 
     console.log("⏱️ STEP 2: reranking");
     chunks = reRankByCitations(chunks, retrievalQuery);
@@ -3400,6 +3464,7 @@ export async function POST(req: Request) {
     chunks = rankRetrievedChunks(retrievalQuery, chunks);
     chunks = diversifyChunks(chunks);
     console.log("⏱️ STEP 2 DONE: reranking complete");
+    timer.mark("local_rerank");
 
     console.log("⏱️ STEP 3: document-region filtering");
     const requestedDocRegion = detectRequestedDocumentRegion(query);
@@ -3416,6 +3481,7 @@ export async function POST(req: Request) {
       }
     }
     console.log("⏱️ STEP 3 DONE: filtered chunks =", chunks.length);
+    timer.mark("region_filter");
     console.log(
       "🔎 TOP RANKED CHUNKS:",
       chunks.slice(0, 12).map((c, i) => ({
@@ -3656,6 +3722,7 @@ These values were extracted directly from fragmented table-related chunks. They 
     const webCitations = useWebFallback ? await fetchWebFallback(query) : [];
 
     console.log("⏱️ STEP 5 DONE: web citations =", webCitations.length);
+    timer.mark("web_fallback");
 
     console.log("⏱️ STEP 6: preparing answer gating");
     const topSimilarity = getTopSimilarityScore(chunks);
@@ -3731,6 +3798,7 @@ These values were extracted directly from fragmented table-related chunks. They 
         conversationContext
       );
       console.log("⏱️ STEP 7 DONE: generateAnswer returned");
+    timer.mark("answer_generation");
     }
 
     const answerFailedReliably =
@@ -3774,6 +3842,7 @@ These values were extracted directly from fragmented table-related chunks. They 
     }
 
     console.log("⏱️ STEP 6.5: checking groundedness");
+    timer.mark("post_generation_assembly");
     let groundedness: number | null = null;
     let unsupportedClaims: string[] = [];
 
@@ -3842,9 +3911,18 @@ These values were extracted directly from fragmented table-related chunks. They 
       .trim();
 
     console.log("⏱️ STEP 8: voiceMode =", voiceMode);
+    timer.mark("groundedness_check");
     const speechText = voiceMode
       ? (await humanizeForSpeech(query, finalAnswer)) || undefined
       : undefined;
+
+    timer.mark("voice_rewrite");
+    timer.report({
+      path: "full_pipeline",
+      chunks: chunks.length,
+      web_fallback: webCitations.length > 0,
+      voice_mode: voiceMode,
+    });
 
     const response: RagResponse = {
       success: true,

@@ -26,3 +26,4 @@ __pycache__/
 # project. Safe to delete from the working tree at any time.
 scripts/_tmp_*.py
 scripts/_to_delete/
+stabilization-report.json
