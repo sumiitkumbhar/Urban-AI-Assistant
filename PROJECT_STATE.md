@@ -842,6 +842,35 @@ Two consequences worth noting:
 Append an entry after every meaningful change. Format: what changed, files
 touched, what was tested, result.
 
+### 2026-09-07 — Premium UI pass 3: three defects found in screenshots
+- **Changed:**
+  - `app/globals.css` — appended a TOKEN CORRECTION block, last in the
+    cascade. **Root cause of the black composer:** a stray `:root` block near
+    line 7843 sets `--glass: rgba(10,10,11,0.95)` and `--text: #ffffff`, and
+    the rule at ~line 2533 applies both to every `input[type="text"]` with
+    `!important`. Tailwind classes on the input could never win. The new
+    block restores `--glass: #fbf9f5`, `--text: #1c1a16`,
+    `--border: rgb(61 52 38 / 0.14)`, `--bg: #f7f4ee`, plus `.uaa-composer`
+    overrides for the pill radius and paper background.
+  - `components/chat/ConversationSidebar.tsx` — **regression I introduced and
+    have now removed.** The collapsed rail showed each conversation's first
+    letter; since nearly every title begins "What" or "How", the rail was a
+    column of identical letters and read as a rendering fault. Replaced with
+    a position mark (short dash, elongating to an ink pill when active),
+    capped at `RAIL_VISIBLE = 14` with a `+N` button that expands the
+    sidebar. Titles are still exposed via `title` and `aria-label`.
+  - `components/chat/ChatInterface.tsx` — the conversation column now
+    reserves `min-h-[calc(100vh-16rem)]`, the same height the welcome screen
+    already reserved. Previously the scroll container shrank the instant the
+    first message was sent, which is what made the thinking indicator look
+    like it snapped to the top of an empty page.
+- **Tested:** `npx tsc --noEmit` on the Mac — exit 0. Not yet verified in a
+  browser; the dev server must be restarted and the three items re-checked
+  visually (composer is paper-coloured, rail shows dashes not letters, no
+  jump on send).
+- **Result:** Committed as `a6e1ace`. **Not pushed** — `git push` still has to
+  be run by Sumit; GitHub is unreachable from the assistant's shell.
+
 ### 2026-09-07 — Proposal: local PostgreSQL + pgvector for the corpus
 - **Changed:** `docs/local-postgres-corpus-proposal.md` (new). **Proposal only —
   no code changed, nothing migrated.**
