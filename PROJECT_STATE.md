@@ -395,10 +395,149 @@ Ordered by value for effort.
 
 ---
 
+## 11b. Council corpus ingestion — audit (2026-09-07)
+
+Audit of the ingestion path **before** downloading anything. Conclusion up
+front: **do not start bulk ingestion.** Two independent blockers, one of them
+fatal on the current plan.
+
+### Tracker (`data/uk-lpa-tracker.csv`)
+- 502 rows. **468 `pending_ingest`** (a URL is filled in), 34 `pending_discovery`.
+- 468 URLs, **446 unique** → 22 rows share a URL (joint/shared plans, expected —
+  each authority needs its own row but the document is identical).
+- ~70 distinct `doc_type` values. Notably **40 rows are `local_plan_policies_map`**
+  — map PDFs that typically carry almost no extractable text and would produce
+  near-empty or junk chunks. Candidates to exclude.
+- Some rows are explicitly superseded-era documents (`local_plan_udp`,
+  `*_saved_policies`), which is the "conflicting versions" risk to watch.
+
+### Schema (write side vs read side)
+Ingestion writes `documents`(title, region, jurisdiction_level, doc_type,
+source_path, **source_url**, year, citation_ref, updated_at) and
+`chunks`(document_id, chunk_index, content, page, page_label, clause,
+clause_label, section, region, doc_type, embedding).
+
+Retrieval (`match_rag_chunks_fulltext` in `sql/hybrid_search_setup.sql`, and
+`match_rag_chunks`) returns: region, jurisdiction, doc_title, doc_path,
+doc_kind, clause_label, section_heading, citation_full, content, distance,
+page_from, page_to, rank.
+
+**Metadata coverage against the requested minimum:**
+
+| Field | Stored? | Reaches retrieval? | Note |
+|---|---|---|---|
+| Council / LPA name | Yes, inside `documents.title` | Yes, as `doc_title` | Only as free text; also in `jurisdiction_level` as an ONS code (`UK-ENG-E60000001`) |
+| Document title | Yes | Yes | See title bug, fixed below |
+| Source URL | Yes (`documents.source_url`) | **NO** | RPCs return `source_path`, never `source_url` |
+| Document type | Yes | Yes (`doc_kind`) | |
+| Region / country | Yes (`uk`) | Yes | Country-level only |
+| Page number | Yes | Yes (`page_from`/`page_to`) | Real page numbers, good |
+| Section / heading | **No** | n/a | `section`/`clause` written as `null` by design |
+| Chunk text | Yes | Yes | |
+| Embedding | Yes, 768-dim Gemini | Yes | Matches live config |
+| Ingestion timestamp | Partial (`updated_at` date) | No | |
+
+### Blocker 1 — council-specific retrieval does not exist
+`searchRAG()` passes only `filter_region`, and region is country-level
+(`india`/`uk`/`usa`). **There is no council/LPA filter anywhere.** All 468
+plans would land in region `uk` alongside the NPPF and be retrieved
+undifferentiated. `jurisdiction_level` (the ONS code) is returned as
+`jurisdiction` but is not used for filtering, display, or citations.
+
+Consequence for the requested pilot test: "confirm another council's Local Plan
+is not incorrectly treated as Reading policy" **cannot pass today** — nothing in
+the system scopes retrieval to a council. The only signal is the council name
+happening to appear in `doc_title` and in the chunk text.
+
+### Blocker 2 — citation links will not work
+Citations build `directLink` from `chunk.doc_path` and only if it starts with
+`http` (`app/api/rag-chat/route.ts`). Ingestion sets `source_path` to the
+**file name**, and puts the real URL in `source_url`, which the RPCs never
+return. So every ingested council plan would produce a citation with no working
+link back to the council's PDF.
+
+### Capacity check — MANDATORY STOP
+Measured with the repo's own chunker (`CHUNK_TARGET_CHARS = 1100`,
+`CHUNK_OVERLAP_CHARS = 150`) against the NPPF PDF actually in the repo:
+
+- 130 pages → **351 chunks**, **2.7 chunks/page**, **919 chars/chunk average**
+
+Per-chunk storage: 768-dim `vector` ≈ 3.0 KB, content ≈ 0.9 KB, generated
+`content_tsv` ≈ 0.6 KB, other columns + row overhead ≈ 0.2 KB →
+**≈ 4.7 KB/chunk of data**, or **≈ 8 KB/chunk** once the GIN and pgvector
+indexes are counted.
+
+Projection for 446 unique documents (page counts are estimates — the PDFs have
+not been downloaded):
+
+| Avg pages/plan | Chunks | Data only | With indexes |
+|---|---|---|---|
+| 150 | ~181,000 | ~0.85 GB | ~1.4 GB |
+| 250 | ~301,000 | ~1.4 GB | ~2.4 GB |
+| 400 | ~482,000 | ~2.3 GB | ~3.9 GB |
+
+**Every scenario exceeds the Supabase 500 MB free tier — the most conservative
+by ~1.7×, the mid case by ~5×.** Roughly **90–160 average plans** fit in 500 MB,
+not 446. Bulk ingestion as planned would fill the database and start failing
+partway through, leaving a half-ingested corpus.
+
+Options to analyse before proceeding (not applied — this needs a decision):
+1. **Ingest progressively** — highest-value councils first (e.g. London boroughs
+   + core cities, ~50–90 authorities) and stop at a storage budget.
+2. **Exclude `local_plan_policies_map` (40 rows)** — near-zero text value.
+3. **Deduplicate the 22 shared-URL rows** — ingest once, link many authorities.
+4. **Drop superseded documents** (`local_plan_udp`, `*_saved_policies`).
+5. **Larger chunks** — 2,000–2,500 chars would roughly halve chunk count and
+   embedding storage, at some retrieval-precision cost.
+6. **Paid tier** — 8 GB Pro comfortably holds the full corpus (out of scope
+   under the current no-paid-services constraint).
+
+### Pipeline robustness (already good, verified by reading)
+- ✅ Validates downloads by content-type **and** `%PDF-` magic bytes — an HTML
+  error page is rejected, not ingested.
+- ✅ Embeds **sequentially with a delay** and retries with backoff (3 attempts)
+  — no uncontrolled parallel Gemini requests.
+- ✅ Chunks inserted in batches of 20; tracker saved after every council, so an
+  interrupt resumes safely.
+- ❌ **No duplicate detection.** Re-running would ingest documents again, and the
+  22 shared-URL rows would each create their own copy. Required before bulk.
+
+### Fixed during this audit
+- **Document titles were wrong for 259 of 468 rows.** The script read
+  `doc_type === "local_plan" ? "Local Plan" : "Neighbourhood Plan"`, labelling
+  every Core Strategy, Policies Map, Part 2, etc. as a *Neighbourhood Plan*.
+  Since `documents.title` becomes `doc_title` and is shown as the citation, this
+  was a wrong-citation bug, not a cosmetic one. Replaced with `docTypeLabel()`.
+
+### Not verifiable from here
+- Whether `documents.source_url` exists as a column in the live database (the
+  `documents`/`chunks` DDL is not in the repo — only `hybrid_search_setup.sql`,
+  `chat_history_setup.sql`, `user_documents_setup.sql`). **If that column is
+  missing, every ingestion insert fails immediately.** Check before the pilot.
+- `match_rag_chunks` (vector RPC) source is not in the repo either, so its exact
+  return shape is unverified.
+- Actual page counts, and therefore the true corpus size.
+
 ## 12. Change log
 
 Append an entry after every meaningful change. Format: what changed, files
 touched, what was tested, result.
+
+### 2026-09-07 — Council corpus: ingestion audit + title bug fix
+- **Changed:** Audited the full ingestion path before downloading anything (see
+  section 11b). Fixed the document-title bug in `scripts/ingest-council-plans.ts`
+  by adding `docTypeLabel()`.
+- **Files:** `scripts/ingest-council-plans.ts`, `PROJECT_STATE.md`.
+- **Tested:** `tsc --noEmit` clean (exit 0). Capacity figures measured by running
+  the repo's own chunking logic over the NPPF PDF in `documents-to-ingest/`
+  (130 pages → 351 chunks, 2.7/page, 919 chars/chunk), not estimated.
+- **Result:** **Bulk ingestion stopped before it started.** Three findings:
+  (1) projected corpus is 0.85–3.9 GB against a 500 MB free tier — every
+  scenario over budget; (2) no council-level retrieval filter exists, so the
+  pilot's "don't treat another council's plan as Reading policy" test cannot
+  pass today; (3) citation links would be dead because the RPCs return
+  `source_path` (a filename) and never `source_url`. Title bug fixed:
+  259 of 468 documents would have been titled "... Neighbourhood Plan".
 
 ### 2026-09-07 — Priority 5 instrumentation + P2/P4 test harness
 - **Changed:** (a) Added opt-in per-stage latency instrumentation to

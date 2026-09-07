@@ -55,6 +55,44 @@ dotenv.config({ path: path.join(process.cwd(), ".env.local") });
 
 import { ingestMultiplePdfs } from "../lib/chromaIngest";
 
+// The tracker carries ~70 distinct doc_type values (local_plan,
+// local_plan_core_strategy, local_plan_policies_map, local_plan_part2, ...).
+// This turns one into a human label for the document title.
+//
+// This previously read `doc_type === "local_plan" ? "Local Plan" : "Neighbourhood Plan"`,
+// which mislabelled every non-plain doc_type as a Neighbourhood Plan - 259 of
+// the 468 queued rows, including every Core Strategy and Policies Map. Those
+// titles are not cosmetic: `documents.title` is returned by the retrieval RPCs
+// as `doc_title` and is what the UI shows as the citation, so a wrong title is
+// a wrong citation on screen.
+function docTypeLabel(docType: string): string {
+  const raw = (docType || "").trim().toLowerCase();
+  if (!raw) return "Local Plan";
+  if (raw.includes("neighbourhood")) return "Neighbourhood Plan";
+  if (raw === "local_plan") return "Local Plan";
+
+  const known: Record<string, string> = {
+    local_plan_core_strategy: "Core Strategy",
+    local_plan_development_management: "Development Management Policies",
+    local_plan_site_allocations: "Site Allocations",
+    local_plan_policies_map: "Policies Map",
+    local_plan_udp: "Unitary Development Plan",
+    local_plan_udp_saved_policies: "Unitary Development Plan (Saved Policies)",
+    local_plan_saved_policies: "Local Plan (Saved Policies)",
+    joint_local_plan: "Joint Local Plan",
+    joint_core_strategy: "Joint Core Strategy",
+    district_plan: "District Plan",
+    allocations_plan: "Allocations Plan",
+  };
+  if (known[raw]) return known[raw];
+
+  // Generic fallback: "local_plan_part2_appendices" -> "Local Plan Part2 Appendices"
+  return raw
+    .split("_")
+    .map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w))
+    .join(" ");
+}
+
 interface TrackerRow {
   lpa_name: string;
   reference: string;
@@ -243,7 +281,7 @@ async function main() {
           {
             name: `${row.organisation_name.replace(/[^a-z0-9]+/gi, "_")}_${row.doc_type}.pdf`,
             buffer,
-            title: `${row.organisation_name} ${row.doc_type === "local_plan" ? "Local Plan" : "Neighbourhood Plan"}`,
+            title: `${row.organisation_name} ${docTypeLabel(row.doc_type)}`,
             jurisdictionKey: row.jurisdiction_key,
             docType: row.doc_type,
             sourceUrl: row.source_url,
