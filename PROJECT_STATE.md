@@ -739,15 +739,62 @@ The theoretical 4.7–8 KB/chunk estimate cannot be checked against this data:
 the duplicate index, not by per-row cost. **The pilot must supply the real
 number.** Baseline for that measurement: **19 MB**.
 
-### Open question for the next query
-Which documents actually have chunks — i.e. is the NPPF genuinely ingested, or
-is the 422 made up of something else entirely? See the follow-up query in the
-change log entry below.
+### ANSWERED: exactly one document has chunks
+```
+id=815  National Planning Policy Framework  region=uk  doc_type=planning_policy  chunks=422
+```
+That is the entire live corpus. All 614 other document rows have **zero**
+chunks. The app today is, literally, an NPPF-only assistant.
+
+Two consequences worth noting:
+- The inconsistent `region` values (`US`/`IN`) matter **less than first stated**:
+  every affected row is chunk-less, so those documents were never reachable by
+  retrieval anyway. It is corpus debris, not a live retrieval bug.
+- Real per-chunk storage, measured: `chunks` heap 1024 kB + TOAST ≈ 1736 kB over
+  422 chunks ≈ **6.5 KB/chunk of data**, plus 4896 kB of indexes (inflated by
+  the duplicated ivfflat index and ivfflat's fixed per-list overhead at tiny
+  scale). Higher than the 4.7 KB theoretical estimate. The pilot still supplies
+  the number that matters.
 
 ## 12. Change log
 
 Append an entry after every meaningful change. Format: what changed, files
 touched, what was tested, result.
+
+### 2026-09-07 — Council-aware retrieval: migration + council resolver
+- **Changed:** (a) `sql/2026-09-07-council-aware-retrieval.sql` — additive
+  migration adding `scope`, `lpa_slugs`, `lpa_names`, `plan_status` and
+  `content_sha256` to `documents`, a GIN index for council filtering, a partial
+  unique index on the content hash for idempotency, and recreated RPCs that now
+  return `doc_url` (fixing dead citation links) plus the council fields, with
+  optional `filter_lpa_slug` / `filter_scope` defaulted to null so existing
+  4-argument calls behave exactly as today. Marks the NPPF `scope='national'`.
+  Drops the duplicate `idx_chunks_embedding_cosine` (the only destructive
+  statement, called out separately). (b) Council resolver in
+  `lib/domain-vocabulary.ts`: `toLpaSlug()`, `resolveCouncils()`,
+  `isLocalityDependent()` — deterministic, no LLM call, reusing the LPA
+  vocabulary already loaded for transcript correction.
+- **Files:** `sql/2026-09-07-council-aware-retrieval.sql` (new),
+  `lib/domain-vocabulary.ts`, `PROJECT_STATE.md`.
+- **Tested:** Compiled standalone and run under Node against 14 resolver cases
+  plus 5 locality-dependence cases. **14/14 and 5/5 pass.** Project
+  `tsc --noEmit` clean.
+- **Notable:** "Reading" is both a council and a verb, and it was already in the
+  common-word guard added earlier to stop "I am reading" being corrupted — so
+  Reading Borough Council was initially unfindable. Rather than removing the
+  guard, ambiguous names stay indexed and require a disambiguating signal
+  (administrative qualifier, possessive, locative preposition, or capitalisation).
+  A second round found that "What **is Reading's** policy" was rejected by the
+  verb heuristic matching "is reading"; positive signals now run before it.
+  Result: "Reading Borough Council", "Reading Borough", "in Reading" and
+  "Reading's policy" all resolve to `reading`, while "I am reading the local
+  plan", "after reading the policy" and "it is worth reading the guidance"
+  correctly resolve to no council.
+- **Result:** Migration ready for review; **not yet run** — it alters the live
+  database, so it needs sign-off first. Resolver is done and tested. Retrieval
+  wiring (passing `filter_lpa_slug` through `searchRAG`, the scope router for
+  Cases A–D, and citation `directLink` preferring `doc_url`) comes next, after
+  the migration is applied.
 
 ### 2026-09-07 — Live schema verified; corpus found to be effectively empty
 - **Changed:** Documentation only — section 11d records verified ground truth.

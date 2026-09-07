@@ -606,3 +606,215 @@ export function correctDomainTerms(
 
   return { correctedQuery, corrections };
 }
+
+// =============================================================================
+// COUNCIL RESOLUTION (for council-aware retrieval)
+// =============================================================================
+//
+// Turns whatever the user said into a canonical LPA slug, deterministically -
+// no LLM call. "Reading", "Reading Borough", "Reading Borough Council" and the
+// misheard "Redding" all resolve to `reading`.
+//
+// This reuses the vocabulary already loaded from data/uk-lpa-tracker.csv for
+// transcript correction, so council detection and speech-error tolerance share
+// one source of truth. See PROJECT_STATE.md section 11c.
+
+export interface LpaMatch {
+  slug: string;
+  name: string;
+  confidence: number;
+}
+
+export interface CouncilResolution {
+  /** Confidently identified councils, in order of appearance. */
+  matches: LpaMatch[];
+  /** Two or more councils scored equally - caller must ask, never guess. */
+  ambiguous: LpaMatch[];
+}
+
+/** "Reading Borough Council" -> "reading"; "Tower Hamlets" -> "tower-hamlets". */
+export function toLpaSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/^(london|royal) borough of\s+/i, "")
+    .replace(/^city of\s+/i, "")
+    .replace(/\b(county|borough|district|metropolitan|unitary|city)?\s*council\b/gi, "")
+    .replace(/\b(district|borough)\b/gi, "")
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+interface LpaEntry {
+  slug: string;
+  name: string;
+  /** Distinctive form used for matching, e.g. "tower hamlets". */
+  matchText: string;
+  /**
+   * True when the name is also an ordinary English word - "Reading", "Bath",
+   * "Sale". These are NOT excluded (that would make Reading Borough Council
+   * unfindable), but they only match with a disambiguating signal. See
+   * hasCouncilSignal().
+   */
+  ambiguousWord: boolean;
+}
+
+let lpaIndexCache: LpaEntry[] | null = null;
+
+function getLpaIndex(): LpaEntry[] {
+  if (lpaIndexCache) return lpaIndexCache;
+  const seen = new Set<string>();
+  const entries: LpaEntry[] = [];
+
+  for (const term of loadLpaTerms()) {
+    const name = term.canonical;
+    const slug = toLpaSlug(name);
+    if (!slug || slug.length < 3) continue;
+    const matchText = slug.replace(/-/g, " ");
+    // "Reading" is both a council and a verb. Dropping it would make Reading
+    // Borough Council permanently unfindable, so it stays in the index and
+    // instead requires a disambiguating signal at match time.
+    const ambiguousWord = !matchText.includes(" ") && COMMON_WORDS.has(matchText);
+    const key = `${slug}|${matchText}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push({ slug, name, matchText, ambiguousWord });
+  }
+
+  lpaIndexCache = entries;
+  return entries;
+}
+
+/**
+ * Finds councils referred to in a question.
+ *
+ * Matching is phrase-based over the same normalized text the corrector uses,
+ * so "tower hamlet", "Tower Hamlets Council" and "tower hamlets" all land on
+ * the same slug. A council is only reported when the match is strong; anything
+ * borderline goes to `ambiguous` for the caller to ask about.
+ */
+/**
+ * Decides whether an ordinary-English council name ("Reading") is being used as
+ * a place rather than as a word, using only local context - no LLM.
+ *
+ * Accepts:  "Reading Borough", "Reading Borough Council", "Reading's policy",
+ *           "in Reading", "policy for Reading", capitalised "Reading"
+ * Rejects:  "I am reading the local plan", "after reading the policy"
+ */
+function hasCouncilSignal(rawQuery: string, word: string): boolean {
+  const w = word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const lower = rawQuery.toLowerCase();
+
+  // Positive signals are checked FIRST, because they beat the verb heuristic.
+  // "What is Reading's policy" contains "is reading", which looks like a
+  // progressive verb, but the possessive settles it: verbs do not take 's.
+  //
+  // Explicit administrative qualifier.
+  if (new RegExp(`\\b${w}\\s+(borough|council|city|district|bc|mbc)\\b`, "i").test(lower)) {
+    return true;
+  }
+  // Possessive: "Reading's policy".
+  if (new RegExp(`\\b${w}['\u2019]s\\b`, "i").test(rawQuery)) return true;
+
+  // Verb usage - "am reading", "after reading", "worth reading".
+  const verbContext = new RegExp(
+    `\\b(am|is|are|was|were|be|been|being|keep|keeps|kept|start|started|stop|stopped|` +
+      `finish|finished|enjoy|enjoyed|like|liked|love|loved|hate|hated|avoid|` +
+      `while|after|before|by|through|worth)\\s+${w}\\b`,
+    "i"
+  );
+  if (verbContext.test(lower)) return false;
+  // Locative preposition: "in Reading", "for Reading".
+  if (new RegExp(`\\b(in|for|at|near|within|across|around|to)\\s+${w}\\b`, "i").test(lower)) {
+    return true;
+  }
+  // Capitalised mid-sentence in the original text - a proper noun, and speech
+  // transcripts of place names usually preserve this.
+  if (new RegExp(`(?!^)\\b${w[0].toUpperCase()}${w.slice(1)}\\b`).test(rawQuery)) return true;
+
+  return false;
+}
+
+export function resolveCouncils(query: string): CouncilResolution {
+  const text = ` ${(query || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim()} `;
+  if (text.trim().length < 3) return { matches: [], ambiguous: [] };
+
+  const index = getLpaIndex();
+  const found = new Map<string, LpaMatch>();
+  const near: LpaMatch[] = [];
+
+  for (const entry of index) {
+    const needle = ` ${entry.matchText} `;
+
+    if (text.includes(needle)) {
+      if (entry.ambiguousWord && !hasCouncilSignal(query, entry.matchText)) continue;
+      const existing = found.get(entry.slug);
+      if (!existing || existing.confidence < 1) {
+        found.set(entry.slug, { slug: entry.slug, name: entry.name, confidence: 1 });
+      }
+      continue;
+    }
+
+    // Tolerate a misheard or misspelled council name, but only for names
+    // distinctive enough that a near-match means something.
+    if (entry.matchText.length >= 6 && !entry.matchText.includes(" ")) {
+      const words = text.trim().split(" ");
+      for (const w of words) {
+        if (w.length < 5 || COMMON_WORDS.has(w)) continue;
+        const score = similarity(w, entry.matchText);
+        if (score >= 0.85 && !found.has(entry.slug)) {
+          near.push({ slug: entry.slug, name: entry.name, confidence: Number(score.toFixed(2)) });
+        }
+      }
+    }
+  }
+
+  const matches = [...found.values()];
+
+  // A fuzzy candidate is only trusted when nothing was matched exactly and it
+  // stands alone; two plausible councils is a question, not a guess.
+  if (!matches.length && near.length) {
+    const best = near.reduce((a, b) => (b.confidence > a.confidence ? b : a));
+    const rivals = near.filter(
+      (n) => n.slug !== best.slug && Math.abs(n.confidence - best.confidence) < 0.03
+    );
+    if (rivals.length) return { matches: [], ambiguous: [best, ...rivals] };
+    return { matches: [best], ambiguous: [] };
+  }
+
+  return { matches, ambiguous: [] };
+}
+
+// -----------------------------------------------------------------------------
+// LOCALITY-DEPENDENT QUESTIONS
+// -----------------------------------------------------------------------------
+//
+// Case D from the design: questions whose honest answer depends on which
+// authority you are in. If one of these arrives with no council identified, the
+// assistant must ask which council rather than blending policy from whichever
+// Local Plans happen to rank highest - answering "how many parking spaces" with
+// another authority's standard is confidently wrong.
+
+const LOCALITY_DEPENDENT_PATTERNS: RegExp[] = [
+  /\bparking (space|standard|requirement|provision|ratio)/,
+  /\b(how many|minimum|maximum) parking\b/,
+  /\b(height|storey|storeys|tall building) (limit|restriction|policy|standard)/,
+  /\b(density|dwellings per hectare|dph)\b/,
+  /\baffordable housing (requirement|threshold|percentage|contribution|target)/,
+  /\b(cil|community infrastructure levy) (rate|charge)/,
+  /\bsection 106 (requirement|contribution|threshold)/,
+  /\b(garden|amenity|open space) (size|standard|requirement)/,
+  /\bsetback|building line\b/,
+  /\blocal (plan )?policy\b/,
+  /\b(allowed|permitted|required) (here|in my area|locally)\b/,
+  /\bmy (site|plot|land|property|development)\b/,
+];
+
+/**
+ * True when the answer genuinely depends on the local authority, so answering
+ * without knowing which one would be a guess dressed up as policy.
+ */
+export function isLocalityDependent(query: string): boolean {
+  const q = (query || "").toLowerCase();
+  return LOCALITY_DEPENDENT_PATTERNS.some((re) => re.test(q));
+}
