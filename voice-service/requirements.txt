@@ -1,9 +1,11 @@
 # Trimmed from CosyVoice's own requirements.txt: this service only needs
 # inference, not training/eval/webui, so gradio, tensorboard, deepspeed,
-# tensorrt-cu12*, grpcio*, wget, pyarrow and matplotlib are dropped.
-# gdown IS kept: Matcha-TTS's matcha/utils/utils.py imports it unconditionally
-# (same lightning-hydra-template boilerplate as hydra/lightning/rich below),
-# so it's a real runtime import even though CosyVoice2 itself never calls it.
+# tensorrt-cu12* and pyarrow are dropped.
+# gdown, matplotlib and wget ARE kept, unlike upstream's own trimming
+# suggests: Matcha-TTS's matcha/utils/utils.py imports all three
+# unconditionally at module level (same lightning-hydra-template
+# boilerplate as hydra/lightning/rich below) even though CosyVoice2's
+# inference path never calls any of them.
 # The sys_platform markers below are copied as-is from upstream and
 # already do the right thing on a Mac (skip the Linux/CUDA-only wheels).
 conformer==0.3.2
@@ -12,6 +14,7 @@ fastapi==0.115.6
 hydra-core==1.3.2
 HyperPyYAML==1.2.3
 gdown==5.2.0
+matplotlib==3.9.4
 lightning==2.2.4
 inflect==7.3.1
 librosa==0.10.2
@@ -34,3 +37,4 @@ transformers==4.51.3
 x-transformers==2.11.24
 uvicorn==0.30.0
 wetext==0.0.4
+wget==3.2
