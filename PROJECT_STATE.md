@@ -270,13 +270,21 @@ project. "Runtime-verified" is called out where it applies.
   backing routes don't exist (below), so they degrade to normal Q&A.
 
 ### Broken / missing
-- **`/api/feasibility`** — called by `app/api/rag-chat/route.ts:3257`. Route does
-  not exist. Fails inside a try/catch, logs, degrades silently.
-- **`/api/analyze-drawing`** — called by `route.ts:3301`. Route does not exist.
-  Same silent degradation.
-- **`/api/diagram/svg`** — called by `ChatInterface.tsx:320`. Route does not exist.
-- **`/api/diagram/png`** — called by `ChatInterface.tsx:2066`. Route does not exist.
-  Diagram export is therefore dead.
+- **`/api/feasibility`** — called by `app/api/rag-chat/route.ts`. Route does not
+  exist. **As of 2026-09-07 the UI that reached it is gated off** (`FEATURES.modeSelector`
+  in `ChatInterface.tsx`), so it is no longer reachable from the app.
+- **`/api/analyze-drawing`** — route does not exist. **Gated off 2026-09-07**
+  (`FEATURES.drawingAnalysis`).
+- **`/api/diagram/svg`** — route does not exist. **Gated off 2026-09-07**
+  (`FEATURES.diagramSvgFetch`). Previously fired on every answer containing a
+  diagram trigger and always failed. Diagrams that arrive with server-rendered
+  `svgContent` still render normally.
+- **`/api/diagram/png`** — route does not exist. Export button **gated off
+  2026-09-07** (`FEATURES.diagramPngExport`).
+- **"Permitting" and "Risk review" modes never did anything.** Verified: `mode`
+  is only ever read for `"feasibility"` in `app/api/rag-chat/route.ts`; there is
+  no code path for the other two, so they behaved identically to Auto. The whole
+  mode selector is now gated off.
 - **npm scripts** `rag:dev`, `index:corpus`, `extract-questions`,
   `analyze-questions` — all point at files that were never committed
   (`server/index.ts`, `scripts/index-corpus.cjs`, etc.). They fail if run.
@@ -296,7 +304,7 @@ project. "Runtime-verified" is called out where it applies.
 | 2 | Drawing upload in feasibility mode has no effect | `/api/analyze-drawing` missing, same relative-URL problem | `app/api/rag-chat/route.ts:3295-3320` |
 | 3 | Diagram export buttons fail | `/api/diagram/svg` and `/api/diagram/png` missing | `ChatInterface.tsx:320, 2066` |
 | 4 | Answers are slow even for trivial input | Blocking pipeline, up to 4 sequential Groq calls, no streaming. Greetings are now fast-pathed (2026-09-06), but everything else still pays full cost | `app/api/rag-chat/route.ts` |
-| 5 | `next build` is extremely slow | Very heavy dependency set compiled by webpack (tesseract.js, pdfjs-dist, @napi-rs/canvas, sharp, react-pdf, playwright). See section 11 note | `package.json` |
+| 5 | `next build`/`next dev` hang or exit in the assistant's shell | **Not a project defect.** That shell is a linux/arm64 VM; `node_modules` was installed on macOS, so only `@next/swc-darwin-arm64` is present and no SWC binary can load. Reproduces only there. Status on macOS: unverified | `node_modules/@next/` |
 | 6 | Council plans unavailable to answers | Ingestion never run — blocked by network egress restrictions in the AI assistant's environments | `scripts/ingest-council-plans.ts`, `data/uk-lpa-tracker.csv` |
 | 7 | Dead code inflates the repo and confuses navigation | `lib/rag/*`, `lib/services/*`, `lib/groq.ts`, `lib/geminiRag.ts`, `lib/query-intent-detector.ts`, `app/contexts/AuthContext.tsx` all have **0 imports** (verified) | as listed |
 | 8 | ~~Leftover junk in `scripts/`~~ | RESOLVED 2026-09-07 — deleted, and `.gitignore` now excludes `scripts/_tmp_*.py` and `scripts/_to_delete/` | — |
@@ -361,13 +369,14 @@ Ordered by value for effort.
 2. **Runtime-verify the two 2026-09-06 backend changes.** Say "hi" (should return
    instantly, no `STEP 1` in the dev-server log) and ask about "NPPF" by voice
    (should show the amber correction note and use NPPF throughout).
-3. **Confirm `next build` completes.** During this audit it was started twice
-   and ran ~16 minutes without producing any output past the Next.js banner,
-   then was killed to avoid leaving a runaway process on the machine. It is
-   **not confirmed passing**. `tsc --noEmit` is clean and
-   `@pipecat-ai/client-js` resolves, so this is a bundling-time problem, not a
-   type or dependency problem. Run it in a terminal where it can take as long
-   as it needs.
+3. **Confirm `next build` completes on macOS.** ROOT CAUSE OF THE EARLIER HANG
+   FOUND (2026-09-07): the assistant's shell runs in a **linux/arm64** VM, but
+   `node_modules/@next/` contains only `swc-darwin-arm64` (installed on the Mac).
+   Next.js cannot load an SWC binary there, so both `next build` and `next dev`
+   stall or exit immediately — the 16-minute "hang" was an artifact of *where it
+   was run*, not a defect in this project. Installing the linux binary needs the
+   npm registry, which is blocked. **Whether the build succeeds on macOS is still
+   unverified** and can only be checked on the Mac itself.
 4. **Decide the fate of the four missing routes.** Either implement
    `/api/feasibility`, `/api/analyze-drawing`, `/api/diagram/svg`,
    `/api/diagram/png`, or remove the UI affordances that call them. Right now
@@ -387,6 +396,26 @@ Ordered by value for effort.
 
 Append an entry after every meaningful change. Format: what changed, files
 touched, what was tested, result.
+
+### 2026-09-07 — Priority 3: gate UI for functionality with no backend
+- **Changed:** Added a `FEATURES` flag block to `ChatInterface.tsx` and gated
+  four controls whose API routes do not exist: the entire mode selector
+  (Auto/Feasibility/Permitting/Risk), the drawing-analysis upload, the
+  client-side diagram SVG re-fetch, and the Download PNG button. No code was
+  deleted — every path is intact and returns the moment its route exists and
+  its flag flips.
+- **Notable finding:** only `feasibility` was ever wired to anything. `mode` is
+  read exactly twice in `app/api/rag-chat/route.ts`, both times for
+  `"feasibility"`. **`"permitting"` and `"risk"` had no code path at all** and
+  behaved identically to Auto — three of the four modes were decorative.
+- **Files:** `components/chat/ChatInterface.tsx` (7 edits).
+- **Tested:** `tsc --noEmit` across the project. Grep-verified that all four
+  missing-route call sites are now behind flags, and that the working features
+  (document upload, voice entry points, sources/citations, groundedness display,
+  conversation sidebar) are untouched and ungated.
+- **Result:** Type-check clean, exit 0. The app no longer offers any control
+  that silently does nothing. **Not visually confirmed in a browser** — the
+  assistant cannot run Next.js (see the SWC note in section 11).
 
 ### 2026-09-07 — Priority 1: checkpoint commit of all outstanding work
 - **Changed:** Committed ~2 weeks of accumulated work that had been sitting

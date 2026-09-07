@@ -14,6 +14,37 @@ import VoiceModeOverlay, {
   type VoiceOverlayState,
 } from "@/components/chat/VoiceModeOverlay";
 import VoiceAgentOverlay from "@/components/chat/VoiceAgentOverlay";
+// ---------------------------------------------------------------------------
+// FEATURE FLAGS - unfinished functionality
+// ---------------------------------------------------------------------------
+// Each flag below gates UI whose backing API route does not exist in this
+// repo. With the flag off, the control is not rendered at all, so the app
+// never advertises a capability that silently does nothing.
+//
+// Nothing is deleted: every code path behind these flags is intact and
+// becomes reachable again the moment its route is implemented and the flag
+// is flipped to true.
+//
+//   modeSelector     needs /api/feasibility AND /api/analyze-drawing.
+//                    Note: of the four modes offered, only "feasibility" was
+//                    ever wired to anything - "permitting" and "risk" have no
+//                    code path anywhere in app/api/rag-chat/route.ts, so they
+//                    behaved identically to "auto".
+//   drawingAnalysis  needs /api/analyze-drawing
+//   diagramSvgFetch  needs /api/diagram/svg  (inline diagrams that arrive with
+//                    server-rendered svgContent still render - this only gates
+//                    the client-side re-fetch, which always 404'd)
+//   diagramPngExport needs /api/diagram/png
+const FEATURES: Record<
+  "modeSelector" | "drawingAnalysis" | "diagramSvgFetch" | "diagramPngExport",
+  boolean
+> = {
+  modeSelector: false,
+  drawingAnalysis: false,
+  diagramSvgFetch: false,
+  diagramPngExport: false,
+};
+
 export interface Citation {
   id: string | number;
   title: string;
@@ -1399,7 +1430,7 @@ export default function ChatInterface() {
             </div>
           )}
 
-          {chatMode === "feasibility" && (
+          {FEATURES.drawingAnalysis && chatMode === "feasibility" && (
             <div className="mt-3 space-y-2">
               <label className="block text-xs text-neutral-600">
                 Optional: Upload floor plan or site plan for automatic analysis
@@ -1438,6 +1469,7 @@ export default function ChatInterface() {
             </div>
           )}
 
+          {FEATURES.modeSelector && (
           <div className="relative mt-2 text-left text-[11px] text-neutral-600">
             <button
               type="button"
@@ -1489,6 +1521,7 @@ export default function ChatInterface() {
               </div>
             )}
           </div>
+          )}
 
           {sttSupported && ttsSupported && (
             <div className="mt-2 flex items-center justify-center gap-2">
@@ -1718,6 +1751,10 @@ function MessageBubble({
 
     if (!hasTrigger) return;
     if (message.diagramData?.svgContent) return;
+    // /api/diagram/svg does not exist - without this guard every answer
+    // containing a diagram trigger fired a request that always failed and
+    // logged an error to the console.
+    if (!FEATURES.diagramSvgFetch) return;
 
     const parsed = extractDiagramSpecFromAnswer(message.content);
     if (!parsed) return;
@@ -2108,6 +2145,7 @@ function DiagramDisplay({ diagram }: { diagram: DiagramData }) {
           <p className="mt-1 text-[11px] text-neutral-500">{diagram.kind}</p>
         </div>
 
+        {FEATURES.diagramPngExport && (
         <button
           onClick={downloadPNG}
           disabled={isDownloading}
@@ -2116,6 +2154,7 @@ function DiagramDisplay({ diagram }: { diagram: DiagramData }) {
           <DownloadIcon className="h-4 w-4" />
           {isDownloading ? "Preparing..." : "Download PNG"}
         </button>
+        )}
       </div>
 
       <div className="mt-4 overflow-auto rounded-xl border border-neutral-950/10">
