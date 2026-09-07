@@ -666,10 +666,104 @@ Reading question → Reading + national, zero other councils; Manchester questio
 council; national question → national sources; comparison → both councils with
 separated provenance; every citation resolves to the correct source document.
 
+## 11d. Live Supabase schema — VERIFIED (2026-09-07)
+
+Ground truth, from `sql/inspect-schema-oneshot.sql` run in the SQL Editor.
+Supersedes every assumption made from reading code alone.
+
+### Headline: the corpus is effectively empty, and it is not a UK planning corpus
+
+| Metric | Value |
+|---|---|
+| `documents` rows | **615** |
+| `chunks` rows | **422** |
+| Database size | **19 MB** (of 500 MB free tier) |
+| `chunks` total / heap / indexes | 7656 kB / 1024 kB / 4896 kB |
+| `documents` total | 264 kB |
+
+**There are more documents than chunks.** The NPPF alone measures ~351 chunks,
+so essentially every one of the 615 document rows has **zero** chunks. Whatever
+populated `documents` never populated `chunks` for them. Retrieval has almost
+nothing to retrieve.
+
+What is actually in there (by `doc_type`) is the legacy multi-region corpus from
+the project's `zoning-copilot-ai` era — US construction contracts (FIDIC, AIA
+General Conditions), FEMA flood-risk mapping, IBC/IRC building codes, NYC land
+use, Jamaica zoning maps, Indian regulations. **Exactly one document has
+`doc_type = 'planning_policy'` in region `uk`.** 475 of 615 rows are
+`doc_type = 'other'`.
+
+### Confirmed schema
+
+`documents`: `id`, `region` (NOT NULL), `jurisdiction_level`, `doc_type`,
+`title` (NOT NULL), `source_path` (NOT NULL), **`source_url`** (exists —
+nullable), `year`, `citation_ref`, `updated_at`, `created_at`.
+
+`chunks`: `id`, `document_id` (FK → documents), `chunk_index`, `content`,
+`page`, `clause`, `section`, `region` (NOT NULL), `doc_type`, `embedding`
+(`vector`), `created_at`, `page_label`, `clause_label`, `content_tsv`.
+
+Both RPCs exist with the signatures the code expects. `match_rag_chunks`
+returns 13 columns, `match_rag_chunks_fulltext` the same plus `rank`.
+**Neither returns `source_url`** — confirming the dead-citation-link finding.
+
+### Four problems found in the live database
+
+1. **Inconsistent `region` values.** Both `uk`/`usa`/`india` *and* `US`/`IN`
+   are present (39 `US`, 31 `IN`, plus more). `filter_region` uses exact
+   equality and the app only ever sends `uk`/`usa`/`india`, so **~87 documents
+   are unreachable** whenever a region filter is applied.
+2. **Duplicate vector indexes.** `idx_chunks_embedding` and
+   `idx_chunks_embedding_cosine` are both
+   `ivfflat (embedding vector_cosine_ops) WITH (lists='100')` — the same index
+   twice. Double the write cost and storage for no benefit; together they are
+   most of the 4896 kB of chunk indexes.
+3. **`lists = 100` is badly tuned for this data.** The usual guidance is roughly
+   `rows / 1000`; with 422 rows most of the 100 lists are empty, which hurts
+   recall. It would need revisiting at corpus scale anyway.
+4. **No uniqueness beyond the primary keys.** No constraint prevents ingesting
+   the same document twice — confirming the idempotency work is required, not
+   optional.
+
+### Why this is good news for the plan
+- Nothing valuable is at risk. There is no real corpus to damage or migrate.
+- The storage budget is effectively untouched: **19 MB used, ~481 MB free**, and
+  much of that 19 MB is index overhead plus 614 content-free document rows.
+- The five-council pilot can be measured against a clean, known baseline.
+- `source_url` already exists, so ingestion will not fail on its first insert —
+  the earlier worst case is ruled out.
+
+### Revised storage view
+The theoretical 4.7–8 KB/chunk estimate cannot be checked against this data:
+422 chunks carrying 4896 kB of index is dominated by fixed ivfflat overhead and
+the duplicate index, not by per-row cost. **The pilot must supply the real
+number.** Baseline for that measurement: **19 MB**.
+
+### Open question for the next query
+Which documents actually have chunks — i.e. is the NPPF genuinely ingested, or
+is the 422 made up of something else entirely? See the follow-up query in the
+change log entry below.
+
 ## 12. Change log
 
 Append an entry after every meaningful change. Format: what changed, files
 touched, what was tested, result.
+
+### 2026-09-07 — Live schema verified; corpus found to be effectively empty
+- **Changed:** Documentation only — section 11d records verified ground truth.
+  No schema or code changes.
+- **Tested:** `sql/inspect-schema-oneshot.sql` run in the Supabase SQL Editor;
+  output read directly from the exported CSV.
+- **Result:** Assumptions replaced with facts. `documents.source_url` **exists**
+  (worst case ruled out). But **615 documents vs 422 chunks** means nearly every
+  document row has no chunks, and the content that is there is the legacy
+  US/India/UK `zoning-copilot-ai` corpus (FIDIC contracts, IBC/IRC, NYC land
+  use), not UK planning — only **one** document is `uk`/`planning_policy`.
+  Also found: inconsistent region values (`US`/`IN` vs `usa`/`india`) leaving
+  ~87 documents unreachable behind the region filter; two identical ivfflat
+  indexes on `chunks.embedding`; `lists=100` mistuned for 422 rows; and no
+  uniqueness constraint to prevent duplicate ingestion. Database is 19 MB of
+  500 MB, so the pilot has a clean baseline and ~481 MB of headroom.
 
 ### 2026-09-07 — Council-aware retrieval: design + schema inspection SQL
 - **Changed:** Added `sql/inspect-schema.sql` (read-only) and recorded the
