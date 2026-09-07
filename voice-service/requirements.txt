@@ -1,15 +1,29 @@
 # Trimmed from CosyVoice's own requirements.txt: this service only needs
 # inference, not training/eval/webui, so gradio, tensorboard, deepspeed,
-# tensorrt-cu12* and pyarrow are dropped.
-# gdown, matplotlib and wget ARE kept, unlike upstream's own trimming
-# suggests: Matcha-TTS's matcha/utils/utils.py imports all three
-# unconditionally at module level (same lightning-hydra-template
-# boilerplate as hydra/lightning/rich below) even though CosyVoice2's
-# inference path never calls any of them.
+# tensorrt-cu12* are dropped. vllm is NOT needed either: cosyvoice/llm/llm.py
+# only imports it lazily inside a function, guarded by hasattr(self, 'vllm'),
+# so it's never touched unless vLLM acceleration is explicitly configured.
+#
+# Everything else here IS kept even though upstream's own trimming logic
+# would suggest otherwise, because CosyVoice2's config YAML
+# (examples/libritts/cosyvoice2/conf/cosyvoice2.yaml) references classes
+# and functions across cosyvoice/dataset/processor.py,
+# cosyvoice/tokenizer/tokenizer.py and the flow/hifigan/llm/transformer
+# modules via hyperpyyaml !name:/!new: tags - hyperpyyaml eagerly imports
+# every module referenced there while parsing the config, even ones
+# CosyVoice2 itself never calls at inference time:
+#   - gdown, matplotlib, wget: matcha/utils/utils.py (lightning-hydra-
+#     template boilerplate, same pattern as hydra/lightning/rich below)
+#   - pyarrow: cosyvoice/dataset/processor.py (parquet training-data reader)
+#   - tiktoken: cosyvoice/tokenizer/tokenizer.py (via get_qwen_tokenizer)
+#   - scipy: matcha/utils/audio.py (scipy.io.wavfile) and
+#     cosyvoice/hifigan/generator.py (scipy.signal.get_window)
+#   - einops: cosyvoice/flow/flow.py and related flow/hifigan modules
 # The sys_platform markers below are copied as-is from upstream and
 # already do the right thing on a Mac (skip the Linux/CUDA-only wheels).
 conformer==0.3.2
 diffusers==0.29.0
+einops==0.8.0
 fastapi==0.115.6
 hydra-core==1.3.2
 HyperPyYAML==1.2.3
@@ -27,10 +41,13 @@ onnxruntime-gpu==1.18.0; sys_platform == 'linux'
 onnxruntime==1.18.0; sys_platform == 'darwin' or sys_platform == 'win32'
 openai-whisper==20231117
 protobuf==4.25
+pyarrow==18.1.0
 pydantic==2.7.0
 pyworld==0.3.4
 rich==13.7.1
+scipy==1.13.1
 soundfile==0.12.1
+tiktoken==0.7.0
 torch==2.3.1
 torchaudio==2.3.1
 transformers==4.51.3
