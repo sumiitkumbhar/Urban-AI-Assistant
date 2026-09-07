@@ -842,6 +842,49 @@ Two consequences worth noting:
 Append an entry after every meaningful change. Format: what changed, files
 touched, what was tested, result.
 
+### 2026-09-07 — Council-aware retrieval: implemented, migration still pending
+- **Changed:**
+  - `app/api/rag-chat/route.ts` — added `routeCouncilScope()` and
+    `buildCouncilClarification()`. Four cases: A `COUNCIL_SPECIFIC` (one
+    authority named → `filter_lpa_slug`), B `NATIONAL` (unchanged behaviour),
+    C `COMPARISON` (one retrieval **per authority**, run in parallel and
+    concatenated — a merged query lets the reranker return five chunks from one
+    council and none from the other), D `COUNCIL_AMBIGUOUS` (locality-dependent
+    with no authority named → ask, never blend; this turn **is** persisted so
+    the follow-up "Reading" has context). `searchRAG()` takes an optional
+    `lpaSlug`. Detection is deterministic — no LLM.
+  - `sql/2026-09-07-council-aware-retrieval.sql` — hardened. Both RPC drops now
+    enumerate every overload from `pg_proc` instead of guessing an argument
+    list; a `drop function` that doesn't match exactly is a silent no-op and
+    the `create` after it fails with "cannot change return type", leaving the
+    migration half-applied. Step 2 now reports rows marked national and how
+    many actually have chunks.
+  - `lib/chromaIngest.ts` — `IngestFile` gains optional `scope`, `lpaSlugs`,
+    `lpaNames`, `planStatus`, `contentSha256`; fields are only sent when
+    present, so an un-migrated database still works. Skips re-embedding when
+    `content_sha256` already exists.
+  - `scripts/ingest-council-plans.ts` — preflight that **refuses to run**
+    against an un-migrated database; skips the 40 Policies Map rows; always
+    writes `plan_status='unknown'` (the tracker records ingest status, not
+    adoption status); prints measured capacity at the end.
+  - `lib/domain-vocabulary.ts` — **two real bugs fixed.** `&` normalised
+    differently on the ingest and query sides ("telford-and-wrekin" vs
+    "telford wrekin"), and a global `\b(district|borough)\b` strip mangled
+    "Lake District National Park Authority" into
+    "lake-national-park-authority". Four councils would have been ingested
+    permanently unreachable.
+  - `scripts/council-router.test.ts`, `scripts/lpa-slug-roundtrip.test.ts` (new).
+- **Tested:** router 14/14; slug round-trip **337/337** councils; `tsc --noEmit`
+  exit 0. All offline — **nothing has been tested against the database.**
+- **Result:** Committed as `6ae5c5f` and `786e6e8`. **Blocked:** the migration
+  has not been run. Until it is, `filter_lpa_slug` is rejected by Postgres, the
+  code catches that once and retries **unfiltered** with a warning in the log,
+  and council-specific answers are not trustworthy.
+
+**Tracker capacity note:** 502 rows, 468 `pending_ingest` with a `source_url`,
+of which 40 are Policies Maps → **428 ingestable documents**. The pilot takes
+the first 5.
+
 ### 2026-09-07 — Premium UI pass 3: three defects found in screenshots
 - **Changed:**
   - `app/globals.css` — appended a TOKEN CORRECTION block, last in the
