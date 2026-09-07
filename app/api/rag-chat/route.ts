@@ -18,7 +18,11 @@ import {
   getAllUserDocumentChunks,
   type UserDocChunkMatch,
 } from "@/lib/userDocuments";
-import { correctDomainTerms } from "@/lib/domain-vocabulary";
+import {
+  correctDomainTerms,
+  resolveCouncils,
+  isLocalityDependent,
+} from "@/lib/domain-vocabulary";
 
 export const runtime = "nodejs";
 
@@ -2258,29 +2262,76 @@ function fuseWithRRF(vectorRows: any[], fulltextRows: any[]): any[] {
     .map(([id]) => rowById.get(id));
 }
 
+// True once we have seen Postgres reject filter_lpa_slug, i.e. the
+// council-aware migration (sql/2026-09-07-council-aware-retrieval.sql) has not
+// been run against this database yet. Cached for the life of the process so we
+// pay the failed round-trip once rather than on every single query.
+let councilFilterUnsupported = false;
+
+// PostgREST reports "no function matching these arguments" as PGRST202, and
+// Postgres itself as 42883. Either means the RPC does not have the parameter -
+// which is a deployment state, not a bug, and must not take retrieval down.
+function isUnknownRpcArgError(error: { code?: string; message?: string } | null) {
+  if (!error) return false;
+  if (error.code === "PGRST202" || error.code === "42883") return true;
+  const m = (error.message || "").toLowerCase();
+  return m.includes("could not find the function") || m.includes("does not exist");
+}
+
 async function searchRAG(
   query: string,
   region: "india" | "uk" | "usa" | null,
   topK = 25,
-  threshold = 0.3
+  threshold = 0.3,
+  lpaSlug: string | null = null
 ): Promise<EnhancedChunk[]> {
   const optimizedQuery = optimizeQuery(query);
   const embedding = await generateEmbedding(optimizedQuery);
 
-  const [vectorResult, fulltextResult] = await Promise.all([
-    getSupabase().rpc("match_rag_chunks", {
-      query_embedding: embedding,
-      match_threshold: 1 - threshold,
-      match_count: topK,
-      filter_region: region || null,
-    }),
-    getSupabase().rpc("match_rag_chunks_fulltext", {
-      query_text: optimizedQuery,
-      query_embedding: embedding,
-      match_count: topK,
-      filter_region: region || null,
-    }),
+  // The council filter is additive: when it is absent, or the database has not
+  // been migrated yet, retrieval behaves exactly as it did before.
+  const useCouncilFilter = Boolean(lpaSlug) && !councilFilterUnsupported;
+
+  const vectorArgs: Record<string, unknown> = {
+    query_embedding: embedding,
+    match_threshold: 1 - threshold,
+    match_count: topK,
+    filter_region: region || null,
+  };
+  const fulltextArgs: Record<string, unknown> = {
+    query_text: optimizedQuery,
+    query_embedding: embedding,
+    match_count: topK,
+    filter_region: region || null,
+  };
+  if (useCouncilFilter) {
+    vectorArgs.filter_lpa_slug = lpaSlug;
+    fulltextArgs.filter_lpa_slug = lpaSlug;
+  }
+
+  let [vectorResult, fulltextResult] = await Promise.all([
+    getSupabase().rpc("match_rag_chunks", vectorArgs),
+    getSupabase().rpc("match_rag_chunks_fulltext", fulltextArgs),
   ]);
+
+  // Degrade honestly rather than failing: retry once without the council
+  // argument, and say plainly in the log that results are unfiltered. Silently
+  // returning every council's policy while believing the filter applied is the
+  // one outcome worse than an error.
+  if (useCouncilFilter && isUnknownRpcArgError(vectorResult.error as any)) {
+    councilFilterUnsupported = true;
+    console.warn(
+      "[council] match_rag_chunks has no filter_lpa_slug parameter - the " +
+        "council-aware migration has not been run. Retrying UNFILTERED; " +
+        "council-specific answers are not trustworthy until it is applied."
+    );
+    delete vectorArgs.filter_lpa_slug;
+    delete fulltextArgs.filter_lpa_slug;
+    [vectorResult, fulltextResult] = await Promise.all([
+      getSupabase().rpc("match_rag_chunks", vectorArgs),
+      getSupabase().rpc("match_rag_chunks_fulltext", fulltextArgs),
+    ]);
+  }
 
   if (vectorResult.error) {
     console.error("searchRAG vector RPC error:", vectorResult.error);
@@ -3147,6 +3198,86 @@ function matchGreetingFastPath(rawQuery: string): string | null {
 }
 
 // =============================================================================
+// COUNCIL SCOPE ROUTER
+// =============================================================================
+// Planning questions are answered by two layers of policy: national (the NPPF)
+// and local (each Local Planning Authority's own Local Plan). They routinely
+// disagree, and a Local Plan binds only inside its own authority. So a chunk
+// retrieved from Reading's Local Plan is not merely off-topic for a question
+// about Manchester - it is wrong, and wrong in the specific way that reads as
+// authoritative. Blending the two councils' policies into one answer is the
+// single most damaging failure this system can produce, which is why case
+// COUNCIL_AMBIGUOUS asks instead of guessing.
+//
+// Council detection is deterministic (string and near-match against the LPA
+// index in lib/domain-vocabulary.ts). Deliberately not an LLM call: routing
+// must be reproducible, must not cost a round-trip on every query, and must
+// not hallucinate an authority that was never mentioned.
+
+type CouncilRoute =
+  | { kind: "NATIONAL"; slugs: []; names: [] }
+  | { kind: "COUNCIL_SPECIFIC"; slugs: [string]; names: [string] }
+  | { kind: "COMPARISON"; slugs: string[]; names: string[] }
+  | { kind: "COUNCIL_AMBIGUOUS"; slugs: []; names: string[] };
+
+function routeCouncilScope(query: string): CouncilRoute {
+  const { matches, ambiguous } = resolveCouncils(query);
+
+  // Case C - two or more councils named. "How does Reading compare with
+  // Wokingham on affordable housing" is a legitimate question, but it must be
+  // answered from both corpora kept separate, never from one merged pool.
+  if (matches.length >= 2) {
+    return {
+      kind: "COMPARISON",
+      slugs: matches.map((m) => m.slug),
+      names: matches.map((m) => m.name),
+    };
+  }
+
+  // Case A - exactly one council named.
+  if (matches.length === 1) {
+    return {
+      kind: "COUNCIL_SPECIFIC",
+      slugs: [matches[0].slug],
+      names: [matches[0].name],
+    };
+  }
+
+  // Case D - the answer depends on which authority you are in, but none was
+  // given. Ask. An answer averaged across authorities is not a cautious
+  // answer, it is a false one.
+  if (isLocalityDependent(query)) {
+    return {
+      kind: "COUNCIL_AMBIGUOUS",
+      slugs: [],
+      names: ambiguous.map((m) => m.name),
+    };
+  }
+
+  // Case B - national policy, or a question with no local dimension at all.
+  return { kind: "NATIONAL", slugs: [], names: [] };
+}
+
+function buildCouncilClarification(candidateNames: string[]): string {
+  if (candidateNames.length >= 2) {
+    const list = candidateNames.slice(0, 4).join(", ");
+    return (
+      `That depends on which local planning authority the site sits in, and I ` +
+      `matched more than one: ${list}. Which one do you mean?\n\n` +
+      `Local Plan policies differ between authorities, so I would rather ask ` +
+      `than give you an answer that is right for the wrong council.`
+    );
+  }
+  return (
+    `That one depends on the local planning authority - thresholds, ` +
+    `space standards and affordable-housing requirements are set locally and ` +
+    `differ between councils.\n\n` +
+    `Which council covers the site? Once I know, I can answer from that ` +
+    `authority's Local Plan alongside national policy.`
+  );
+}
+
+// =============================================================================
 // ROUTE HANDLERS
 // =============================================================================
 
@@ -3274,6 +3405,49 @@ export async function POST(req: Request) {
 
     timer.mark("conversation_memory_and_condense");
 
+    // Which planning authority (if any) this question belongs to. Runs on the
+    // condensed query so a follow-up of just "Reading" resolves against the
+    // question it is answering rather than being seen as a bare word.
+    const councilRoute = routeCouncilScope(retrievalQuery);
+    if (councilRoute.kind !== "NATIONAL") {
+      console.log(
+        `[council] route=${councilRoute.kind}`,
+        councilRoute.slugs.length ? councilRoute.slugs : councilRoute.names
+      );
+    }
+
+    // Case D: locality-dependent, no authority named. Ask, do not average.
+    // Unlike the greeting fast path this turn IS persisted - the whole point
+    // is that the user's next message ("Reading") needs this question in
+    // context to make sense.
+    if (councilRoute.kind === "COUNCIL_AMBIGUOUS") {
+      const clarification = buildCouncilClarification(councilRoute.names);
+      if (conversationId) {
+        await persistConversationTurn(conversationId, query, clarification, {
+          council_route: councilRoute.kind,
+        });
+      }
+      timer.mark("council_clarification");
+      timer.report({ path: "council_clarification" });
+      return NextResponse.json({
+        success: true,
+        answer: clarification,
+        data: {
+          citations: [],
+          query: rawQuery,
+          region: body.region ?? null,
+          resultsCount: 0,
+          references: { documents: [], web: [] },
+          speechText: body.voiceMode === true ? clarification : undefined,
+        },
+        metadata: {
+          processing_time: Date.now() - start,
+          confidence: 1,
+          webFallbackUsed: false,
+        },
+      } satisfies RagResponse);
+    }
+
     const conversationContext = buildConversationContextForPrompt(
       conversationHistory
     );
@@ -3395,7 +3569,45 @@ export async function POST(req: Request) {
     }
 
     console.log("⏱️ STEP 1: starting searchRAG");
-    let chunks = await searchRAG(retrievalQuery, region, topK, threshold);
+    let chunks: EnhancedChunk[];
+    if (councilRoute.kind === "COMPARISON") {
+      // Case C: one retrieval per authority, run in parallel and concatenated.
+      // Deliberately NOT a single query with both slugs - a merged pool lets
+      // the reranker return five chunks from one council and none from the
+      // other, and the answer then compares a council with itself. Each
+      // authority gets its own guaranteed share of the budget.
+      const perCouncil = Math.max(6, Math.ceil(topK / councilRoute.slugs.length));
+      const perCouncilChunks = await Promise.all(
+        councilRoute.slugs.map((slug) =>
+          searchRAG(retrievalQuery, region, perCouncil, threshold, slug)
+        )
+      );
+      const seen = new Set<string>();
+      chunks = [];
+      for (const set of perCouncilChunks) {
+        for (const chunk of set) {
+          const key = String((chunk as any).id);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          chunks.push(chunk);
+        }
+      }
+      console.log(
+        `[council] comparison retrieval: ${councilRoute.slugs
+          .map((slug, i) => `${slug}=${perCouncilChunks[i].length}`)
+          .join(", ")}`
+      );
+    } else {
+      // Case A passes the slug (national policy is still included - see the
+      // filter in the RPC); case B passes null and behaves as before.
+      chunks = await searchRAG(
+        retrievalQuery,
+        region,
+        topK,
+        threshold,
+        councilRoute.kind === "COUNCIL_SPECIFIC" ? councilRoute.slugs[0] : null
+      );
+    }
     console.log("⏱️ STEP 1 DONE: searchRAG returned", chunks.length, "chunks");
     timer.mark("embedding_and_vector_and_keyword_search");
 

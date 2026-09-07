@@ -60,9 +60,28 @@ alter table public.documents
 -- -----------------------------------------------------------------------------
 -- The NPPF is the national layer. Local Plans get scope='local' plus their own
 -- lpa_slugs at ingestion time.
-update public.documents
-   set scope = 'national', lpa_slugs = null, lpa_names = null
- where doc_type = 'planning_policy' and region = 'uk';
+do $$
+declare
+  n_total int;
+  n_with_chunks int;
+begin
+  update public.documents
+     set scope = 'national', lpa_slugs = null, lpa_names = null
+   where doc_type = 'planning_policy' and region = 'uk';
+  get diagnostics n_total = row_count;
+
+  -- Rows with no chunks are ingestion debris: they can never be returned by
+  -- retrieval, so their scope value is cosmetic. Report both numbers so the
+  -- distinction is visible rather than assumed.
+  select count(*) into n_with_chunks
+    from public.documents d
+   where d.scope = 'national'
+     and exists (select 1 from public.chunks c where c.document_id = d.id);
+
+  raise notice 'scope=national set on % rows, of which % actually have chunks',
+    n_total, n_with_chunks;
+end
+$$;
 
 -- -----------------------------------------------------------------------------
 -- 3. Indexes for the new filters
@@ -107,7 +126,28 @@ drop index if exists public.idx_chunks_embedding_cosine;
 --                      excluded, which is what stops one council's policy
 --                      being presented as another's.
 
-drop function if exists public.match_rag_chunks(vector, double precision, int, text);
+-- Drop EVERY existing overload of both functions by name rather than by a
+-- guessed argument list. A `drop function ... (vector, double precision, int,
+-- text)` that does not match the live signature exactly is a silent no-op, and
+-- the CREATE that follows would then fail with "cannot change return type of
+-- existing function" - leaving the migration half-applied. This cannot miss.
+do $$
+declare
+  fn record;
+begin
+  for fn in
+    select p.oid::regprocedure as sig
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public'
+       and p.proname in ('match_rag_chunks', 'match_rag_chunks_fulltext')
+  loop
+    raise notice 'dropping %', fn.sig;
+    execute format('drop function %s', fn.sig);
+  end loop;
+end
+$$;
+
 
 create or replace function public.match_rag_chunks(
   query_embedding  vector,
@@ -173,7 +213,6 @@ as $function$
   limit match_count;
 $function$;
 
-drop function if exists public.match_rag_chunks_fulltext(text, vector, int, text);
 
 create or replace function public.match_rag_chunks_fulltext(
   query_text       text,

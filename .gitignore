@@ -27,3 +27,4 @@ __pycache__/
 scripts/_tmp_*.py
 scripts/_to_delete/
 stabilization-report.json
+.tmp-test/
