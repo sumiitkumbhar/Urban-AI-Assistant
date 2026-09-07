@@ -14,8 +14,9 @@ No guessing, no fluff, no secrets — environment variable *names* only, never
 values.
 
 - **Last audited:** 2026-09-07
-- **Branch:** `main` — last commit `f1928d0` ("Fix embedding dimension mismatch: request 768-dim output and normalize")
-- **Uncommitted files:** 39 (all work from 2026-09-01 onward is uncommitted)
+- **Branch:** `chore/stabilization-pass` — last commit `ae09fc1` ("Add voice mode, conversation memory, document upload and RAG hardening")
+- **`main` is at:** `f1928d0` — it does **not** yet contain any of the work below. Merge when ready: `git checkout main && git merge chore/stabilization-pass`
+- **Uncommitted files:** 0 (working tree clean as of 2026-09-07)
 
 ---
 
@@ -298,7 +299,7 @@ project. "Runtime-verified" is called out where it applies.
 | 5 | `next build` is extremely slow | Very heavy dependency set compiled by webpack (tesseract.js, pdfjs-dist, @napi-rs/canvas, sharp, react-pdf, playwright). See section 11 note | `package.json` |
 | 6 | Council plans unavailable to answers | Ingestion never run — blocked by network egress restrictions in the AI assistant's environments | `scripts/ingest-council-plans.ts`, `data/uk-lpa-tracker.csv` |
 | 7 | Dead code inflates the repo and confuses navigation | `lib/rag/*`, `lib/services/*`, `lib/groq.ts`, `lib/geminiRag.ts`, `lib/query-intent-detector.ts`, `app/contexts/AuthContext.tsx` all have **0 imports** (verified) | as listed |
-| 8 | Leftover junk in `scripts/` | Temp patch scripts from earlier sessions; deletion was blocked at the time | `scripts/_tmp_patch_voice_backend.py`, `scripts/_to_delete/` |
+| 8 | ~~Leftover junk in `scripts/`~~ | RESOLVED 2026-09-07 — deleted, and `.gitignore` now excludes `scripts/_tmp_*.py` and `scripts/_to_delete/` | — |
 
 ---
 
@@ -375,7 +376,8 @@ Ordered by value for effort.
    with unrestricted internet to run `npm run ingest:councils`.
 6. **Delete the dead code** listed in section 7, row 7, and the junk in
    `scripts/`. Zero imports, verified.
-7. **Commit.** 39 uncommitted files is a lot of unbacked-up work.
+7. ~~**Commit.**~~ Done 2026-09-07 — `ae09fc1` on `chore/stabilization-pass`.
+   Still to do: merge that branch into `main` so the portfolio repo shows the work.
 8. **Later: latency.** Streaming, and collapsing the 4 sequential Groq calls,
    are the remaining wins after the greeting fast path.
 
@@ -385,6 +387,38 @@ Ordered by value for effort.
 
 Append an entry after every meaningful change. Format: what changed, files
 touched, what was tested, result.
+
+### 2026-09-07 — Priority 1: checkpoint commit of all outstanding work
+- **Changed:** Committed ~2 weeks of accumulated work that had been sitting
+  uncommitted. No behavioural change — a checkpoint taken before the
+  stabilisation pass. Added `.gitignore` rules for build artifacts
+  (`tsconfig.tsbuildinfo`), Python caches (`voice-agent/venv/`, `__pycache__/`,
+  `*.pyc`) and throwaway patch scripts. Deleted the leftover temp patch scripts.
+- **Commit:** `ae09fc1` on branch `chore/stabilization-pass`
+  (48 files, +8689 / -586). Authored as
+  `Sumit Kumbhar <99684211+sumiitkumbhar@users.noreply.github.com>` — the
+  repo-local identity was unset, so it was set to the GitHub-linked address
+  already used in this repo's history (the most recent prior commit used a
+  machine-local address that does not link to a GitHub profile).
+- **Files:** all 48 — the full voice stack (`voice-service/`, `voice-agent/`,
+  `app/api/tts`, `app/api/voice-llm`, both overlays, `lib/useVoiceChat.ts`),
+  conversation memory (`app/api/conversations/*`, `lib/visitorId.ts`,
+  `ConversationSidebar.tsx`), document upload (`app/api/documents/upload`,
+  `lib/userDocuments.ts`), retrieval hardening (`app/api/rag-chat/route.ts`,
+  `lib/domain-vocabulary.ts`, `lib/embeddings.ts`, `lib/supabase.ts`),
+  corpus assets (`data/`, `documents-to-ingest/`, `scripts/`, `sql/`),
+  and `PROJECT_STATE.md`.
+- **Tested:** Pre-commit safety audit. Scanned all 102 candidate files for
+  `gsk_`/`AIza`/`sk-`/`tvly-`/`eyJ`/credentialed `postgres://` patterns:
+  **0 matches in any text file**. The single binary hit
+  (`National_Planning_Policy_Framework.pdf`) was verified as a false positive —
+  random `eyJ` bytes inside a compressed stream of a genuine `%PDF-1.3` file.
+  Confirmed `.env.local` is both untracked and gitignored; only `.env.example`
+  (all values blank) is tracked. Verified nothing ignored or junk was staged.
+- **Result:** Committed. Working tree clean. **Blocker found and cleared:** a
+  stale, empty `.git/index.lock` dated 2026-09-02 was silently blocking every
+  git write; it needed a device delete-permission grant to remove. Worth knowing
+  if git ever appears to hang again.
 
 ### 2026-09-07 — PROJECT_STATE.md created
 - **Changed:** Added this file as the repo's single source of truth.
