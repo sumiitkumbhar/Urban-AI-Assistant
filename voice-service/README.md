@@ -8,50 +8,120 @@ app_port: 7860
 pinned: false
 ---
 
-# Chatterbox voice service
+# CosyVoice voice service
 
-A small FastAPI server that wraps [Chatterbox](https://github.com/resemble-ai/chatterbox) (Resemble AI's open-source, MIT-licensed text-to-speech model) so the Next.js app's voice conversation feature can call it over HTTP. This is what makes voice mode sound natural instead of using the robotic default browser voice - and it costs nothing to run: no API key, no per-character billing, ever. You're running the model yourself.
+A small FastAPI server that wraps [CosyVoice2](https://github.com/FunAudioLLM/CosyVoice)
+(FunAudioLLM's open-source, Apache-2.0-licensed, LLM-based zero-shot TTS
+model) so the Next.js app's voice conversation feature can call it over
+HTTP. This is what makes voice mode sound like a specific, natural voice
+instead of the robotic default browser voice - and there's no API key or
+per-character billing, ever. You're running the model yourself.
 
-It's a *separate* long-running process from the Next.js app. `app/api/tts/route.ts` calls it at whatever URL you set as `CHATTERBOX_TTS_URL`; if this service isn't running or isn't configured, voice mode automatically falls back to the browser's own built-in voice (see `lib/useVoiceChat.ts`), so nothing breaks if you skip this entirely or it's temporarily down.
+This replaces the Chatterbox-based version of this service. The HTTP
+contract (`POST /speak`, `GET /health`) and the env var name
+(`CHATTERBOX_TTS_URL`, kept for backwards compatibility with your
+existing `.env.local` and the `voice-agent/` integration) are unchanged,
+so nothing on the Next.js side needs to change - only what's running
+behind this URL is different.
 
-## Why "Nano"
+## ⚠️ Be honest with yourself about performance first
 
-Chatterbox ships three sizes. This service uses **Nano** (110M parameters) specifically because Resemble describes it as running "3x faster than realtime on 8 CPU cores" - i.e. built to run on ordinary hardware, no GPU rental needed. The Turbo (350M) and Multilingual (500M) variants sound similar but want a GPU to be fast; skip them unless you already have one.
+CosyVoice2 is a real, ~0.5B-parameter LLM-based TTS system - meaningfully
+heavier than the Chatterbox Nano model this service used to run, which
+was specifically chosen for being small and CPU-fast. Two consequences:
 
-## ⚠️ Important: I could not test-run this myself
+- **No Apple Silicon acceleration.** CosyVoice's own code only checks for
+  a CUDA GPU (`torch.device('cuda' if torch.cuda.is_available() else
+  'cpu')`) - there's no MPS path, so on your Mac this runs on CPU only,
+  not the GPU, whatever you set.
+- **CPU generation is slow for a model this size.** Expect several
+  seconds to generate a short reply, more for longer ones - not the "well
+  within a normal reply time" the Chatterbox Nano version could claim.
+  `app/api/tts/route.ts` already falls back to the browser's built-in
+  voice on a timeout, so nothing breaks, but voice mode's *first*
+  impression may be "that took a while" rather than instant.
 
-I wrote and verified this code (syntax-checked the Python, and it follows Chatterbox's own documented usage exactly), but I could not actually install or run it from this session - the sandboxed environment I have access to sits behind a network allowlist that blocks PyPI entirely (the same restriction that's blocked this whole project from reaching Supabase/Gemini directly). So: **please run the steps below yourself in a normal terminal with real internet access** (your Mac's own Terminal.app, not through any Claude bridge), and tell me what happens - if Chatterbox's actual installed API differs even slightly from its public docs, I'll need you to paste me the error to fix it.
+If that trade-off isn't worth it for you, it's fine to leave
+`CHATTERBOX_TTS_URL` unset and keep using the browser's built-in voice -
+say so and we can revisit.
+
+## ⚠️ I could not test-run this myself
+
+Same situation as the Chatterbox version: I wrote and syntax-checked this
+code against CosyVoice's own documented API (`cosyvoice/cli/cosyvoice.py`
+in the repo you uploaded), but the sandboxed environment I have access to
+blocks PyPI, GitHub, and ModelScope outright - the same restriction
+that's blocked this whole project from reaching Supabase/Gemini directly.
+**Please run the steps below yourself in a normal terminal with real
+internet access** (your Mac's own Terminal.app, not through any Claude
+bridge) and tell me what happens - paste me the error if anything in
+CosyVoice's actual installed API differs from what's in `app.py`.
 
 ## Setup
 
-Chatterbox is developed and tested on **Python 3.11**. If your default `python3` is a different version (check with `python3 --version`), install 3.11 first (e.g. `brew install python@3.11` on macOS) and use that specifically below.
+### 1. Get the CosyVoice source next to this file
+
+You already uploaded `CosyVoice-main.zip`, but a GitHub zip download does
+**not** include the contents of git submodules - `third_party/Matcha-TTS`
+in it is an empty folder. The clean fix is to just clone fresh instead of
+unzipping:
 
 ```bash
 cd voice-service
-python3.11 -m venv venv
+git clone --recursive https://github.com/FunAudioLLM/CosyVoice.git CosyVoice
+```
+
+(If you'd rather reuse the zip you already have: unzip it to
+`voice-service/CosyVoice`, then separately run
+`git clone https://github.com/shivammehta25/Matcha-TTS.git voice-service/CosyVoice/third_party/Matcha-TTS`
+to fill in what the zip left empty.)
+
+### 2. Python env and dependencies
+
+CosyVoice is developed and tested on **Python 3.10**. If your default
+`python3` is different (check with `python3 --version`), install 3.10
+first (e.g. `brew install python@3.10`) and use that specifically below.
+
+```bash
+python3.10 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
+
+# If you hit sox compatibility issues:
+brew install sox
 ```
 
-This will download PyTorch and the Chatterbox Nano model weights - expect this to take a while and use a few GB of disk the first time.
+This installs PyTorch and CosyVoice's other dependencies - expect this to
+take a while and use a few GB of disk. (`requirements.txt` here is
+trimmed down from CosyVoice's own - no gradio/webui, training, or
+CUDA-only packages - since this service only needs inference.)
 
-### Optional: choose a voice
+### 3. Model weights
 
-Chatterbox's own examples always pass a short (~10 second) reference audio clip to clone a specific voice - it's not clearly documented whether skipping this falls back to some default voice or not. To pick a voice, drop a short, clean WAV recording (anyone talking normally for ~10 seconds - no music/background noise) at `voice-service/reference_voice.wav` and set:
+You don't have to do anything for this step: `app.py` passes the model
+directory straight to `CosyVoice2(...)`, and if that path doesn't exist
+locally yet, CosyVoice downloads it automatically via ModelScope the
+first time the service starts (a few GB, one-time). If you'd rather
+pre-download it yourself (e.g. ModelScope is slow from where you are):
 
 ```bash
-export CHATTERBOX_REFERENCE_VOICE=./reference_voice.wav
+python3 -c "from modelscope import snapshot_download; snapshot_download('iic/CosyVoice2-0.5B', local_dir='CosyVoice/pretrained_models/CosyVoice2-0.5B')"
 ```
 
-If you skip this, the service will try generating without a reference clip - check the `/health` endpoint and the service's logs if that doesn't produce audio, and let me know what error comes back so I can adjust the code.
+### 4. Choose a voice (recommended)
 
-### Apple Silicon (M1/M2/M3/M4) speed-up
-
-If you're running this natively on your Mac (not inside a sandboxed VM), you can use its GPU:
+Unlike Chatterbox, CosyVoice2's zero-shot cloning needs **two** things: a
+short (~10s) clean reference clip, *and* a text transcript of exactly
+what's said in it. Drop the clip at
+`voice-service/reference_voice.wav` and set both:
 
 ```bash
-export CHATTERBOX_DEVICE=mps
+export COSYVOICE_REFERENCE_VOICE=./reference_voice.wav
+export COSYVOICE_REFERENCE_PROMPT_TEXT="exactly what is said in the clip, transcribed"
 ```
+
+If you skip this, `/speak` falls back to whatever speaker IDs (if any)
+ship with the model - check the `/health` endpoint to see what it found.
 
 ## Run it
 
@@ -65,35 +135,34 @@ Then check it's alive:
 curl http://localhost:8008/health
 ```
 
-And in the main app's `.env.local`, point it there:
+And in the main app's `.env.local` (this name is unchanged on purpose -
+see the top of this file):
 
 ```
 CHATTERBOX_TTS_URL=http://localhost:8008
 ```
 
-Restart the Next.js dev server after adding that, then try voice conversation - it'll now call this service instead of falling back to the browser voice.
+Restart the Next.js dev server after adding that, then try voice
+conversation.
 
-## Deploying to Hugging Face Spaces (free, always-on-ish, no bill)
+## Deploying to Hugging Face Spaces
 
-This folder is already set up as a Hugging Face Space (the YAML block at
-the very top of this file, plus the `Dockerfile` next to this README, are
-what HF's Docker SDK reads). Steps:
+The `Dockerfile` next to this README is set up for HF's Docker SDK, same
+as before - but read the performance warning above first. Free "CPU
+basic" hardware is a much rougher fit for CosyVoice2 than it was for
+Chatterbox Nano; if you want this always-on and responsive, a paid GPU
+Space (or your own always-on Mac, e.g. via a free
+[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/))
+will actually feel good, free CPU likely won't. Steps are otherwise the
+same as before: New Space → SDK: Docker → push this folder's contents →
+wait for "Running" → set `CHATTERBOX_TTS_URL` to the Space's URL.
 
-1. Create a free account at [huggingface.co](https://huggingface.co/join) if you don't have one.
-2. Click **New Space** → give it a name → SDK: **Docker** → hardware: **CPU basic** (free) → Create Space.
-3. Push this `voice-service` folder's contents (`Dockerfile`, `app.py`, `requirements.txt`, this `README.md`, and `reference_voice.wav` if you added one) to the Space's own git repo - HF gives you the exact `git remote add`/`git push` commands on the Space's page, or you can drag-and-drop the files in the "Files" tab in your browser instead of using git at all.
-4. Wait for the "Building" status to turn into "Running" (the first build installs PyTorch + Chatterbox, so expect several minutes).
-5. Copy the Space's URL (looks like `https://<your-username>-<space-name>.hf.space`) and set it as `CHATTERBOX_TTS_URL` in the main app's `.env.local`.
+## `voice-agent/` (the Pipecat full-duplex pipeline)
 
-**What "free" actually gets you here, honestly:**
-
-- CPU Basic is 2 shared vCPUs - the "3x realtime" figure Resemble quotes for Nano was benchmarked on 8 cores, so expect noticeably slower than that, though still well within a normal conversational reply time for short answers.
-- Free Spaces go to sleep after a period of inactivity and take a bit to wake back up (and reload the model into memory) on the next request - the very first message after a lull may lag or briefly fail; `app/api/tts/route.ts` already falls back to the browser's built-in voice automatically if a request times out, so nothing breaks, it just sounds robotic for that one reply.
-- No API key, no per-character billing, no credit card - this is genuinely the $0 option, not a free trial.
-
-### Other hosting options
-
-- **Local development**: just leave `uvicorn app:app --host 0.0.0.0 --port 8008` running in a terminal tab while you work.
-- **Your own Mac, always-on**: only works if the Mac stays on and is exposed to the internet (e.g. a free [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)) - more control than a free Space, but "always on" now means your Mac, not HF's servers.
-
-Either way, the "no money" rule holds: nothing here is a paid API - the only real cost is whose compute keeps the process running.
+If you're also using `voice-agent/`, nothing there needs to change -
+`chatterbox_tts.py` calls this service's `/speak` HTTP endpoint by URL,
+not by importing anything from this folder directly, so it works
+unchanged against whichever engine is running here. It still reads
+`CHATTERBOX_EXAGGERATION`; `app.py` now accepts and ignores that field
+(CosyVoice has no equivalent parameter) rather than rejecting the
+request.

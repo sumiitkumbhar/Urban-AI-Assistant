@@ -1,6 +1,28 @@
-fastapi>=0.110
-uvicorn[standard]>=0.29
-pydantic>=2
-chatterbox-tts
-torch
-torchaudio
+# Trimmed from CosyVoice's own requirements.txt: this service only needs
+# inference, not training/eval/webui, so gradio, tensorboard, deepspeed,
+# tensorrt-cu12*, grpcio*, gdown, wget, pyarrow and matplotlib are dropped.
+# The sys_platform markers below are copied as-is from upstream and
+# already do the right thing on a Mac (skip the Linux/CUDA-only wheels).
+conformer==0.3.2
+fastapi==0.115.6
+HyperPyYAML==1.2.3
+inflect==7.3.1
+librosa==0.10.2
+modelscope==1.20.0
+networkx==3.1
+numpy==1.26.4
+omegaconf==2.3.0
+onnx==1.16.0
+onnxruntime-gpu==1.18.0; sys_platform == 'linux'
+onnxruntime==1.18.0; sys_platform == 'darwin' or sys_platform == 'win32'
+openai-whisper==20231117
+protobuf==4.25
+pydantic==2.7.0
+pyworld==0.3.4
+soundfile==0.12.1
+torch==2.3.1
+torchaudio==2.3.1
+transformers==4.51.3
+x-transformers==2.11.24
+uvicorn==0.30.0
+wetext==0.0.4

@@ -7,16 +7,16 @@
 // Firefox doesn't, hence the sttSupported flag.
 //
 // Read-aloud (text -> speech) tries two things, in order:
-//   1. The self-hosted Chatterbox voice service (see voice-service/ in the
-//      repo root and app/api/tts/route.ts) - open-source (MIT), runs on
-//      your own hardware or a free host, no per-character billing. This is
-//      what gives a natural, ChatGPT-voice-mode-like sound instead of a
-//      robotic one.
+//   1. The self-hosted voice service (see voice-service/ in the repo
+//      root and app/api/tts/route.ts) - currently CosyVoice2, previously
+//      Chatterbox. Open-source, runs on your own hardware or a free
+//      host, no per-character billing. This is what gives a natural,
+//      cloned-voice sound instead of a robotic one.
 //   2. The browser's own built-in SpeechSynthesis, picking the best native
-//      voice available, if Chatterbox isn't configured/reachable or the
-//      request fails for any reason. This means voice conversation keeps
-//      working even before the Chatterbox service is set up - it just
-//      sounds more robotic until it is.
+//      voice available, if the self-hosted service isn't configured/
+//      reachable or the request fails for any reason. This means voice
+//      conversation keeps working even before that service is set up -
+//      it just sounds more robotic until it is.
 //
 // Nothing here costs money: no API key, no per-request billing, either
 // direction, either path.
@@ -49,7 +49,7 @@ export interface UseVoiceChatResult {
 // (often actually neural/cloud-backed, still free-to-us) voice matching
 // the user's language, and avoids the old low-quality synthetic ones when
 // something better is available. Only used for the SpeechSynthesis
-// fallback path - the primary Chatterbox path doesn't need this.
+// fallback path - the primary self-hosted-voice path doesn't need this.
 // Common name patterns for female- and male-associated system/network
 // voices across macOS, Chrome, and Windows. SpeechSynthesisVoice doesn't
 // expose an actual gender field in any browser, so this is a best-effort
@@ -247,7 +247,7 @@ export function useVoiceChat(
         return;
       }
 
-      // Try the self-hosted Chatterbox voice first (app/api/tts/route.ts
+      // Try the self-hosted voice service first (app/api/tts/route.ts
       // proxies to voice-service/ - see that route for why this can 503
       // or 502 perfectly normally whenever the service isn't configured
       // or isn't running). Any failure here just falls back to the
@@ -285,7 +285,7 @@ export function useVoiceChat(
           await audio.play();
         })
         .catch(() => {
-          // Chatterbox not configured/reachable/erroring - fall back to
+          // Self-hosted voice not configured/reachable/erroring - fall back to
           // the browser's built-in voice so voice mode still works.
           speakWithBrowserVoice(trimmed, onDone);
         });

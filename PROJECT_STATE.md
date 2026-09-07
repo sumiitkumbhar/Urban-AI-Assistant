@@ -134,7 +134,7 @@ section 7.
 | LLM | Groq, default `openai/gpt-oss-20b` | via `groq-sdk`; free tier |
 | Web fallback | Google Custom Search + Tavily | used when the corpus doesn't cover the question |
 | Voice (in-browser) | Web Speech API (STT) + browser SpeechSynthesis (TTS) | zero-dependency baseline |
-| Voice (better TTS) | Chatterbox (Resemble AI, MIT) via local FastAPI service | `voice-service/`, optional |
+| Voice (better TTS) | CosyVoice2 (FunAudioLLM, Apache-2.0) via local FastAPI service - swapped in 2026-09-07, previously Chatterbox | `voice-service/`, optional |
 | Voice (full-duplex) | Pipecat + local Whisper + Silero VAD | `voice-agent/`, optional, unproven |
 | Runtime | Node >= 18.17 | all API routes are `runtime = "nodejs"` |
 
@@ -269,7 +269,7 @@ does not stream.
 **Path A — in-browser (default, works today):**
 ```
 mic -> Web Speech API (browser STT) -> /api/rag-chat (voiceMode:true)
-    -> data.speechText -> /api/tts -> voice-service (Chatterbox)  [if configured]
+    -> data.speechText -> /api/tts -> voice-service (CosyVoice2)  [if configured]
                        -> browser SpeechSynthesis                 [fallback]
 ```
 Turn-based: it records, stops, thinks, then speaks. It cannot hear you while
@@ -281,7 +281,7 @@ mic --websocket--> voice-agent/bot.py (Pipecat)
     Silero VAD (turn detection)
     -> local Whisper STT (MLX on Apple Silicon / faster-whisper elsewhere)
     -> OpenAILLMService pointed at /api/voice-llm -> /api/rag-chat
-    -> ChatterboxHttpTTSService -> voice-service
+    -> ChatterboxHttpTTSService -> voice-service (class name kept from Chatterbox era; calls voice-service's HTTP API unchanged)
 --websocket--> browser speaker
 ```
 Requires three processes running at once (Next.js, voice-service, voice-agent)
@@ -299,7 +299,7 @@ and `NEXT_PUBLIC_VOICE_AGENT_URL` set, which is what reveals the
 | Embedding dimensions | — | hardcoded, `lib/embeddings.ts` | `768` |
 | Retrieval top-K | — | request body `topK` | `25` (max 50) |
 | Similarity threshold | — | request body `threshold` | `0.3` |
-| Chatterbox TTS expressiveness | — | `CHATTERBOX_EXAGGERATION` | `0.6` |
+| Voice TTS expressiveness | — | `CHATTERBOX_EXAGGERATION` | accepted, ignored by CosyVoice2 (no equivalent knob) |
 | Whisper (voice-agent) | MLX medium / distil-medium.en | `WHISPER_MLX_MODEL` / `WHISPER_MODEL` | see `voice-agent/bot.py` |
 
 **Environment variables (names only — see `.env.example`):**
@@ -335,10 +335,15 @@ project. "Runtime-verified" is called out where it applies.
   cases passing (see section 12). Not yet runtime-verified inside the app.
 
 ### Partial
-- **Chatterbox TTS (`voice-service/`)** — code complete and syntax-checked, but
-  **never executed**. Every environment available to the AI assistant blocks
-  PyPI, so `pip install -r requirements.txt` has never run. Needs a real
-  terminal. Until then voice mode silently uses the browser voice.
+- **CosyVoice2 TTS (`voice-service/`)** — swapped in from Chatterbox on
+  2026-09-07 (user uploaded the CosyVoice source; Chatterbox is gone). Code
+  complete and syntax-checked, but **never executed** — same PyPI/GitHub/
+  ModelScope block as everything else the AI assistant can't reach directly.
+  Needs a real terminal. Heavier than Chatterbox was (0.5B-param LLM-based
+  model, CPU-only on this Mac — no MPS path in CosyVoice's own code) — see
+  voice-service/README.md's performance note before assuming "free CPU
+  hosting" is still a good idea the way it was for Chatterbox. Until it's
+  actually running, voice mode silently uses the browser voice.
 - **Full-duplex voice agent (`voice-agent/`)** — code complete, written against
   Pipecat's current verified source. **Never executed** (PyPI blocked). The
   browser-side packages (`@pipecat-ai/client-js`, `@pipecat-ai/websocket-transport`)
@@ -427,6 +432,7 @@ Single-page app (`app/page.tsx` renders `ChatInterface` client-side only).
 | 2026-09-06 | Greeting/small-talk fast path — bypasses the entire RAG pipeline for greetings, thanks, goodbyes, capability questions | `app/api/rag-chat/route.ts` |
 | 2026-09-06 | Domain term correction — deterministic STT/typo correction against corpus vocabulary, surfaced in the UI | `lib/domain-vocabulary.ts` (new), `app/api/rag-chat/route.ts`, `components/chat/ChatInterface.tsx` |
 | 2026-09-07 | This file created | `PROJECT_STATE.md` |
+| 2026-09-07 | Voice engine swapped Chatterbox -> CosyVoice2 (user-uploaded source); env var name (`CHATTERBOX_TTS_URL`) and HTTP contract kept unchanged so nothing downstream needed to change. Still never executed - needs a real terminal, same as before | `voice-service/app.py`, `voice-service/requirements.txt`, `voice-service/Dockerfile`, `voice-service/README.md`, `app/api/tts/route.ts`, `lib/useVoiceChat.ts`, `.env.example`, `voice-agent/README.md` |
 
 ---
 

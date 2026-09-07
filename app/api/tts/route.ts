@@ -1,13 +1,17 @@
 // app/api/tts/route.ts
 //
-// Thin server-side proxy to the self-hosted Chatterbox voice service (see
-// voice-service/ in the repo root for the actual model). Kept server-side
-// so the service's URL is never exposed to the browser, and so the voice
-// backend can be swapped later without touching the client at all.
+// Thin server-side proxy to the self-hosted voice service (see
+// voice-service/ in the repo root for the actual model - currently
+// CosyVoice2, previously Chatterbox; the env var name below is kept as
+// CHATTERBOX_TTS_URL for backwards compatibility rather than renamed).
+// Kept server-side so the service's URL is never exposed to the browser,
+// and so the voice backend can be swapped later without touching the
+// client at all.
 //
-// Zero-cost by design: Chatterbox is open-source (MIT) and runs on your
-// own hardware or a free-tier host (see voice-service/README.md for a
-// Hugging Face Spaces option) - there's no per-character billing here,
+// Zero-cost by design: the model behind this is open-source and runs on
+// your own hardware or a free-tier host (see voice-service/README.md,
+// including an honest note about how well "free tier" actually performs
+// for CosyVoice2 specifically) - there's no per-character billing here,
 // unlike a hosted TTS API. If the service isn't configured or isn't
 // reachable, this returns an error status and the client
 // (lib/useVoiceChat.ts) falls back to the browser's own built-in

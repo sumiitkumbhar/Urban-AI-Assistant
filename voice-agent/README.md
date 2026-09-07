@@ -2,7 +2,7 @@
 
 A real-time voice pipeline built with [Pipecat](https://github.com/pipecat-ai/pipecat), replacing the browser's own Speech Recognition (`components/chat/VoiceModeOverlay.tsx` / `lib/useVoiceChat.ts`) with continuous, server-side listening. This is what gets you real barge-in - talk over the assistant and it stops instantly - instead of the old record-then-wait-then-play loop, which can't be interrupted mid-sentence because it isn't listening while it's talking.
 
-**This is heavier than the old pipeline.** It runs local Whisper (speech-to-text) *and* Chatterbox (text-to-speech) *and* Silero VAD (voice activity detection) all on one machine, continuously, for as long as a voice session is open. That's a deliberate trade - see the chat where this was discussed - and it's why this is meant to run on your own Mac, not the free Hugging Face Space `voice-service/` can optionally use.
+**This is heavier than the old pipeline.** It runs local Whisper (speech-to-text) *and* the self-hosted TTS service (currently CosyVoice2, previously Chatterbox) *and* Silero VAD (voice activity detection) all on one machine, continuously, for as long as a voice session is open. That's a deliberate trade - see the chat where this was discussed - and it's why this is meant to run on your own Mac, not a free Hugging Face Space `voice-service/` can optionally use (doubly true now that CosyVoice2 is heavier than Chatterbox was - see voice-service/README.md's performance note).
 
 ## How it fits together
 
@@ -12,14 +12,14 @@ A real-time voice pipeline built with [Pipecat](https://github.com/pipecat-ai/pi
      -> local Whisper STT (MLX on your M-series Mac - see below)
      -> OpenAILLMService, pointed at /api/voice-llm (not OpenAI itself -
         see that route's comment) -> your existing /api/rag-chat
-     -> ChatterboxHttpTTSService -> the voice-service/ you already have running
+     -> ChatterboxHttpTTSService -> the voice-service/ you already have running (class name kept from the Chatterbox era; it just calls voice-service/'s HTTP API, so it works unchanged against CosyVoice2)
  --ws--> browser speaker
 ```
 
 Three processes run at once during a voice conversation:
 
 1. **The Next.js app** (`npm run dev`, or however you already run it) - unchanged, plus one new route: `app/api/voice-llm/route.ts`.
-2. **`voice-service/`** - unchanged, the Chatterbox TTS server from before (`uvicorn app:app --port 8008`).
+2. **`voice-service/`** - now CosyVoice2 instead of Chatterbox (`uvicorn app:app --port 8008`); see voice-service/README.md.
 3. **`voice-agent/`** (this folder) - the new Pipecat process, listening on port 7861 by default.
 
 ## Setup
