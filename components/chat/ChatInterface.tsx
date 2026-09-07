@@ -133,6 +133,23 @@ const suggestions = [
   "What are the Golden Rules for releasing Green Belt land for housing?",
 ];
 
+function ArrowUpRightIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <path d="M7 17 17 7M9 7h8v8" />
+    </svg>
+  );
+}
+
 /* ---------------- helpers ---------------- */
 
 function stripChunkMetadata(text: string) {
@@ -1264,7 +1281,7 @@ export default function ChatInterface() {
         </span>
       </div>
       <div className="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
-      <div className="mx-auto w-full max-w-7xl space-y-6 px-6 sm:px-8 lg:px-12">
+      <div className="mx-auto w-full max-w-3xl space-y-6 px-2 sm:px-4">
           {messages.length === 0 ? (
             <WelcomeScreen onSuggestionClick={(s) => handleSend(s)} />
           ) : (
@@ -1571,47 +1588,63 @@ function WelcomeScreen({
   onSuggestionClick: (s: string) => void;
 }) {
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      className="py-12 text-center"
-    >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src="/logo.png"
-        alt="Urban AI Assistant"
-        className="mx-auto mb-6 h-28 w-28 object-contain"
-      />
+    // min-h fills the space the composer leaves, so the block sits optically
+    // centred instead of stranded at the top above 600px of nothing.
+    <div className="flex min-h-[calc(100vh-16rem)] flex-col items-center justify-center py-10">
+      <div className="w-full max-w-3xl">
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/logo.png"
+          alt=""
+          aria-hidden="true"
+          className="rise mx-auto mb-7 h-16 w-16 object-contain opacity-90"
+        />
 
-      <h2 className="mb-4 text-4xl font-bold">
-        Welcome to{" "}
-        <span className="bg-gradient-to-r from-neutral-950 to-neutral-600 bg-clip-text text-transparent">
+        {/* Solid ink, not gradient-clipped text. tracking-tight because
+            Manrope at display size opens up more than Inter did. */}
+        <h1 className="rise mb-3 text-center text-[2.15rem] font-semibold leading-[1.1] tracking-tight text-neutral-950 sm:text-[2.6rem]"
+            style={{ ["--i" as any]: 1 }}>
           Urban AI Assistant
-        </span>
-      </h2>
+        </h1>
 
-      <p className="mb-12 text-lg text-neutral-700">
-        Grounded regulatory answers with citations, page references, and
-        clause-level support
-      </p>
+        <p className="rise mx-auto mb-11 max-w-[46ch] text-center text-[0.95rem] leading-relaxed text-neutral-600"
+           style={{ ["--i" as any]: 2 }}>
+          Grounded regulatory answers with citations, page references and
+          clause-level support.
+        </p>
 
-      <p className="mb-4 text-sm text-neutral-600">Try asking:</p>
+        {/* Hairline label rather than a floating "Try asking:" line - the rule
+            does the separating, the words just name the group. */}
+        <div className="rise mb-4 flex items-center gap-3" style={{ ["--i" as any]: 3 }}>
+          <span className="text-[11px] font-medium uppercase tracking-[0.14em] text-neutral-500">
+            Start with
+          </span>
+          <span className="h-px flex-1 bg-neutral-950/10" />
+        </div>
 
-      <div className="mx-auto grid max-w-3xl grid-cols-1 gap-3 sm:grid-cols-2">
-        {suggestions.map((suggestion, i) => (
-          <motion.button
-            key={i}
-            initial={{ opacity: 0, x: -20 }}
-            animate={{ opacity: 1, x: 0 }}
-            transition={{ delay: 0.2 + i * 0.08 }}
-            onClick={() => onSuggestionClick(suggestion)}
-            className="w-full rounded-2xl border border-neutral-950/10 bg-neutral-950/5 px-5 py-4 text-left text-sm text-neutral-800 transition-all shadow-[0_1px_3px_rgba(0,0,0,0.04),0_1px_2px_rgba(0,0,0,0.03)] hover:border-neutral-950/20 hover:bg-neutral-950/10 hover:shadow-[0_2px_8px_rgba(0,0,0,0.05),0_1px_2px_rgba(0,0,0,0.03)]"
-          >
-            "{suggestion}"
-          </motion.button>
-        ))}
+        {/* Exactly as many cells as there are suggestions. Entrance is CSS, so
+            the cards are visible even if JS animation never runs. */}
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+          {suggestions.map((suggestion, i) => (
+            <button
+              key={i}
+              type="button"
+              onClick={() => onSuggestionClick(suggestion)}
+              style={{ ["--i" as any]: 4 + i }}
+              className="rise press group flex min-h-[5.25rem] w-full flex-col justify-between rounded-2xl border border-neutral-950/[0.08] bg-[#fbf9f5] p-4 text-left shadow-paper-xs transition-[background-color,border-color,box-shadow] duration-200 ease-settle hover:border-neutral-950/20 hover:bg-white hover:shadow-paper-md"
+            >
+              <span className="text-[0.875rem] leading-snug text-neutral-800">
+                {suggestion}
+              </span>
+              <span className="mt-3 flex items-center gap-1.5 text-[11px] font-medium text-neutral-400 transition-colors group-hover:text-neutral-700">
+                Ask this
+                <ArrowUpRightIcon className="h-3 w-3 transition-transform duration-200 ease-settle group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+              </span>
+            </button>
+          ))}
+        </div>
       </div>
-    </motion.div>
+    </div>
   );
 }
 

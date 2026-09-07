@@ -237,7 +237,15 @@ export default function ConversationSidebar({
             <PlusIcon className="h-4 w-4" />
           </button>
 
-          <div className="flex w-full flex-1 flex-col items-center gap-1 overflow-y-auto">
+          <div
+            className="flex w-full flex-1 flex-col items-center gap-1 overflow-y-auto pb-6"
+            style={{
+              maskImage:
+                "linear-gradient(to bottom, black calc(100% - 2rem), transparent 100%)",
+              WebkitMaskImage:
+                "linear-gradient(to bottom, black calc(100% - 2rem), transparent 100%)",
+            }}
+          >
             {conversations.map((c) => {
               const isActive = c.id === activeConversationId;
               const isOpening = loadingConversationId === c.id;
@@ -248,16 +256,23 @@ export default function ConversationSidebar({
                   onClick={() => onSelectConversation(c.id)}
                   title={c.title}
                   aria-label={c.title}
-                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl transition-colors ${
+                  className={`press relative flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-[11px] font-semibold transition-colors ${
                     isActive
-                      ? "bg-neutral-950/10 text-neutral-950"
-                      : "text-neutral-500 hover:bg-neutral-950/5 hover:text-neutral-800"
+                      ? "bg-neutral-950 text-[#f7f4ee]"
+                      : "text-neutral-500 hover:bg-neutral-950/[0.07] hover:text-neutral-900"
                   }`}
                 >
                   {isOpening ? (
                     <SpinnerIcon className="h-3.5 w-3.5 animate-spin" />
                   ) : (
-                    <ChatBubbleIcon className="h-3.5 w-3.5" />
+                    // An initial derived from the conversation title, not a
+                    // repeated speech-bubble glyph. Thirty identical icons
+                    // stacked in a rail carry no information and read as a
+                    // rendering fault; initials make the rail scannable and
+                    // give the active item something to actually highlight.
+                    <span aria-hidden="true">
+                      {(c.title || "?").trim().charAt(0).toUpperCase()}
+                    </span>
                   )}
                 </button>
               );
