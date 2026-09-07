@@ -842,6 +842,48 @@ Two consequences worth noting:
 Append an entry after every meaningful change. Format: what changed, files
 touched, what was tested, result.
 
+### 2026-09-07 — Reviewed the Codex UI branch (PR #2). NOT merged.
+
+**The branch forks from a different app than the one on this machine.** It is
+based on `f1928d0`, which is `origin/main` — and `origin/main` does **not** have
+the 18 commits sitting unpushed here. Concretely, `codex/ui-revamp-preserve-palette`
+has no `ConversationSidebar.tsx`, no `VoiceAgentOverlay.tsx`, no
+`lib/domain-vocabulary.ts`, no `lib/userDocuments.ts`, no `app/api/conversations/*`,
+a 2,832-line `rag-chat/route.ts` against this machine's 4,206, and the **dark
+slate/purple palette** rather than the paper palette (`#f7f4ee` / `neutral-950`)
+this app now uses. Merging it as-is would revert the sidebar, conversation
+memory, voice mode, document upload and council-aware retrieval, and change the
+palette back. **Decision required from Sumit before any merge.**
+
+- **Reviewed at:** `3521f1e` (the second commit, which corrects the first).
+- **Palette claim — verified mechanically, and it holds.** `app/page.tsx`,
+  `app/globals.css` and `tailwind.config.js` are byte-identical to its base;
+  `app/workspace.css` contains **0** paint declarations; colour-utility usage in
+  `ChatInterface.tsx` differs from base only by *count* (the new header reusing
+  `bg-white/5`, `border-white/10`, `text-slate-200`), never by a new or removed
+  colour; **0** hex/rgb/hsl literals added.
+- **Defect found and fixed — the welcome screen fit no common laptop viewport.**
+  Measured in headless Chromium: at 1366×768 the scroll area had 384px for 592px
+  of content, so the three prompt cards were clipped mid-word. The composer sat
+  at **252px at rest** (31% of the viewport), each card was **204px** because the
+  arrow took its own row, and the hero clamp resolved to 60px. Fixed to 195px /
+  content-sized cards / trimmed hero, plus **height-based** media queries — this
+  is a height problem and width breakpoints cannot see it.
+  **Verified no overflow at 1920×1080, 1440×900, 1366×768, 1280×720, 1152×700,
+  1024×800**, none horizontal at any size.
+- **Two more fixed:** card labels were a literal array indexed in parallel with
+  the questions 900 lines away (a fourth suggestion would render a blank bold
+  line); the mode menu closed on Escape but not on clicking away.
+- **Result:** `codex/ui-revamp-reviewed` (`082c35d`) exists **locally only**.
+  `tsc --noEmit` exit 0. Reduced-motion CSS confirmed under
+  `--force-prefers-reduced-motion`. Nothing merged, nothing pushed.
+- **NOT verified, and must be before merge:** `next build` (needs
+  `@next/swc-linux-arm64`; only the darwin binary is installed and the npm
+  registry is 403 from both the cloud sandbox and the device VM) and live chat
+  replies + citations (need Supabase, Gemini, Groq). Layout evidence comes from a
+  static harness using the branch's real compiled Tailwind + `workspace.css`, not
+  from the running app.
+
 ### 2026-09-07 — Council-aware retrieval: implemented, migration still pending
 - **Changed:**
   - `app/api/rag-chat/route.ts` — added `routeCouncilScope()` and
