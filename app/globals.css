@@ -8483,6 +8483,24 @@ p {
 
 /* The composer specifically: a pill, not the 0.5rem radius the global input
    rule forces on everything. Matches the shape system in DESIGN.md. */
+/* The composer grows with what you type. Radius is the only thing that has to
+   change with it: a 9999px pill on a one-line box is right, and on a six-line
+   box bows the sides into an oval. data-grown is set by the resize effect in
+   ChatInterface, which measures scrollHeight rather than counting newlines -
+   soft-wrapped and pasted text have no newlines to count. */
+textarea.uaa-composer {
+  background: var(--paper-raised, #fbf9f5) !important;
+  color: #1c1a16 !important;
+  border-radius: 9999px !important;
+  min-height: 3rem;
+  max-height: 168px;
+  overflow-y: hidden;
+}
+textarea.uaa-composer[data-grown="true"] {
+  border-radius: 20px !important;
+}
+textarea.uaa-composer::placeholder { color: #a39b8d !important; }
+
 input[type="text"].uaa-composer {
   background: var(--paper-raised) !important;
   color: var(--ink) !important;

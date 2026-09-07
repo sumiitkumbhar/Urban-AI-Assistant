@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, useLayoutEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -126,11 +126,46 @@ type BackendDiagram =
     }
   | any;
 
-const suggestions = [
-  "What is the presumption in favour of sustainable development under the NPPF?",
-  "What does the NPPF say about protecting the Green Belt?",
-  "How does the NPPF define sustainable development?",
-  "What are the Golden Rules for releasing Green Belt land for housing?",
+// Drawn from the one document the corpus actually contains: the National
+// Planning Policy Framework in documents-to-ingest/, 422 chunks, the only
+// document in the database with any chunks at all. Each question was checked
+// against the extracted text before being put here, and each names a policy
+// that exists in it - this edition is the restructured Framework with lettered
+// policy codes (S3, GB8, F5, HE6), not the older paragraph-numbered one, so
+// questions phrased around "paragraph 11" would have retrieved nothing.
+//
+// The four are deliberately from four different chapters. The previous set had
+// two Green Belt questions and two on sustainable development, which made the
+// corpus look narrower than it is.
+//
+// When more documents are ingested, revisit this - a suggestion the system
+// cannot answer is worse than no suggestion, because the user learns from the
+// first failure not to trust the second.
+const suggestions: Array<{ policy: string; topic: string; question: string }> = [
+  {
+    policy: "S3",
+    topic: "Sustainable development",
+    question:
+      "How does the presumption in favour of sustainable development apply inside and outside settlements?",
+  },
+  {
+    policy: "GB8",
+    topic: "Green Belt",
+    question:
+      "What do the Golden Rules require when Green Belt land is released for housing?",
+  },
+  {
+    policy: "F5",
+    topic: "Flood risk",
+    question:
+      "When does the sequential test apply to a development proposal at risk of flooding?",
+  },
+  {
+    policy: "HE6",
+    topic: "Historic environment",
+    question:
+      "What weight should be given to a designated heritage asset affected by development?",
+  },
 ];
 
 function ArrowUpRightIcon({ className }: { className?: string }) {
@@ -770,6 +805,29 @@ export default function ChatInterface() {
 
   const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+
+  // How tall the composer is allowed to get before it scrolls instead of
+  // growing. Six lines: past that the box starts eating the conversation it is
+  // supposed to sit beneath.
+  const COMPOSER_MAX_PX = 168;
+
+  // Height is measured, not counted. Counting "\n" gets soft-wrapped lines
+  // wrong, and a pasted paragraph is exactly the case where getting it wrong
+  // is most visible. useLayoutEffect so the resize lands in the same frame as
+  // the keystroke - in useEffect the box visibly lags a fast typist by a
+  // frame, which reads as jitter.
+  useLayoutEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const next = Math.min(el.scrollHeight, COMPOSER_MAX_PX);
+    el.style.height = `${next}px`;
+    el.style.overflowY = el.scrollHeight > COMPOSER_MAX_PX ? "auto" : "hidden";
+    // A one-line box keeps the pill; a grown one cannot, because a 9999px
+    // radius on a tall box bows the sides into an oval.
+    el.dataset.grown = next > 56 ? "true" : "false";
+  }, [inputValue]);
 
   // Bumped every time the open chat changes (new chat, switching to a
   // saved conversation, or sending a fresh message). An in-flight
@@ -1233,8 +1291,11 @@ export default function ChatInterface() {
     }
   };
 
-  const onKeyDown: React.KeyboardEventHandler<HTMLInputElement> = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
+  const onKeyDown: React.KeyboardEventHandler<HTMLTextAreaElement> = (e) => {
+    // isComposing guards IME input: mid-composition Enter commits the
+    // candidate word, and treating it as "send" fires a half-typed message in
+    // Japanese, Chinese and Korean.
+    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSend();
     }
@@ -1348,17 +1409,21 @@ export default function ChatInterface() {
       <div className="border-t border-neutral-950/8 bg-[#f7f4ee]/80 p-4 shadow-[0_-1px_16px_rgba(0,0,0,0.04)] backdrop-blur-xl sm:p-6">
       <div className="mx-auto w-full max-w-3xl px-4 sm:px-6">
           <div className="relative">
-            <input
-              type="text"
+            <textarea
+              ref={composerRef}
+              rows={1}
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={onKeyDown}
               placeholder="Ask anything"
-              className="uaa-composer w-full rounded-full border border-neutral-950/10 bg-[#fbf9f5] py-3.5 pl-11 pr-32 text-sm shadow-paper-sm transition-[box-shadow,border-color,background-color] duration-200 ease-settle focus:outline-none focus:border-neutral-950/25 focus:bg-white focus:shadow-paper-md"
+              aria-label="Ask a question"
+              className="uaa-composer block w-full resize-none border border-neutral-950/10 bg-[#fbf9f5] py-3.5 pl-11 pr-32 text-sm leading-6 shadow-paper-sm transition-[box-shadow,border-color,background-color,border-radius] duration-200 ease-settle focus:outline-none focus:border-neutral-950/25 focus:bg-white focus:shadow-paper-md"
               disabled={isLoading}
             />
 
-            <div className="absolute left-2 top-1/2 -translate-y-1/2">
+            {/* Bottom-anchored: with a growing composer, a vertically
+                centred control drifts down the box as you type. */}
+            <div className="absolute bottom-2 left-2">
               <label
                 className="press flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border border-neutral-950/10 bg-neutral-100/80 text-neutral-800 hover:bg-neutral-200/90 hover:border-neutral-950/20"
                 title="Upload document"
@@ -1374,7 +1439,7 @@ export default function ChatInterface() {
               </label>
             </div>
 
-            <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-2">
+            <div className="absolute bottom-2 right-2 flex items-center gap-2">
               {sttSupported && (
                 <button
                   type="button"
@@ -1629,18 +1694,23 @@ function WelcomeScreen({
         {/* Exactly as many cells as there are suggestions. Entrance is CSS, so
             the cards are visible even if JS animation never runs. */}
         <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-          {suggestions.map((suggestion, i) => (
+          {suggestions.map(({ policy, topic, question }, i) => (
             <button
-              key={i}
+              key={question}
               type="button"
-              onClick={() => onSuggestionClick(suggestion)}
+              onClick={() => onSuggestionClick(question)}
               style={{ ["--i" as any]: 4 + i }}
-              className="rise press group flex min-h-[5.25rem] w-full flex-col justify-between rounded-2xl border border-neutral-950/[0.08] bg-[#fbf9f5] p-4 text-left shadow-paper-xs transition-[background-color,border-color,box-shadow] duration-200 ease-settle hover:border-neutral-950/20 hover:bg-white hover:shadow-paper-md"
+              className="rise press group flex min-h-[5.75rem] w-full flex-col justify-start rounded-2xl border border-neutral-950/[0.08] bg-[#fbf9f5] p-4 text-left shadow-paper-xs transition-[background-color,border-color,box-shadow] duration-200 ease-settle hover:border-neutral-950/20 hover:bg-white hover:shadow-paper-md"
             >
-              <span className="text-[0.875rem] leading-snug text-neutral-800">
-                {suggestion}
+              <span className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.1em] text-neutral-400">
+                <span className="tabular-nums text-neutral-500">{policy}</span>
+                <span aria-hidden="true">·</span>
+                <span>{topic}</span>
               </span>
-              <span className="mt-3 flex items-center gap-1.5 text-[11px] font-medium text-neutral-400 transition-colors group-hover:text-neutral-700">
+              <span className="text-[0.875rem] leading-snug text-neutral-800">
+                {question}
+              </span>
+              <span className="mt-auto flex items-center gap-1.5 pt-3 text-[11px] font-medium text-neutral-400 transition-colors group-hover:text-neutral-700">
                 Ask this
                 <ArrowUpRightIcon className="h-3 w-3 transition-transform duration-200 ease-settle group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
               </span>
