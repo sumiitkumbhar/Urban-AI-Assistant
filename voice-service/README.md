@@ -98,14 +98,17 @@ CUDA-only packages - since this service only needs inference.)
 
 ### 3. Model weights
 
-You don't have to do anything for this step: `app.py` passes the model
-directory straight to `CosyVoice2(...)`, and if that path doesn't exist
-locally yet, CosyVoice downloads it automatically via ModelScope the
-first time the service starts (a few GB, one-time). If you'd rather
-pre-download it yourself (e.g. ModelScope is slow from where you are):
+You don't have to do anything for this step: `app.py` defaults
+`COSYVOICE_MODEL_DIR` to the ModelScope model id `iic/CosyVoice2-0.5B`,
+and CosyVoice2's constructor downloads it automatically the first time
+the service starts (a few GB, one-time) into ModelScope's own cache dir
+(typically `~/.cache/modelscope/hub/...`). If you'd rather pre-download
+it yourself (e.g. ModelScope is slow from where you are) or keep the
+weights inside this repo instead of the cache dir:
 
 ```bash
 python3 -c "from modelscope import snapshot_download; snapshot_download('iic/CosyVoice2-0.5B', local_dir='CosyVoice/pretrained_models/CosyVoice2-0.5B')"
+export COSYVOICE_MODEL_DIR=./CosyVoice/pretrained_models/CosyVoice2-0.5B
 ```
 
 ### 4. Choose a voice (recommended)

@@ -47,15 +47,20 @@ _COSYVOICE_ROOT = os.environ.get(
 sys.path.insert(0, _COSYVOICE_ROOT)
 sys.path.insert(0, os.path.join(_COSYVOICE_ROOT, "third_party", "Matcha-TTS"))
 
-# Passed straight through to CosyVoice2(model_dir=...). If this path
-# doesn't exist locally, CosyVoice2's own constructor downloads it via
-# modelscope automatically (same zero-config auto-download behaviour the
-# old Chatterbox service had) - the first request after a fresh start
-# will be slow for that reason alone, separate from generation time.
-MODEL_DIR = os.environ.get(
-    "COSYVOICE_MODEL_DIR",
-    os.path.join(_COSYVOICE_ROOT, "pretrained_models", "CosyVoice2-0.5B"),
-)
+# Passed straight through to CosyVoice2(model_dir=...). CosyVoice2's own
+# constructor only auto-downloads via modelscope when model_dir does NOT
+# already exist as a local path - and when it downloads, it passes
+# model_dir itself to modelscope as the model id, so the default here
+# has to be the actual ModelScope id ("iic/CosyVoice2-0.5B"), not an
+# arbitrary local folder name (an earlier version of this file got that
+# backwards and failed with "the request model: <local path> does not
+# exist!"). This downloads to modelscope's own cache dir (typically
+# ~/.cache/modelscope/hub/...) - the first request after a fresh start
+# will be slow for that reason alone, separate from generation time. To
+# keep the weights inside this repo instead, pre-download with
+# `snapshot_download('iic/CosyVoice2-0.5B', local_dir=...)` (see
+# README.md) and point COSYVOICE_MODEL_DIR at that local_dir.
+MODEL_DIR = os.environ.get("COSYVOICE_MODEL_DIR", "iic/CosyVoice2-0.5B")
 
 # CosyVoice2's zero-shot cloning needs a short reference clip *and* a
 # text transcript of what's actually said in it - unlike Chatterbox,
