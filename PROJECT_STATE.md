@@ -20,6 +20,87 @@ values.
 
 ---
 
+## 0. START HERE — handoff brief
+
+**If you are an AI assistant picking this project up cold, read this section
+fully before doing anything.** The rest of the file is reference; this is
+orientation.
+
+### What this is
+A RAG chatbot answering UK planning and building-regulations questions from
+indexed official documents, with inline citations. Next.js 14 + Supabase
+(Postgres/pgvector) + Gemini embeddings + Groq LLM. Full detail: §1–§5.
+
+### State as of 2026-09-07
+- Branch `main`, commit `c3600d4`. Working tree clean. **Not yet pushed to
+  GitHub** — the repo exists at `github.com/sumiitkumbhar/Urban-AI-Assistant`
+  but the last 10 commits are local only.
+- The app **builds and type-checks** (`tsc --noEmit` clean).
+- The live corpus is **one document**: the NPPF, 422 chunks. 614 other
+  `documents` rows exist with zero chunks — debris from an earlier
+  multi-region project. See §11d.
+
+### Two decisions are pending — work is blocked on them
+1. **`sql/2026-09-07-council-aware-retrieval.sql` has NOT been run.** It adds
+   `scope`, `lpa_slugs`, `lpa_names`, `plan_status`, `content_sha256`, fixes
+   citation links (RPCs currently never return `source_url`), and adds an
+   optional council filter. Additive and behaviour-preserving until the app
+   passes the new arguments. Until it runs, council-aware retrieval cannot work.
+2. **`docs/local-postgres-corpus-proposal.md` is awaiting approval.** Whether
+   the corpus moves to local Postgres + pgvector (no 500 MB ceiling) or stays
+   on Supabase. This decides the ingestion plan.
+
+### Constraints the project owner has set — do not violate these
+- No new product features. No UI redesign. No voice work right now.
+- **No RAG pipeline rewrite**, and no broad refactor of the 3,900-line
+  `app/api/rag-chat/route.ts` unless a bug requires it.
+- **No second vector database** (no Chroma/Pinecone/etc.). The stack is
+  Postgres + pgvector and stays that way.
+- No paid APIs. Everything runs on free tiers or self-hosted.
+- Corpus scope: prove 5 councils with provable authority isolation before any
+  bulk ingestion. Not 446.
+
+### How to read claims in this file
+Every claim is marked by how it was established. **"Type-checks" is not
+"works".** Specifically, these are written but have **never been executed**:
+- `voice-service/` (Chatterbox TTS) and `voice-agent/` (Pipecat) — Python,
+  never installed or run
+- the greeting fast path and domain-term correction — type-checked and
+  unit-tested standalone, but never exercised against a running app
+- `scripts/stabilization-test.mjs` — a ready-to-run harness, never run
+
+Do not describe any of these as working. If you need them verified, the owner
+must run them.
+
+### Why so much is unverified
+The previous assistant worked from a sandboxed environment that could not run
+this app. Both blockers were verified, not assumed:
+- **No runnable Next.js**: its shell was linux/arm64 while `node_modules`
+  carries only `@next/swc-darwin-arm64` (installed on the Mac). `next dev`
+  exits; `next build` stalls. This is what the earlier "16-minute stuck build"
+  was — an artifact of where it ran, not a defect in the project.
+- **No network to any dependency**: `api.groq.com`,
+  `generativelanguage.googleapis.com`, `supabase.co`, `api.tavily.com`, PyPI,
+  npm and GitHub all return `blocked-by-allowlist`.
+
+**If you are ChatGPT (or any assistant without machine access), you cannot run
+this either.** Ask the owner to run commands and paste output. Do not claim
+anything was tested that you did not see output for.
+
+### Immediate next action
+Decide the two pending items above. Then, in order: run the migration →
+wire `filter_lpa_slug` through `searchRAG()` → build the scope router
+(national / local / user-PDF, §11c) → five-council pilot → measure real
+storage → decide corpus size.
+
+### Handing this project to another assistant
+This file plus the repo is the entire handoff. Nothing important lives only in
+a chat transcript. To bring a new assistant up to speed: give it this file
+first, then `docs/local-postgres-corpus-proposal.md` and
+`sql/2026-09-07-council-aware-retrieval.sql` if the corpus work is next.
+
+---
+
 ## 1. What are we building?
 
 **Urban AI Assistant** — a retrieval-augmented (RAG) chatbot that answers UK
