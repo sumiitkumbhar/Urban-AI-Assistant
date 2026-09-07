@@ -23,6 +23,7 @@
 // simple heading pattern is obviously present.
 
 import { createClient } from "@supabase/supabase-js";
+import { chunkPageText } from "./chunkText";
 import { generateEmbedding } from "@/lib/embeddings";
 import { classifyDoc, normalizeRegion, type Region } from "@/app/api/rag/corpus";
 
@@ -65,8 +66,6 @@ export interface IngestOptions {
   region?: Region;
 }
 
-const CHUNK_TARGET_CHARS = 1100;
-const CHUNK_OVERLAP_CHARS = 150;
 
 let _supabase: any = null;
 function getSupabase() {
@@ -122,41 +121,6 @@ async function extractPages(buffer: Buffer): Promise<string[]> {
   });
 
   return pages;
-}
-
-function chunkPageText(pageText: string): string[] {
-  const cleaned = pageText.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
-  if (!cleaned) return [];
-
-  // Split on paragraph breaks first, then greedily pack paragraphs into
-  // ~CHUNK_TARGET_CHARS chunks so we don't cut mid-sentence when we can
-  // avoid it. A small overlap is carried into the next chunk so a claim
-  // that straddles a chunk boundary is still retrievable from either side.
-  const paragraphs = cleaned.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
-  if (!paragraphs.length) return [];
-
-  const chunks: string[] = [];
-  let current = "";
-
-  for (const para of paragraphs) {
-    if (current && (current.length + para.length + 1) > CHUNK_TARGET_CHARS) {
-      chunks.push(current.trim());
-      const overlapStart = Math.max(0, current.length - CHUNK_OVERLAP_CHARS);
-      current = current.slice(overlapStart);
-    }
-    current = current ? `${current}\n${para}` : para;
-  }
-  if (current.trim()) chunks.push(current.trim());
-
-  // A single paragraph longer than the target on its own - hard-split it.
-  return chunks.flatMap((c) => {
-    if (c.length <= CHUNK_TARGET_CHARS * 1.5) return [c];
-    const pieces: string[] = [];
-    for (let i = 0; i < c.length; i += CHUNK_TARGET_CHARS) {
-      pieces.push(c.slice(i, i + CHUNK_TARGET_CHARS));
-    }
-    return pieces;
-  });
 }
 
 async function embedWithRetry(text: string, attempts = 3): Promise<number[]> {
