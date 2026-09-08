@@ -79,6 +79,17 @@ export function useVoiceChat(
   // audio.play() call inside speak() - on a different <audio> element,
   // called much later, asynchronously - then succeeds too.
   const audioUnlockedRef = useRef(false);
+  // Lets stopSpeaking() actually cancel an in-flight speak() call, not
+  // just pause audio that has already started. Without this, closing
+  // voice mode while a reply is still being generated (fetch to
+  // /api/tts, or CosyVoice2 still synthesizing on the server - up to 3
+  // minutes now) did nothing to that pending request: it kept running in
+  // the background, and whenever it eventually resolved it would still
+  // create a new <audio> element and call .play() on it - audio starting
+  // to play, or the mic reopening via onDone, well after the user closed
+  // the conversation and walked away. That's the "mic is still listening
+  // after I closed the chat" report.
+  const speakAbortRef = useRef<AbortController | null>(null);
 
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -217,6 +228,9 @@ export function useVoiceChat(
 
     setIsPreparingSpeech(true);
 
+    const controller = new AbortController();
+    speakAbortRef.current = controller;
+
     // The self-hosted voice service (app/api/tts/route.ts proxies to
     // voice-service/ - see that route for why this can 503 or 502
     // perfectly normally whenever the service isn't configured or isn't
@@ -227,11 +241,14 @@ export function useVoiceChat(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: trimmed }),
+      signal: controller.signal,
     })
       .then(async (res) => {
         if (!res.ok) throw new Error(`TTS service returned ${res.status}`);
         const blob = await res.blob();
         const url = URL.createObjectURL(blob);
+
+        if (speakAbortRef.current === controller) speakAbortRef.current = null;
 
         if (currentAudioRef.current) {
           currentAudioRef.current.pause();
@@ -262,6 +279,18 @@ export function useVoiceChat(
         await audio.play();
       })
       .catch((error: any) => {
+        if (speakAbortRef.current === controller) speakAbortRef.current = null;
+        if (error?.name === "AbortError") {
+          // Deliberately cancelled via stopSpeaking() (e.g. the user
+          // closed voice mode) - not a failure, and onDone is skipped on
+          // purpose: whatever called stopSpeaking() has already decided
+          // what happens next, so this call ends quietly instead of
+          // re-triggering a "reply finished" side effect (like
+          // re-opening the mic) for a reply the user no longer wants.
+          setIsPreparingSpeech(false);
+          setIsSpeaking(false);
+          return;
+        }
         // eslint-disable-next-line no-console
         console.error("Voice service call failed - not falling back to a browser voice:", error);
         setIsPreparingSpeech(false);
@@ -272,6 +301,10 @@ export function useVoiceChat(
   }, []);
 
   const stopSpeaking = useCallback(() => {
+    if (speakAbortRef.current) {
+      speakAbortRef.current.abort();
+      speakAbortRef.current = null;
+    }
     if (currentAudioRef.current) {
       try {
         currentAudioRef.current.pause();

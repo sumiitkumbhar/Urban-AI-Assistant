@@ -1053,6 +1053,18 @@ export default function ChatInterface() {
   //    aloud, and the mic re-opens for your next turn as soon as the
   //    reply finishes speaking.
   const [voiceModeEnabled, setVoiceModeEnabled] = useState(false);
+  // speak()'s onDone callback (below, in handleSend) fires whenever the
+  // self-hosted voice actually finishes - which on CPU-only hardware can
+  // be a real ~10+ seconds after the tap that triggered it. A plain
+  // closure over voiceModeEnabled captures whatever it was AT THAT TAP,
+  // not whatever it is by the time onDone actually runs - so closing
+  // voice mode mid-reply didn't stop the mic from reopening once that
+  // stale "yes, still in voice mode" check ran. Read via this ref inside
+  // onDone instead, so it always sees the current value.
+  const voiceModeEnabledRef = useRef(voiceModeEnabled);
+  useEffect(() => {
+    voiceModeEnabledRef.current = voiceModeEnabled;
+  }, [voiceModeEnabled]);
   // Full-screen "voice mode" UI (see components/chat/VoiceModeOverlay.tsx) -
   // separate from voiceModeEnabled itself so the hands-free auto-send/
   // speak/re-listen loop (driven by voiceModeEnabled) keeps working
@@ -1264,7 +1276,7 @@ export default function ChatInterface() {
           const speechText: string =
             data?.data?.speechText || sanitizeForSpeech(answerText);
           speak(speechText, () => {
-            if (voiceModeEnabled) startListening();
+            if (voiceModeEnabledRef.current) startListening();
           });
         }
       }
