@@ -36,7 +36,16 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-logging.basicConfig(level=logging.INFO)
+# Also write to a plain file, not just stdout - stdout only reaches
+# whoever has that Terminal window open and scrolled to the right spot;
+# a file can be read back later (including by tooling that isn't a
+# human looking at the terminal) without needing that window at all.
+_LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "service.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler(), logging.FileHandler(_LOG_FILE)],
+)
 logger = logging.getLogger("cosyvoice-service")
 
 # Load voice-service/.env (if present) before reading any env vars below.

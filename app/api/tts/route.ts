@@ -19,17 +19,37 @@
 // actually succeed matters more than it used to.
 
 import { NextResponse } from "next/server";
+import fs from "fs";
+import path from "path";
 
 export const runtime = "nodejs";
 
 const CHATTERBOX_TTS_URL = process.env.CHATTERBOX_TTS_URL || "";
 
+// Plain-file log, alongside voice-service/service.log, for the same reason:
+// readable later without anyone needing a Terminal window open and
+// scrolled to the right spot. One line per request, append-only.
+const LOG_FILE = path.join(process.cwd(), "voice-debug.log");
+function logLine(entry: Record<string, unknown>) {
+  try {
+    fs.appendFileSync(
+      LOG_FILE,
+      `${new Date().toISOString()} ${JSON.stringify(entry)}\n`
+    );
+  } catch {
+    // Never let logging itself break the actual response.
+  }
+}
+
 export async function POST(req: Request) {
+  const requestStarted = Date.now();
+
   if (!CHATTERBOX_TTS_URL) {
+    logLine({ outcome: "not_configured" });
     return NextResponse.json(
       {
         error:
-          "CHATTERBOX_TTS_URL is not configured - set it in .env.local to your running voice-service instance (see voice-service/README.md). Falling back to browser voice.",
+          "CHATTERBOX_TTS_URL is not configured - set it in .env.local to your running voice-service instance (see voice-service/README.md).",
       },
       { status: 503 }
     );
@@ -44,6 +64,7 @@ export async function POST(req: Request) {
   }
 
   if (!text) {
+    logLine({ outcome: "empty_text" });
     return NextResponse.json({ error: "text is required" }, { status: 400 });
   }
 
@@ -71,17 +92,36 @@ export async function POST(req: Request) {
 
     if (!upstream.ok || !upstream.body) {
       const detail = await upstream.text().catch(() => "");
+      logLine({
+        outcome: "upstream_error",
+        status: upstream.status,
+        detail: detail.slice(0, 500),
+        text_length: text.length,
+        elapsed_ms: Date.now() - requestStarted,
+      });
       return NextResponse.json(
         { error: `Voice service returned ${upstream.status}`, detail },
         { status: 502 }
       );
     }
 
+    logLine({
+      outcome: "success",
+      text_length: text.length,
+      elapsed_ms: Date.now() - requestStarted,
+    });
     return new NextResponse(upstream.body, {
       status: 200,
       headers: { "Content-Type": "audio/wav" },
     });
   } catch (error: any) {
+    logLine({
+      outcome: "fetch_error",
+      error: error?.message || String(error),
+      aborted: error?.name === "AbortError",
+      text_length: text.length,
+      elapsed_ms: Date.now() - requestStarted,
+    });
     return NextResponse.json(
       { error: error?.message || "Voice service unreachable" },
       { status: 502 }
