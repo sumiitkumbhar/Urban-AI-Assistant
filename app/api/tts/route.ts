@@ -13,9 +13,10 @@
 // including an honest note about how well "free tier" actually performs
 // for CosyVoice2 specifically) - there's no per-character billing here,
 // unlike a hosted TTS API. If the service isn't configured or isn't
-// reachable, this returns an error status and the client
-// (lib/useVoiceChat.ts) falls back to the browser's own built-in
-// text-to-speech rather than failing silently.
+// reachable, this returns an error status. There is no browser-voice
+// fallback on the client anymore (lib/useVoiceChat.ts) - a failure here
+// means that turn just isn't spoken aloud, so getting this call to
+// actually succeed matters more than it used to.
 
 import { NextResponse } from "next/server";
 
@@ -46,14 +47,16 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "text is required" }, { status: 400 });
   }
 
-  // Chatterbox generation is real inference, not instant - give it real
-  // headroom before giving up and letting the client fall back. Bumped
-  // up from 30s because a free Hugging Face Space only gets 2 shared
-  // vCPUs (Chatterbox Nano's "3x realtime" number was benchmarked on 8
-  // cores), so generation is meaningfully slower there than on real
-  // hardware.
+  // Real inference, not instant, and there's no fallback to bail out to
+  // anymore - so it's better to wait than to give up early and go
+  // silent. On CPU-only hardware (no CUDA/MPS in CosyVoice2's own code)
+  // a full paragraph-length answer can genuinely take longer than the
+  // 45s this used to allow - bumped to 3 minutes. If the voice service
+  // is actually down or misconfigured, this still fails fast (the fetch
+  // itself errors immediately on connection refused) - this timeout only
+  // matters for a slow-but-working generation.
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 45000);
+  const timeout = setTimeout(() => controller.abort(), 180000);
 
   try {
     const upstream = await fetch(
