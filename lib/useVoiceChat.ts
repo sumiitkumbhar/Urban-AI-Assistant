@@ -63,6 +63,22 @@ export function useVoiceChat(
 ): UseVoiceChatResult {
   const recognitionRef = useRef<any>(null);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  // Safari (confirmed via voice-service/service.log + voice-debug.log: the
+  // server generated and returned audio successfully, 200 OK every time -
+  // the browser just never played it) blocks a programmatic audio.play()
+  // call unless it happens inside a genuine, recent user gesture. speak()
+  // is invoked well after that: it's called once RAG generation AND
+  // CosyVoice2 TTS generation both finish, which on this CPU-only setup is
+  // ~10+ real seconds after the tap that started listening - long past
+  // whatever window Safari still considers "the user just interacted."
+  // Fix: play a near-silent, effectively-inaudible clip synchronously
+  // inside the tap handler itself (startListening, below - every call
+  // site that starts a turn calls this directly from an onClick). Safari
+  // treats any successful media playback during a real user gesture as
+  // unlocking playback for the rest of the page's session, so the *real*
+  // audio.play() call inside speak() - on a different <audio> element,
+  // called much later, asynchronously - then succeeds too.
+  const audioUnlockedRef = useRef(false);
 
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -141,6 +157,30 @@ export function useVoiceChat(
   }, []);
 
   const startListening = useCallback(() => {
+    // See audioUnlockedRef's comment above - must happen synchronously,
+    // in the same tap that's about to call recognition.start() below, not
+    // deferred into a .then()/async continuation, or Safari won't count
+    // it as a real user gesture.
+    if (!audioUnlockedRef.current && typeof window !== "undefined") {
+      try {
+        const unlock = new Audio(
+          "data:audio/wav;base64,UklGRiUAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQEAAACA"
+        );
+        unlock.volume = 0;
+        const playResult = unlock.play();
+        if (playResult && typeof playResult.then === "function") {
+          playResult.then(() => unlock.pause()).catch(() => {
+            // If even this fails, the real speak() call will fail the
+            // same way and surface via ttsError - nothing more to do here.
+          });
+        }
+        audioUnlockedRef.current = true;
+      } catch {
+        // ignore - worst case, playback stays locked and speak() surfaces
+        // that through ttsError same as any other failure.
+      }
+    }
+
     if (!recognitionRef.current || isListening) return;
     try {
       recognitionRef.current.start();
