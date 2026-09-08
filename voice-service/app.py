@@ -26,6 +26,7 @@ import io
 import logging
 import os
 import sys
+import time
 from contextlib import asynccontextmanager
 
 import torch
@@ -194,6 +195,13 @@ def speak(req: SpeakRequest):
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=f"Model not loaded: {exc}")
 
+    # Timing, not just success/failure: CPU-only generation time scales with
+    # text length and this box's load, and "it's slow" isn't actionable
+    # without knowing the actual seconds. Logged regardless of outcome via
+    # the finally block below.
+    request_started = time.monotonic()
+    logger.info("Generating speech for %d chars ...", len(req.text))
+
     try:
         if _spk_registered:
             outputs = model.inference_zero_shot(
@@ -238,6 +246,16 @@ def speak(req: SpeakRequest):
             status_code=500,
             detail=f"Speech generation failed. Original error: {exc}",
         )
+
+    elapsed = time.monotonic() - request_started
+    audio_seconds = wav.shape[-1] / model.sample_rate
+    logger.info(
+        "Generated %.1fs of audio in %.1fs (%.2fx realtime) for %d chars.",
+        audio_seconds,
+        elapsed,
+        elapsed / audio_seconds if audio_seconds else float("inf"),
+        len(req.text),
+    )
 
     buffer = io.BytesIO()
     ta.save(buffer, wav, model.sample_rate, format="wav")
