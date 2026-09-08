@@ -6,20 +6,20 @@
 // free, built-in, no server round trip. Chrome/Edge/Safari support it;
 // Firefox doesn't, hence the sttSupported flag.
 //
-// Read-aloud (text -> speech) tries two things, in order:
-//   1. The self-hosted voice service (see voice-service/ in the repo
-//      root and app/api/tts/route.ts) - currently CosyVoice2, previously
-//      Chatterbox. Open-source, runs on your own hardware or a free
-//      host, no per-character billing. This is what gives a natural,
-//      cloned-voice sound instead of a robotic one.
-//   2. The browser's own built-in SpeechSynthesis, picking the best native
-//      voice available, if the self-hosted service isn't configured/
-//      reachable or the request fails for any reason. This means voice
-//      conversation keeps working even before that service is set up -
-//      it just sounds more robotic until it is.
+// Read-aloud (text -> speech) goes through the self-hosted voice service
+// only (see voice-service/ in the repo root and app/api/tts/route.ts) -
+// currently CosyVoice2, previously Chatterbox. Open-source, runs on your
+// own hardware or a free host, no per-character billing, and it's what
+// gives a natural, cloned-voice sound instead of a robotic one.
 //
-// Nothing here costs money: no API key, no per-request billing, either
-// direction, either path.
+// There used to be a second path here: the browser's own built-in
+// SpeechSynthesis, as a fallback whenever the self-hosted service wasn't
+// configured/reachable or a request failed. That's been removed on
+// purpose - it's the "old robotic voice" - so a failure now just means
+// this turn isn't spoken aloud (surfaced via ttsError) rather than
+// silently swapping in a different-sounding voice mid-conversation.
+//
+// Nothing here costs money: no API key, no per-request billing.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -38,54 +38,24 @@ export interface UseVoiceChatResult {
   ttsSupported: boolean;
   isListening: boolean;
   isSpeaking: boolean;
-  // True from the moment speak() is called until audio actually starts
-  // (or the browser-voice fallback kicks in) - distinct from isSpeaking,
-  // which only covers actual playback. The self-hosted voice service can
-  // take several real seconds to generate audio on CPU-only hardware;
-  // without this, callers have no way to know a reply is still being
-  // prepared, and end up treating that gap as "done"/idle.
+  // True from the moment speak() is called until audio actually starts -
+  // distinct from isSpeaking, which only covers actual playback. The
+  // self-hosted voice service can take several real seconds to generate
+  // audio on CPU-only hardware; without this, callers have no way to know
+  // a reply is still being prepared, and end up treating that gap as
+  // "done"/idle.
   isPreparingSpeech: boolean;
+  // Set when the self-hosted voice service fails to produce audio (not
+  // configured, unreachable, timed out, or errored). There is no fallback
+  // voice anymore, so a failure here means this turn simply won't be
+  // spoken aloud - callers can surface this instead of it looking like
+  // voice mode just silently did nothing. Cleared at the start of every
+  // speak() call.
+  ttsError: string | null;
   startListening: () => void;
   stopListening: () => void;
   speak: (text: string, onDone?: () => void) => void;
   stopSpeaking: () => void;
-}
-
-// Free, built-in browser voices vary wildly in quality. This heuristic
-// prefers whatever the browser/OS itself flags as a higher-quality
-// (often actually neural/cloud-backed, still free-to-us) voice matching
-// the user's language, and avoids the old low-quality synthetic ones when
-// something better is available. Only used for the SpeechSynthesis
-// fallback path - the primary self-hosted-voice path doesn't need this.
-// Common name patterns for female- and male-associated system/network
-// voices across macOS, Chrome, and Windows. SpeechSynthesisVoice doesn't
-// expose an actual gender field in any browser, so this is a best-effort
-// guess from the voice's own name - imperfect, but the practical option
-// available for free.
-const FEMALE_VOICE_NAME_HINTS =
-  /female|samantha|victoria|ava|allison|susan|karen|moira|tessa|fiona|kate|zoe|emma|olivia|sofia|amelia|joanna|salli|kimberly|aria|jenny|libby|zira|hazel|catherine|nicky|serena|samira|kathy|shelley/i;
-
-function pickBestBrowserVoice(
-  voices: SpeechSynthesisVoice[],
-  preferredLang: string
-): SpeechSynthesisVoice | null {
-  if (!voices.length) return null;
-  const langPrefix = preferredLang.split("-")[0].toLowerCase();
-
-  const score = (v: SpeechSynthesisVoice) => {
-    const name = v.name.toLowerCase();
-    let s = 0;
-    if (v.lang?.toLowerCase() === preferredLang.toLowerCase()) s += 8;
-    else if (v.lang?.toLowerCase().startsWith(langPrefix)) s += 4;
-    if (/neural|natural|enhanced|premium/.test(name)) s += 6;
-    if (/google/.test(name)) s += 3;
-    if (v.localService === false) s += 1;
-    if (/compact|espeak|robot/.test(name)) s -= 4;
-    if (FEMALE_VOICE_NAME_HINTS.test(name)) s += 5;
-    return s;
-  };
-
-  return [...voices].sort((a, b) => score(b) - score(a))[0] || null;
 }
 
 export function useVoiceChat(
@@ -93,11 +63,11 @@ export function useVoiceChat(
 ): UseVoiceChatResult {
   const recognitionRef = useRef<any>(null);
   const currentAudioRef = useRef<HTMLAudioElement | null>(null);
-  const bestBrowserVoiceRef = useRef<SpeechSynthesisVoice | null>(null);
 
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isPreparingSpeech, setIsPreparingSpeech] = useState(false);
+  const [ttsError, setTtsError] = useState<string | null>(null);
   const [sttSupported, setSttSupported] = useState(false);
   const [ttsSupported, setTtsSupported] = useState(false);
 
@@ -116,7 +86,10 @@ export function useVoiceChat(
   useEffect(() => {
     if (typeof window === "undefined") return;
 
-    setTtsSupported(typeof window.speechSynthesis !== "undefined");
+    // Playback capability, not speech-synthesis support: the self-hosted
+    // voice comes back as an audio file played through a plain <audio>
+    // element, which every browser that can run this app supports.
+    setTtsSupported(typeof window.Audio !== "undefined");
 
     const SpeechRecognitionCtor =
       (window as any).SpeechRecognition ||
@@ -167,32 +140,6 @@ export function useVoiceChat(
     };
   }, []);
 
-  // ---- best available native voice, for the SpeechSynthesis fallback ----
-  useEffect(() => {
-    if (typeof window === "undefined" || !window.speechSynthesis) return;
-
-    const lang =
-      (typeof navigator !== "undefined" && navigator.language) || "en-GB";
-
-    const loadVoices = () => {
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length) {
-        bestBrowserVoiceRef.current = pickBestBrowserVoice(voices, lang);
-      }
-    };
-
-    loadVoices();
-    window.speechSynthesis.addEventListener("voiceschanged", loadVoices);
-    return () => {
-      window.speechSynthesis.removeEventListener("voiceschanged", loadVoices);
-      try {
-        window.speechSynthesis.cancel();
-      } catch {
-        // ignore
-      }
-    };
-  }, []);
-
   const startListening = useCallback(() => {
     if (!recognitionRef.current || isListening) return;
     try {
@@ -214,104 +161,75 @@ export function useVoiceChat(
     setIsListening(false);
   }, []);
 
-  const speakWithBrowserVoice = useCallback(
-    (text: string, onDone?: () => void) => {
-      // Whatever got us here (no self-hosted voice configured, it errored,
-      // or its own fetch is still what's in flight and this is the
-      // catch()'s fallback) - by the time this browser-voice path takes
-      // over, "preparing" is over one way or another.
-      setIsPreparingSpeech(false);
-      if (typeof window === "undefined" || !window.speechSynthesis) {
-        onDone?.();
-        return;
-      }
-      window.speechSynthesis.cancel();
-      const utterance = new SpeechSynthesisUtterance(text);
-      utterance.rate = 1;
-      utterance.pitch = 1;
-      if (bestBrowserVoiceRef.current) {
-        utterance.voice = bestBrowserVoiceRef.current;
-        utterance.lang = bestBrowserVoiceRef.current.lang;
-      }
-      utterance.onstart = () => setIsSpeaking(true);
-      utterance.onend = () => {
-        setIsSpeaking(false);
-        onDone?.();
-      };
-      utterance.onerror = () => {
-        setIsSpeaking(false);
-        onDone?.();
-      };
-      window.speechSynthesis.speak(utterance);
-    },
-    []
-  );
+  const speak = useCallback((text: string, onDone?: () => void) => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      onDone?.();
+      return;
+    }
 
-  const speak = useCallback(
-    (text: string, onDone?: () => void) => {
-      const trimmed = text.trim();
-      if (!trimmed) {
-        onDone?.();
-        return;
-      }
+    setTtsError(null);
 
-      if (typeof window === "undefined" || typeof fetch === "undefined") {
-        speakWithBrowserVoice(trimmed, onDone);
-        return;
-      }
+    if (typeof window === "undefined" || typeof fetch === "undefined") {
+      onDone?.();
+      return;
+    }
 
-      setIsPreparingSpeech(true);
+    setIsPreparingSpeech(true);
 
-      // Try the self-hosted voice service first (app/api/tts/route.ts
-      // proxies to voice-service/ - see that route for why this can 503
-      // or 502 perfectly normally whenever the service isn't configured
-      // or isn't running). Any failure here just falls back to the
-      // browser's own voice rather than going silent.
-      fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: trimmed }),
+    // The self-hosted voice service (app/api/tts/route.ts proxies to
+    // voice-service/ - see that route for why this can 503 or 502
+    // perfectly normally whenever the service isn't configured or isn't
+    // running) is the only voice now. On any failure this turn just isn't
+    // spoken aloud - logged clearly and surfaced via ttsError, rather than
+    // masked by quietly switching to a different-sounding fallback voice.
+    fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: trimmed }),
+    })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`TTS service returned ${res.status}`);
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+
+        if (currentAudioRef.current) {
+          currentAudioRef.current.pause();
+        }
+        const audio = new Audio(url);
+        currentAudioRef.current = audio;
+
+        audio.onplay = () => {
+          setIsPreparingSpeech(false);
+          setIsSpeaking(true);
+        };
+        audio.onended = () => {
+          setIsSpeaking(false);
+          setIsPreparingSpeech(false);
+          URL.revokeObjectURL(url);
+          if (currentAudioRef.current === audio) currentAudioRef.current = null;
+          onDone?.();
+        };
+        audio.onerror = () => {
+          setIsSpeaking(false);
+          setIsPreparingSpeech(false);
+          setTtsError("Playback failed.");
+          URL.revokeObjectURL(url);
+          if (currentAudioRef.current === audio) currentAudioRef.current = null;
+          onDone?.();
+        };
+
+        await audio.play();
       })
-        .then(async (res) => {
-          if (!res.ok) throw new Error(`TTS service returned ${res.status}`);
-          const blob = await res.blob();
-          const url = URL.createObjectURL(blob);
-
-          if (currentAudioRef.current) {
-            currentAudioRef.current.pause();
-          }
-          const audio = new Audio(url);
-          currentAudioRef.current = audio;
-
-          audio.onplay = () => {
-            setIsPreparingSpeech(false);
-            setIsSpeaking(true);
-          };
-          audio.onended = () => {
-            setIsSpeaking(false);
-            setIsPreparingSpeech(false);
-            URL.revokeObjectURL(url);
-            if (currentAudioRef.current === audio) currentAudioRef.current = null;
-            onDone?.();
-          };
-          audio.onerror = () => {
-            setIsSpeaking(false);
-            setIsPreparingSpeech(false);
-            URL.revokeObjectURL(url);
-            if (currentAudioRef.current === audio) currentAudioRef.current = null;
-            onDone?.();
-          };
-
-          await audio.play();
-        })
-        .catch(() => {
-          // Self-hosted voice not configured/reachable/erroring - fall back to
-          // the browser's built-in voice so voice mode still works.
-          speakWithBrowserVoice(trimmed, onDone);
-        });
-    },
-    [speakWithBrowserVoice]
-  );
+      .catch((error: any) => {
+        // eslint-disable-next-line no-console
+        console.error("Voice service call failed - not falling back to a browser voice:", error);
+        setIsPreparingSpeech(false);
+        setIsSpeaking(false);
+        setTtsError(error?.message || "Voice service unreachable");
+        onDone?.();
+      });
+  }, []);
 
   const stopSpeaking = useCallback(() => {
     if (currentAudioRef.current) {
@@ -322,9 +240,6 @@ export function useVoiceChat(
       }
       currentAudioRef.current = null;
     }
-    if (typeof window !== "undefined" && window.speechSynthesis) {
-      window.speechSynthesis.cancel();
-    }
     setIsSpeaking(false);
   }, []);
 
@@ -334,6 +249,7 @@ export function useVoiceChat(
     isListening,
     isSpeaking,
     isPreparingSpeech,
+    ttsError,
     startListening,
     stopListening,
     speak,
