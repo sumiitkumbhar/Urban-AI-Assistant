@@ -23,6 +23,25 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+// Fire-and-forget: posts to app/api/client-log/route.ts, which appends to
+// client-debug.log at the repo root - so voice events that only ever
+// happened in this browser tab's own console are readable back later the
+// same way voice-debug.log and voice-service/service.log already are.
+// Never awaited, never lets a failure here affect the actual voice flow.
+function logClient(entry: Record<string, unknown>) {
+  if (typeof fetch === "undefined") return;
+  try {
+    fetch("/api/client-log", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(entry),
+      keepalive: true,
+    }).catch(() => {});
+  } catch {
+    // ignore
+  }
+}
+
 export interface UseVoiceChatOptions {
   // Fired repeatedly while the user is still talking, with the
   // best-guess-so-far transcript - good for showing live "captions" in an
@@ -135,6 +154,10 @@ export function useVoiceChat(
     recognition.lang =
       (typeof navigator !== "undefined" && navigator.language) || "en-GB";
 
+    recognition.onstart = () => {
+      logClient({ source: "stt", event: "start" });
+    };
+
     recognition.onresult = (event: any) => {
       let finalText = "";
       let interimText = "";
@@ -148,10 +171,28 @@ export function useVoiceChat(
       }
       if (interimText) onInterimRef.current?.(interimText);
       if (finalText.trim()) onFinalRef.current?.(finalText.trim());
+      logClient({
+        source: "stt",
+        event: "result",
+        interim_length: interimText.length,
+        final_length: finalText.trim().length,
+      });
     };
 
-    recognition.onerror = () => setIsListening(false);
-    recognition.onend = () => setIsListening(false);
+    recognition.onerror = (event: any) => {
+      // event.error is one of SpeechRecognition's own error codes -
+      // "not-allowed" (mic permission), "no-speech" (mic open but heard
+      // nothing), "audio-capture" (no working input device), "network",
+      // "aborted". Logged so a stuck-on-"Listening..." report is
+      // diagnosable from client-debug.log instead of another screenshot
+      // round - this fires even when recognition never reaches onresult.
+      logClient({ source: "stt", event: "error", error: event?.error });
+      setIsListening(false);
+    };
+    recognition.onend = () => {
+      logClient({ source: "stt", event: "end" });
+      setIsListening(false);
+    };
 
     recognitionRef.current = recognition;
 
@@ -168,38 +209,60 @@ export function useVoiceChat(
   }, []);
 
   const startListening = useCallback(() => {
-    // See audioUnlockedRef's comment above - must happen synchronously,
-    // in the same tap that's about to call recognition.start() below, not
-    // deferred into a .then()/async continuation, or Safari won't count
-    // it as a real user gesture.
+    const beginRecognition = () => {
+      if (!recognitionRef.current || isListening) return;
+      try {
+        recognitionRef.current.start();
+        setIsListening(true);
+      } catch (error: any) {
+        // start() throws if a recognition session is already active -
+        // isListening/onend stay the source of truth either way.
+        logClient({
+          source: "stt",
+          event: "start_threw",
+          error: error?.message || String(error),
+        });
+      }
+    };
+
+    // The unlock clip's play() call must happen synchronously in this
+    // same tap for Safari to count it as a real user gesture (see
+    // audioUnlockedRef's comment above) - but recognition.start() does
+    // NOT need to be synchronous with it, and on a Bluetooth headset
+    // starting playback and starting microphone capture at the exact
+    // same instant can fight over the audio session (switching between
+    // playback-only and playback+record profiles) and leave recognition
+    // listening to nothing. So: fire the unlock now, but only start
+    // recognition once that playback attempt has actually settled either
+    // way, not racing the two.
     if (!audioUnlockedRef.current && typeof window !== "undefined") {
+      audioUnlockedRef.current = true;
       try {
         const unlock = new Audio(
           "data:audio/wav;base64,UklGRiUAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQEAAACA"
         );
         unlock.volume = 0;
+        unlock.muted = true;
         const playResult = unlock.play();
         if (playResult && typeof playResult.then === "function") {
-          playResult.then(() => unlock.pause()).catch(() => {
-            // If even this fails, the real speak() call will fail the
-            // same way and surface via ttsError - nothing more to do here.
-          });
+          playResult
+            .then(() => unlock.pause())
+            .catch(() => {
+              // If even this fails, the real speak() call will fail the
+              // same way and surface via ttsError - nothing more to do
+              // here.
+            })
+            .finally(beginRecognition);
+          return;
         }
-        audioUnlockedRef.current = true;
       } catch {
         // ignore - worst case, playback stays locked and speak() surfaces
-        // that through ttsError same as any other failure.
+        // that through ttsError same as any other failure. Fall through
+        // to beginRecognition() below either way.
       }
     }
 
-    if (!recognitionRef.current || isListening) return;
-    try {
-      recognitionRef.current.start();
-      setIsListening(true);
-    } catch {
-      // start() throws if a recognition session is already active -
-      // isListening/onend stay the source of truth either way.
-    }
+    beginRecognition();
   }, [isListening]);
 
   const stopListening = useCallback(() => {
