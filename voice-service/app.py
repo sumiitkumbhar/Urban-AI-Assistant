@@ -113,11 +113,15 @@ def get_model():
         # a clear error at /speak time), not "the whole service is down".
         if _model is not None and REFERENCE_VOICE_PATH and REFERENCE_PROMPT_TEXT:
             try:
-                from cosyvoice.utils.file_utils import load_wav
-
                 logger.info("Registering cloned voice from %s ...", REFERENCE_VOICE_PATH)
-                prompt_wav = load_wav(REFERENCE_VOICE_PATH, 16000)
-                _model.add_zero_shot_spk(REFERENCE_PROMPT_TEXT, prompt_wav, _SPK_ID)
+                # Pass the file PATH, not a pre-loaded tensor: CosyVoice2's
+                # own frontend_zero_shot() reloads the clip itself, at two
+                # different sample rates for two different sub-steps (24kHz
+                # for speech features, 16kHz for the speaker embedding), by
+                # calling its own load_wav(prompt_wav, ...) internally. A
+                # tensor pre-loaded here at a single fixed rate breaks that
+                # second internal load with "Invalid file: tensor(...)".
+                _model.add_zero_shot_spk(REFERENCE_PROMPT_TEXT, REFERENCE_VOICE_PATH, _SPK_ID)
                 _spk_registered = True
                 logger.info("Cloned voice registered as %r.", _SPK_ID)
             except Exception:  # noqa: BLE001
@@ -191,8 +195,6 @@ def speak(req: SpeakRequest):
         raise HTTPException(status_code=503, detail=f"Model not loaded: {exc}")
 
     try:
-        from cosyvoice.utils.file_utils import load_wav
-
         if _spk_registered:
             outputs = model.inference_zero_shot(
                 req.text, "", "", zero_shot_spk_id=_SPK_ID, stream=False, speed=req.speed
@@ -200,11 +202,12 @@ def speak(req: SpeakRequest):
         elif REFERENCE_VOICE_PATH and REFERENCE_PROMPT_TEXT:
             # Registration failed at startup but the config is there -
             # retry per-request rather than failing every call forever.
-            prompt_wav = load_wav(REFERENCE_VOICE_PATH, 16000)
+            # Same fix as add_zero_shot_spk above: pass the path, not a
+            # pre-loaded tensor - frontend_zero_shot() reloads it itself.
             outputs = model.inference_zero_shot(
                 req.text,
                 REFERENCE_PROMPT_TEXT,
-                prompt_wav,
+                REFERENCE_VOICE_PATH,
                 stream=False,
                 speed=req.speed,
             )
