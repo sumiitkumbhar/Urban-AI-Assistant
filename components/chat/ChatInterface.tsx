@@ -1071,6 +1071,7 @@ export default function ChatInterface() {
     ttsSupported,
     isListening,
     isSpeaking,
+    isPreparingSpeech,
     startListening,
     stopListening,
     speak,
@@ -1100,7 +1101,7 @@ export default function ChatInterface() {
 
   const voiceOverlayState: VoiceOverlayState = isSpeaking
     ? "speaking"
-    : isLoading
+    : isLoading || isPreparingSpeech
     ? "thinking"
     : isListening
     ? "listening"
@@ -1125,7 +1126,13 @@ export default function ChatInterface() {
       stopListening();
       return;
     }
-    if (isLoading) return;
+    // Also block while a reply is still being generated as speech - CPU
+    // TTS generation can take several real seconds, and without this a
+    // tap here during that gap starts listening for a new question while
+    // the previous answer's audio hasn't even started yet (see
+    // lib/useVoiceChat.ts's isPreparingSpeech for why isLoading alone
+    // isn't enough: it's already false again by this point).
+    if (isLoading || isPreparingSpeech) return;
     startListening();
   };
 

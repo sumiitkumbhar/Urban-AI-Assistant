@@ -38,6 +38,13 @@ export interface UseVoiceChatResult {
   ttsSupported: boolean;
   isListening: boolean;
   isSpeaking: boolean;
+  // True from the moment speak() is called until audio actually starts
+  // (or the browser-voice fallback kicks in) - distinct from isSpeaking,
+  // which only covers actual playback. The self-hosted voice service can
+  // take several real seconds to generate audio on CPU-only hardware;
+  // without this, callers have no way to know a reply is still being
+  // prepared, and end up treating that gap as "done"/idle.
+  isPreparingSpeech: boolean;
   startListening: () => void;
   stopListening: () => void;
   speak: (text: string, onDone?: () => void) => void;
@@ -90,6 +97,7 @@ export function useVoiceChat(
 
   const [isListening, setIsListening] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [isPreparingSpeech, setIsPreparingSpeech] = useState(false);
   const [sttSupported, setSttSupported] = useState(false);
   const [ttsSupported, setTtsSupported] = useState(false);
 
@@ -208,6 +216,11 @@ export function useVoiceChat(
 
   const speakWithBrowserVoice = useCallback(
     (text: string, onDone?: () => void) => {
+      // Whatever got us here (no self-hosted voice configured, it errored,
+      // or its own fetch is still what's in flight and this is the
+      // catch()'s fallback) - by the time this browser-voice path takes
+      // over, "preparing" is over one way or another.
+      setIsPreparingSpeech(false);
       if (typeof window === "undefined" || !window.speechSynthesis) {
         onDone?.();
         return;
@@ -247,6 +260,8 @@ export function useVoiceChat(
         return;
       }
 
+      setIsPreparingSpeech(true);
+
       // Try the self-hosted voice service first (app/api/tts/route.ts
       // proxies to voice-service/ - see that route for why this can 503
       // or 502 perfectly normally whenever the service isn't configured
@@ -268,15 +283,20 @@ export function useVoiceChat(
           const audio = new Audio(url);
           currentAudioRef.current = audio;
 
-          audio.onplay = () => setIsSpeaking(true);
+          audio.onplay = () => {
+            setIsPreparingSpeech(false);
+            setIsSpeaking(true);
+          };
           audio.onended = () => {
             setIsSpeaking(false);
+            setIsPreparingSpeech(false);
             URL.revokeObjectURL(url);
             if (currentAudioRef.current === audio) currentAudioRef.current = null;
             onDone?.();
           };
           audio.onerror = () => {
             setIsSpeaking(false);
+            setIsPreparingSpeech(false);
             URL.revokeObjectURL(url);
             if (currentAudioRef.current === audio) currentAudioRef.current = null;
             onDone?.();
@@ -313,6 +333,7 @@ export function useVoiceChat(
     ttsSupported,
     isListening,
     isSpeaking,
+    isPreparingSpeech,
     startListening,
     stopListening,
     speak,
