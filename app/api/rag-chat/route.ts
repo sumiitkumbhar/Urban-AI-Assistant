@@ -11,6 +11,14 @@ import fs from "fs";
 import path from "path";
 import { getSupabase } from "@/lib/supabase";
 import { generateEmbedding } from "@/lib/embeddings";
+import {
+  type CacheKey,
+  normalizeForCache,
+  getMemoryCachedAnswer,
+  setMemoryCachedAnswer,
+  getSupabaseCachedAnswer,
+  storeCachedAnswer,
+} from "@/lib/answerCache";
 import Groq from "groq-sdk";
 import { NextResponse } from "next/server";
 import { detectDiagramIntent } from "@/lib/diagram-intent-detector";
@@ -3505,6 +3513,86 @@ export async function POST(req: Request) {
     const mode = body.mode ?? "auto";
     const voiceMode = body.voiceMode === true;
 
+    // ANSWER CACHE (see lib/answerCache.ts + sql/2026-09-10-answer-cache.sql)
+    // -------------------------------------------------------------------
+    // Deliberately scoped to STATELESS requests only - no visitorId means
+    // no conversation history and no chance of a visitor's own uploaded
+    // documents (searched further below, keyed on conversationId) ever
+    // being folded into an answer that could be served back to someone
+    // else. Also skipped for feasibility/drawing mode (structured,
+    // input-specific output) and for anything that wants a diagram
+    // (composited from more than just cached prose). Everything else -
+    // the bulk of one-off FAQ-style questions this app answers - is
+    // eligible, which is exactly the traffic a shared cache helps most.
+    const cacheEligible =
+      !conversationId &&
+      mode === "auto" &&
+      !body.feasibilityInputs &&
+      !body.drawingFile &&
+      !diagramIntent.shouldGenerate &&
+      body.wantDiagram !== true &&
+      !wantsDiagram(query) &&
+      (councilRoute.kind === "NATIONAL" || councilRoute.kind === "COUNCIL_SPECIFIC");
+
+    const cacheKey: CacheKey | null = cacheEligible
+      ? {
+          normalizedQuestion: normalizeForCache(retrievalQuery),
+          councilScope:
+            councilRoute.kind === "COUNCIL_SPECIFIC"
+              ? councilRoute.slugs[0]
+              : "NATIONAL",
+          region: region ?? "any",
+          voiceMode,
+        }
+      : null;
+
+    // Generated once below (only when Layer 1 misses) for the Layer-2
+    // probe, then carried to the bottom of this function to store a
+    // fresh answer under the same embedding on a genuine miss - never
+    // reused by searchRAG() below, which embeds optimizeQuery(retrievalQuery),
+    // a slightly different string. The one extra Gemini call this costs
+    // only happens on a cache MISS, negligible next to the Groq chain
+    // that's about to run anyway; on a HIT it's the only external call
+    // made at all.
+    let precomputedEmbedding: number[] | null = null;
+
+    if (cacheKey) {
+      const memHit = getMemoryCachedAnswer(cacheKey);
+      if (memHit) {
+        console.log("[answer-cache] memory hit");
+        timer.mark("answer_cache_memory_hit");
+        timer.report({ path: "answer_cache_hit", layer: "memory" });
+        const cached = memHit as RagResponse;
+        return NextResponse.json({
+          ...cached,
+          metadata: { ...cached.metadata, processing_time: Date.now() - start },
+        } satisfies RagResponse);
+      }
+
+      precomputedEmbedding = await generateEmbedding(retrievalQuery);
+      timer.mark("answer_cache_embedding");
+
+      const supaHit = await getSupabaseCachedAnswer(cacheKey, precomputedEmbedding);
+      if (supaHit) {
+        console.log(
+          `[answer-cache] Supabase hit, similarity=${supaHit.similarity.toFixed(3)}`
+        );
+        setMemoryCachedAnswer(cacheKey, supaHit.response);
+        timer.mark("answer_cache_supabase_hit");
+        timer.report({
+          path: "answer_cache_hit",
+          layer: "supabase",
+          similarity: supaHit.similarity,
+        });
+        const cached = supaHit.response as RagResponse;
+        return NextResponse.json({
+          ...cached,
+          metadata: { ...cached.metadata, processing_time: Date.now() - start },
+        } satisfies RagResponse);
+      }
+      timer.mark("answer_cache_miss");
+    }
+
     let feasibilitySection = "";
     let feasibilityReport: any | undefined = undefined;
 
@@ -4202,6 +4290,17 @@ These values were extracted directly from fragmented table-related chunks. They 
         citations: allCitations,
         diagram: diagram || undefined,
       });
+    }
+
+    if (cacheKey && precomputedEmbedding) {
+      // Fired after `response` is fully built (not reconstructed
+      // separately) so a cached entry is always byte-for-byte the same
+      // JSON a live caller just received. Awaited (not fire-and-forget)
+      // since this is a persistent Node server, not an edge function
+      // that could be torn down before a background write lands - see
+      // storeCachedAnswer's own comment for why a failure here still
+      // never breaks this response.
+      await storeCachedAnswer(cacheKey, precomputedEmbedding, response);
     }
 
     return NextResponse.json(response, { status: 200 });
