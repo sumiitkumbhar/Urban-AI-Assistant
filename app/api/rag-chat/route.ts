@@ -7,6 +7,8 @@
 // + Document/Web source separation + inline citations + references block
 // =============================================================================
 
+import fs from "fs";
+import path from "path";
 import { getSupabase } from "@/lib/supabase";
 import { generateEmbedding } from "@/lib/embeddings";
 import Groq from "groq-sdk";
@@ -3096,6 +3098,23 @@ async function persistConversationTurn(
 
 const RAG_TIMING = process.env.RAG_TIMING === "1";
 
+// Same reasoning as voice-debug.log / client-debug.log (see app/api/tts/
+// route.ts and app/api/client-log/route.ts): a console.log only reaches
+// whoever has that terminal window open at that exact moment. Writing the
+// same line to a file means it can be read back later, including by
+// tooling rather than a person scrolled to the right spot.
+const RAG_TIMING_LOG_FILE = path.join(process.cwd(), "rag-timing.log");
+function logTimingToFile(entry: Record<string, unknown>) {
+  try {
+    fs.appendFileSync(
+      RAG_TIMING_LOG_FILE,
+      `${new Date().toISOString()} ${JSON.stringify(entry)}\n`
+    );
+  } catch {
+    // Never let logging itself break the actual response.
+  }
+}
+
 interface StageTimer {
   mark: (label: string) => void;
   report: (meta?: Record<string, unknown>) => void;
@@ -3120,15 +3139,17 @@ function createStageTimer(): StageTimer {
         (acc, s) => (s[1] > acc[1] ? s : acc),
         ["none", 0]
       );
+      const payload = {
+        total_ms: total,
+        slowest_stage: slowest[0],
+        slowest_ms: slowest[1],
+        stages: Object.fromEntries(stages),
+        ...meta,
+      };
+      logTimingToFile(payload);
       console.log(
         "⏱️ TIMING " +
-          JSON.stringify({
-            total_ms: total,
-            slowest_stage: slowest[0],
-            slowest_ms: slowest[1],
-            stages: Object.fromEntries(stages),
-            ...meta,
-          })
+          JSON.stringify(payload)
       );
     },
   };
