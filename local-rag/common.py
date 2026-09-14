@@ -104,7 +104,18 @@ CONFIDENCE_TOP_SCORE_HIGH = 0.55
 CONFIDENCE_TOP_SCORE_LOW = 0.15
 MIN_SOURCE_DIVERSITY_FOR_HIGH = 2
 
-DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
+# Groq retired llama-3.3-70b-versatile on 2026-08-16 (answer.py started
+# 404ing with "model does not exist or you do not have access to it" -
+# not a code bug, the model ID itself stopped existing). Groq's own
+# deprecation notice names openai/gpt-oss-120b and qwen/qwen3.6-27b as
+# the replacements; gpt-oss-120b is the one still on Groq's free tier
+# (no credit card, rate-limited - 30 req/min, 8k tokens/min, 1000
+# req/day as of this note) and is the "production" pick over the
+# qwen model, which Groq still marks preview. If this 404s again later,
+# check https://console.groq.com/docs/deprecations for whatever
+# replaced this one too - Groq retires model IDs on a rolling basis,
+# this isn't a one-time fix.
 
 
 def load_dotenv_from_repo():
