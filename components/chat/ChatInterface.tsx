@@ -36,13 +36,24 @@ import VoiceAgentOverlay from "@/components/chat/VoiceAgentOverlay";
 //                    the client-side re-fetch, which always 404'd)
 //   diagramPngExport needs /api/diagram/png
 const FEATURES: Record<
-  "modeSelector" | "drawingAnalysis" | "diagramSvgFetch" | "diagramPngExport",
+  | "modeSelector"
+  | "drawingAnalysis"
+  | "diagramSvgFetch"
+  | "diagramPngExport"
+  | "ragSourceToggle",
   boolean
 > = {
   modeSelector: false,
   drawingAnalysis: false,
   diagramSvgFetch: false,
   diagramPngExport: false,
+  // Lets the user switch between the cloud RAG stack (Supabase + Google
+  // embeddings + Groq, app/api/rag-chat) and the offline local-rag stack
+  // (Qdrant + BM25 + local reranker + Groq synthesis, app/api/local-rag-chat
+  // - see local-rag/README.md). Local mode requires the local-rag FastAPI
+  // service running separately (uvicorn service:app --port 8010) and only
+  // covers plain Q&A, not feasibility/drawing analysis.
+  ragSourceToggle: true,
 };
 
 export interface Citation {
@@ -803,6 +814,15 @@ export default function ChatInterface() {
     "auto" | "feasibility" | "permitting" | "risk"
   >("auto");
 
+  // Which retrieval/answer backend to hit - see FEATURES.ragSourceToggle
+  // above. "local" only applies to plain text Q&A: handleSend always uses
+  // the cloud endpoint when a drawing file is attached, since local-rag
+  // has no drawing-analysis/feasibility path.
+  const [ragSource, setRagSource] = useState<"cloud" | "local">("cloud");
+  const [localRagStatus, setLocalRagStatus] = useState<
+    "unknown" | "checking" | "reachable" | "unreachable"
+  >("unknown");
+
   const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -1162,6 +1182,29 @@ export default function ChatInterface() {
     startListening();
   };
 
+  // Probes the local-rag service's /health via our own proxy (avoids a
+  // cross-origin request straight to localhost:8010 from the browser)
+  // whenever the user switches to local mode, so an offline service shows
+  // a clear status instead of a confusing failure on first send.
+  useEffect(() => {
+    if (ragSource !== "local") return;
+    let cancelled = false;
+    setLocalRagStatus("checking");
+    fetch("/api/local-rag-chat")
+      .then((res) => res.json())
+      .then((data) => {
+        if (!cancelled) {
+          setLocalRagStatus(data?.reachable ? "reachable" : "unreachable");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setLocalRagStatus("unreachable");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [ragSource]);
+
   const handleSend = async (overridePrompt?: string) => {
     const prompt = (overridePrompt ?? inputValue).trim();
     if ((!prompt && !drawingFile) || isLoading || isUploadingDoc) return;
@@ -1196,6 +1239,15 @@ export default function ChatInterface() {
         res = await fetch("/api/rag-chat", {
           method: "POST",
           body: formData,
+        });
+      } else if (ragSource === "local") {
+        // Local-rag has no feasibility/permitting/risk handling or
+        // conversation persistence - plain Q&A only, so chatMode/
+        // conversationId/voiceMode aren't sent.
+        res = await fetch("/api/local-rag-chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: prompt }),
         });
       } else {
         res = await fetch("/api/rag-chat", {
@@ -1634,6 +1686,44 @@ export default function ChatInterface() {
               </div>
             )}
           </div>
+          )}
+
+          {FEATURES.ragSourceToggle && (
+            <div className="mt-2 flex items-center justify-center gap-2 text-[11px] text-neutral-600">
+              <span>Answers from:</span>
+              <div className="inline-flex overflow-hidden rounded-full border border-neutral-950/10">
+                <button
+                  type="button"
+                  onClick={() => setRagSource("cloud")}
+                  className={`px-2.5 py-1 ${
+                    ragSource === "cloud"
+                      ? "bg-neutral-950 text-neutral-100"
+                      : "hover:bg-neutral-950/5"
+                  }`}
+                >
+                  Cloud
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setRagSource("local")}
+                  className={`px-2.5 py-1 ${
+                    ragSource === "local"
+                      ? "bg-neutral-950 text-neutral-100"
+                      : "hover:bg-neutral-950/5"
+                  }`}
+                >
+                  Local (offline)
+                </button>
+              </div>
+              {ragSource === "local" && localRagStatus === "checking" && (
+                <span className="text-neutral-500">checking…</span>
+              )}
+              {ragSource === "local" && localRagStatus === "unreachable" && (
+                <span className="text-red-600">
+                  service not running - see local-rag/README.md
+                </span>
+              )}
+            </div>
           )}
 
           {sttSupported && ttsSupported && (
