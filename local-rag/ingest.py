@@ -83,15 +83,24 @@ def extract_pages(pdf_path):
     """Yields (page_number, text) for every page with extractable text.
     Scanned/image-only pages come back empty and are skipped - this
     corpus is almost entirely text-native PDFs (GOV.UK exports, council
-    SPDs), so OCR wasn't built for this first pass."""
+    SPDs), so OCR wasn't built for this first pass.
+
+    Some GOV.UK PDFs (e.g. Approved Document exports) are AES-encrypted
+    for permissions (no owner password needed to read them, but pypdf
+    still needs the `cryptography` package to decrypt the object stream -
+    it's in requirements.txt for that reason). len(reader.pages) is what
+    actually triggers that decryption, not PdfReader() itself, so it has
+    to be inside this try too or a single encrypted/corrupt file kills
+    the whole ingestion run instead of just being skipped."""
     try:
         reader = PdfReader(str(pdf_path))
+        num_pages = len(reader.pages)
     except Exception as e:
         log(f"  WARN: could not open {pdf_path.name}: {e}")
         return
-    for i, page in enumerate(reader.pages, start=1):
+    for i in range(1, num_pages + 1):
         try:
-            text = page.extract_text() or ""
+            text = reader.pages[i - 1].extract_text() or ""
         except Exception as e:
             log(f"  WARN: page {i} of {pdf_path.name} failed to extract: {e}")
             continue
@@ -142,22 +151,27 @@ def build_chunks(active_files):
             continue
         log(f"[{i}/{len(active_files)}] extracting {row['filename']}")
         doc_chunk_count = 0
-        for page_num, page_text in extract_pages(path):
-            for piece in chunk_page_text(page_text):
-                chunk_id = f"{len(chunks):08d}"
-                chunks.append({
-                    "chunk_id": chunk_id,
-                    "text": piece,
-                    "doc_filename": row["filename"],
-                    "page": page_num,
-                    "bucket": row["bucket"],
-                    "status": row["status"],
-                    "domain": row["domain"],
-                    "geography": row["geography"],
-                    "doc_type": row["doc_type"],
-                    "sha256": row["sha256"],
-                })
-                doc_chunk_count += 1
+        try:
+            for page_num, page_text in extract_pages(path):
+                for piece in chunk_page_text(page_text):
+                    chunk_id = f"{len(chunks):08d}"
+                    chunks.append({
+                        "chunk_id": chunk_id,
+                        "text": piece,
+                        "doc_filename": row["filename"],
+                        "page": page_num,
+                        "bucket": row["bucket"],
+                        "status": row["status"],
+                        "domain": row["domain"],
+                        "geography": row["geography"],
+                        "doc_type": row["doc_type"],
+                        "sha256": row["sha256"],
+                    })
+                    doc_chunk_count += 1
+        except Exception as e:
+            # One bad file should never sink a 76-file run - log it and
+            # move on rather than losing everything already extracted.
+            log(f"  WARN: {row['filename']} failed unexpectedly, skipping: {e}")
         log(f"    -> {doc_chunk_count} chunks")
     return chunks
 
