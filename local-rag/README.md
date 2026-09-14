@@ -204,7 +204,15 @@ answer; `service.py` returns it under `"coverage"` in the JSON response.
   regex-based reference extraction - a real classifier (a small local
   model, or an LLM pass) is the noted upgrade path if this proves too
   narrow in practice.
-- **Orchestration hasn't been verified end-to-end on the real corpus
-  yet** - built and unit-tested (mocked retrieval) this session, same
-  "shipped, not yet seen on a real query" status the other increments
-  had before their first real Terminal run.
+- **Orchestration has been verified end-to-end on the real corpus**
+  - built and unit-tested (mocked retrieval), then run for real on a
+  genuinely cross-domain query. The first real run caught an actual bug:
+  domain-scoped agents were searching with the same narrow unscoped
+  `top_k` before filtering, so a domain that wasn't the dominant theme
+  of the query text could get 0 results even when relevant chunks
+  existed. Fixed by widening the dense/sparse candidate pool
+  (`top_k * 8`) before filtering when a `domain_filter` is set. A
+  second real run after the fix confirmed all three agents returning
+  real evidence (planning, heritage, and building_regulations all
+  non-zero), with the synthesized answer visibly improved by citing
+  sources across all three domains.
