@@ -83,11 +83,17 @@ curl -s -X POST http://localhost:8010/query \
 ```
 question
   |
-  +-- dense search (Qdrant, local BGE embeddings)
+  +-- dense search (Qdrant, local BGE embeddings) <-- semantic search,
+  |                                                    always runs
   +-- sparse search (BM25 over the same chunks)
   |        \
   |         +-- exact-reference boost (regex for "Policy D3",
   |             "Paragraph 135", "Approved Document B", etc.)
+  |         +-- graph-expanded reference boost (smaller boost for
+  |             references that co-occur with the query's named
+  |             reference in the cross-reference graph - e.g. a query
+  |             about Policy D3 also nudges up chunks about Policy D2,
+  |             if the corpus keeps mentioning them together)
   |         +-- current-status boost (nudges current material over
   |             historic/superseded/draft versions of the same policy)
   |
@@ -107,22 +113,34 @@ question
       that path a single Groq call)
 ```
 
-Local: embeddings, vector storage, sparse search, reranking, the
-confidence check. Cloud: the answer-writing call (and, only when
-confidence is low/medium, one extra verification call), via the same
-`GROQ_API_KEY` the Next.js app already uses - matches the README's
-"hybrid local/cloud" recommendation (section 6.2) rather than the
-fully-local-only option, since that would additionally need a local LLM
-runtime (Ollama wasn't found reachable from the bridge session that
+Local: embeddings, vector storage, sparse search, the cross-reference
+graph, reranking, the confidence check. Cloud: the answer-writing call
+(and, only when confidence is low/medium, one extra verification call),
+via the same `GROQ_API_KEY` the Next.js app already uses - matches the
+README's "hybrid local/cloud" recommendation (section 6.2) rather than
+the fully-local-only option, since that would additionally need a local
+LLM runtime (Ollama wasn't found reachable from the bridge session that
 built this - if you do have it running and want the answer step local
 too, `answer.py` is the one place to change).
 
-`retrieve(query)` now returns `(chunks, coverage)` instead of just a
-chunk list - `coverage` has `confidence` (`"high"`/`"medium"`/`"low"`),
-`top_rerank_score`, `source_count`, `reasons`, and
-`broadened_from_top_k` (set when the confidence check triggered a
-retry). `query_cli.py` prints this after every answer; `service.py`
-returns it under `"coverage"` in the JSON response.
+**Graph RAG (`graph_build.py`)** builds a cross-reference graph from the
+same chunks ingest.py already extracted - no new PDF parsing, no LLM
+calls, no new paid service. It captures which documents mention which
+exact references (Policy D3, Paragraph 135, ...) and which references
+tend to appear in the same chunk as each other. At query time, if you
+name a reference, related references from the graph get a small
+secondary boost on top of the existing dense+sparse search - this is
+purely additive, dense (semantic) and sparse search always run
+unchanged. Rebuilt automatically every time you re-run `ingest.py`; if
+`data/reference_graph.pkl` doesn't exist yet (older `data/` folders),
+retrieval just skips this signal rather than erroring.
+
+`retrieve(query)` returns `(chunks, coverage)` instead of just a chunk
+list - `coverage` has `confidence` (`"high"`/`"medium"`/`"low"`),
+`top_rerank_score`, `source_count`, `reasons`, `related_references`
+(from the graph), and `broadened_from_top_k` (set when the confidence
+check triggered a retry). `query_cli.py` prints this after every
+answer; `service.py` returns it under `"coverage"` in the JSON response.
 
 ## Known limitations / good next increments
 
@@ -147,6 +165,15 @@ returns it under `"coverage"` in the JSON response.
 - **Authority-hierarchy weighting** (national > London > Westminster,
   section 42) isn't implemented - retrieval currently treats all
   geographies equally within a query.
-- **Graph RAG, and Agentic/Multi-Agent orchestration are planned but not
-  built** - see section 52 of `urban-ai-architecture-plan.md` for the
-  confirmed scope and recommended build order.
+- **Graph RAG is a first cut, not real entity/relation extraction** -
+  `graph_build.py` only catches the same regex-matchable references
+  retrieve.py already looked for (Policy D3, Paragraph 135, Approved
+  Document B, Section N, Regulation N), and "related" only means "kept
+  appearing in the same chunk" - it doesn't understand *why* two
+  references are related, or catch a reference written out in prose
+  ("the London Plan", "this SPD") instead of an exact pattern. Real
+  entity/relation extraction (spaCy or an LLM pass) is the noted next
+  upgrade in `graph_build.py`'s module docstring.
+- **Agentic/Multi-Agent orchestration is planned but not built** - see
+  section 52 of `urban-ai-architecture-plan.md` for the confirmed scope
+  and recommended build order (this is the last item on that list).

@@ -1,16 +1,23 @@
-"""Hybrid retrieval: dense (Qdrant) + sparse (BM25) + exact-reference
-boost, fused with Reciprocal Rank Fusion, then reranked locally with a
-small cross-encoder. This is the offline equivalent of the old app's
-searchRAG() [dense+fulltext RPCs, fuseWithRRF] + rerankWithGroq(), except
-the rerank step is a local model instead of an LLM call (section 10 of
-the README: "This is too expensive for the normal path... Use LLM
-reranking only for genuinely difficult/low-confidence cases" - this file
-only implements the cheap default path).
+"""Hybrid retrieval: dense (Qdrant/semantic) + sparse (BM25) + exact-
+reference boost + graph-expanded reference boost, fused with Reciprocal
+Rank Fusion, then reranked locally with a small cross-encoder. This is
+the offline equivalent of the old app's searchRAG() [dense+fulltext
+RPCs, fuseWithRRF] + rerankWithGroq(), except the rerank step is a local
+model instead of an LLM call (section 10 of the README: "This is too
+expensive for the normal path... Use LLM reranking only for genuinely
+difficult/low-confidence cases" - this file only implements the cheap
+default path).
+
+The graph signal (architecture plan section 52's Graph RAG, see
+graph_build.py) is additive on top of dense+sparse, never a replacement
+for either - semantic (Qdrant) search always runs, on every query,
+exactly as before.
 """
 
 import functools
 import pickle
 import re
+from collections import Counter
 
 from qdrant_client import QdrantClient
 from sentence_transformers import CrossEncoder, SentenceTransformer
@@ -19,21 +26,12 @@ from common import (
     QDRANT_PATH, QDRANT_COLLECTION, BM25_PATH, CHUNKS_PATH,
     EMBEDDING_MODEL_NAME, EMBEDDING_QUERY_PREFIX, RERANKER_MODEL_NAME,
     STATUS_BOOST, CONFIDENCE_TOP_SCORE_HIGH, CONFIDENCE_TOP_SCORE_LOW,
-    MIN_SOURCE_DIVERSITY_FOR_HIGH,
+    MIN_SOURCE_DIVERSITY_FOR_HIGH, EXACT_REFERENCE_PATTERNS,
+    GRAPH_MAX_RELATED, GRAPH_EXPANSION_BOOST,
 )
+from graph_build import load_graph
 
 RRF_K = 60  # standard constant for reciprocal rank fusion
-
-# Matches section 41's example list - deliberately simple/conservative:
-# a false match here only adds a small score boost, it never filters
-# anything out, so a slightly-too-eager pattern is low-risk.
-EXACT_REFERENCE_PATTERNS = [
-    re.compile(r"\bpolicy\s+[a-z]{0,2}\d+[a-z]?\b", re.I),
-    re.compile(r"\bparagraph\s+\d+\b", re.I),
-    re.compile(r"\bapproved\s+document\s+[a-z]\b", re.I),
-    re.compile(r"\bsection\s+\d+\b", re.I),
-    re.compile(r"\bregulation\s+\d+\b", re.I),
-]
 
 
 @functools.lru_cache(maxsize=1)
@@ -105,6 +103,44 @@ def _exact_reference_boost(query):
     return found
 
 
+@functools.lru_cache(maxsize=1)
+def _load_graph():
+    # Returns None if data/reference_graph.pkl doesn't exist yet (e.g.
+    # ingest.py hasn't been re-run since this feature was added) - see
+    # graph_build.load_graph()'s docstring. Cached like every other
+    # _load_* helper here so it's only read from disk once per process.
+    return load_graph()
+
+
+def _graph_expand_references(references):
+    """Graph RAG's 'graph signals' input to the fusion layer
+    (architecture plan section 52) - looks up references that frequently
+    co-occur with the query's named reference(s) in the cross-reference
+    graph graph_build.py builds during ingestion, and returns up to
+    GRAPH_MAX_RELATED of them as extra references to give a smaller
+    secondary boost. This is additive - it never replaces or skips the
+    dense (semantic/Qdrant) or sparse (BM25) search above, it only adds
+    one more scoring signal on the results they already found. Returns
+    [] (not an error) if the graph hasn't been built yet, or the query
+    named no exact reference to expand from."""
+    graph = _load_graph()
+    if graph is None or not references:
+        return []
+
+    related = Counter()
+    for ref in references:
+        if ref not in graph:
+            continue
+        for neighbor in graph.neighbors(ref):
+            if graph.nodes[neighbor].get("kind") != "reference":
+                continue
+            if neighbor in references:
+                continue
+            related[neighbor] += graph[ref][neighbor].get("weight", 1)
+
+    return [ref for ref, _count in related.most_common(GRAPH_MAX_RELATED)]
+
+
 def _reciprocal_rank_fusion(*ranked_lists, k=RRF_K):
     scores = {}
     for ranked in ranked_lists:
@@ -164,13 +200,15 @@ def assess_coverage(results, references):
     }
 
 
-def _retrieve_once(query, top_k, rerank_top_n):
+def _retrieve_once(query, top_k, rerank_top_n, references, expanded_references):
+    # Dense (semantic/Qdrant) and sparse (BM25) search both always run,
+    # on every query, unaffected by whether references/expanded_references
+    # are empty - the graph signal below only re-scores what they found.
     dense_ids = _dense_search(query, top_k)
     sparse_ids = _sparse_search(query, top_k)
     fused = _reciprocal_rank_fusion(dense_ids, sparse_ids)
 
     chunks = _load_chunk_texts()
-    references = _exact_reference_boost(query)
 
     candidates = []
     for chunk_id, rrf_score in fused[: top_k * 2]:
@@ -178,10 +216,17 @@ def _retrieve_once(query, top_k, rerank_top_n):
         if not chunk:
             continue
         boost = 0.0
-        if references:
-            text_lower = chunk["text"].lower()
-            if any(ref in text_lower for ref in references):
-                boost += 0.05  # small, deliberate nudge - see module docstring
+        text_lower = chunk["text"].lower()
+        if references and any(ref in text_lower for ref in references):
+            boost += 0.05  # small, deliberate nudge - see module docstring
+        elif expanded_references and any(ref in text_lower for ref in expanded_references):
+            # Graph-expanded reference (e.g. query named Policy D3, this
+            # chunk mentions Policy D2 which co-occurs with D3 elsewhere
+            # in the corpus) - smaller boost than a direct match, and
+            # mutually exclusive with the direct-match boost above so a
+            # chunk with the literal reference doesn't get penalized
+            # relative to one that only has a related one.
+            boost += GRAPH_EXPANSION_BOOST
         # Prefer current material over historic/superseded/draft versions
         # of the same policy without hard-filtering anything out - see
         # STATUS_BOOST in common.py.
@@ -208,10 +253,10 @@ def _retrieve_once(query, top_k, rerank_top_n):
 
 def retrieve(query, top_k=25, rerank_top_n=8, allow_broaden=True):
     """Returns (chunks, coverage): up to rerank_top_n chunk dicts (full
-    text + metadata), best first, after dense+sparse fusion and local
-    cross-encoder reranking - plus a coverage/confidence dict from
-    assess_coverage(). This is what answer.py builds the evidence
-    context from.
+    text + metadata), best first, after dense (semantic) + sparse
+    fusion, graph-signal boosting, and local cross-encoder reranking -
+    plus a coverage/confidence dict from assess_coverage(). This is what
+    answer.py builds the evidence context from.
 
     Corrective-RAG-style broadening (architecture plan section 52): if
     the first pass comes back low-confidence, automatically retry once
@@ -219,16 +264,30 @@ def retrieve(query, top_k=25, rerank_top_n=8, allow_broaden=True):
     see section 8) before giving up and returning weak results. Only
     retries once (allow_broaden=False on the retry, implicitly, since
     we return directly) so a genuinely under-covered topic doesn't
-    spiral into ever-larger searches."""
-    results = _retrieve_once(query, top_k, rerank_top_n)
+    spiral into ever-larger searches.
+
+    Graph RAG (architecture plan section 52): references named in the
+    query are expanded, via the cross-reference graph, into related
+    references that get a smaller secondary boost - computed once here
+    and reused across both the first pass and any broadened retry, and
+    surfaced in coverage["related_references"] so callers (query_cli.py)
+    can show it. This never substitutes for the dense/semantic search
+    above; it only adds one more signal on top of it."""
     references = _exact_reference_boost(query)
+    expanded_references = _graph_expand_references(references)
+
+    results = _retrieve_once(query, top_k, rerank_top_n, references, expanded_references)
     coverage = assess_coverage(results, references)
+    coverage["related_references"] = expanded_references
 
     if coverage["confidence"] == "low" and allow_broaden and top_k < 75:
         wider_top_k = min(top_k * 3, 75)
-        wider_results = _retrieve_once(query, wider_top_k, rerank_top_n)
+        wider_results = _retrieve_once(
+            query, wider_top_k, rerank_top_n, references, expanded_references
+        )
         wider_coverage = assess_coverage(wider_results, references)
         wider_coverage["broadened_from_top_k"] = top_k
+        wider_coverage["related_references"] = expanded_references
         return wider_results, wider_coverage
 
     coverage["broadened_from_top_k"] = None

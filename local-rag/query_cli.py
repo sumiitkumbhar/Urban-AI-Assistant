@@ -37,6 +37,9 @@ def main():
         print(f"  - {reason}")
     if result.get("verified"):
         print("  (answer passed an extra groundedness check before being shown)")
+    related = coverage.get("related_references")
+    if related:
+        print(f"  related references (via cross-reference graph): {', '.join(related)}")
 
     print("\n=== Citations ===")
     for c in result["citations"]:

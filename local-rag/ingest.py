@@ -64,9 +64,10 @@ from sentence_transformers import SentenceTransformer
 
 from common import (
     CORPUS_DIR, MANIFEST_PATH, DATA_DIR, CHUNKS_PATH, QDRANT_PATH, BM25_PATH,
-    QDRANT_COLLECTION, EMBEDDING_MODEL_NAME, EMBEDDING_DIM,
+    GRAPH_PATH, QDRANT_COLLECTION, EMBEDDING_MODEL_NAME, EMBEDDING_DIM,
     CHUNK_TARGET_CHARS, CHUNK_OVERLAP_CHARS,
 )
+from graph_build import build_graph, save_graph
 
 INGEST_LOG = DATA_DIR / "ingest.log"
 
@@ -268,6 +269,15 @@ def main():
     write_chunks_jsonl(chunks)
     build_qdrant_index(chunks)
     build_bm25_index(chunks)
+
+    # Graph RAG (architecture plan section 52) - built from the same
+    # in-memory chunks, no extra PDF parsing needed. Additive: dense
+    # (semantic/Qdrant) and sparse (BM25) search above are unaffected;
+    # this only gives retrieve.py one more optional signal to use.
+    reference_graph = build_graph(chunks, log=log)
+    save_graph(reference_graph)
+    log(f"reference graph saved to {GRAPH_PATH}")
+
     log(f"=== done: {len(chunks)} chunks from {len(active_files)} documents indexed ===")
     log("Try it: python3 query_cli.py \"what does policy d3 say\"")
 

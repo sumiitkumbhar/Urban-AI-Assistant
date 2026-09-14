@@ -14,6 +14,7 @@
 # Mac - see "Setup and Ingest Local RAG.command" on your Desktop.
 
 import os
+import re
 from pathlib import Path
 
 LOCAL_RAG_DIR = Path(__file__).resolve().parent
@@ -54,7 +55,34 @@ DATA_DIR = LOCAL_RAG_DIR / "data"
 CHUNKS_PATH = DATA_DIR / "chunks.jsonl"
 QDRANT_PATH = DATA_DIR / "qdrant"
 BM25_PATH = DATA_DIR / "bm25_index.pkl"
+GRAPH_PATH = DATA_DIR / "reference_graph.pkl"
 QDRANT_COLLECTION = "regulatory_knowledge"  # matches section 21 of the README
+
+# Exact-reference regex patterns - originally lived only in retrieve.py's
+# exact-reference boost, centralized here now that graph_build.py also
+# needs the same definition of "what counts as a reference" (two places
+# deriving that independently is how they drift). Matches section 41's
+# example list - deliberately simple/conservative: a false match here
+# only adds a small score boost, it never filters anything out, so a
+# slightly-too-eager pattern is low-risk.
+EXACT_REFERENCE_PATTERNS = [
+    re.compile(r"\bpolicy\s+[a-z]{0,2}\d+[a-z]?\b", re.I),
+    re.compile(r"\bparagraph\s+\d+\b", re.I),
+    re.compile(r"\bapproved\s+document\s+[a-z]\b", re.I),
+    re.compile(r"\bsection\s+\d+\b", re.I),
+    re.compile(r"\bregulation\s+\d+\b", re.I),
+]
+
+# Graph RAG (architecture plan section 52, confirmed scope, built after
+# the Corrective-RAG/Self-RAG increment) - graph_build.py builds a
+# cross-reference graph from which references co-occur in the same
+# chunk; retrieve.py uses it to give a smaller secondary boost to
+# references related to what the query named, on top of - never instead
+# of - the existing dense (semantic/Qdrant) + sparse (BM25) hybrid
+# search. See graph_build.py's module docstring for the full reasoning.
+GRAPH_CO_OCCURRENCE_MIN = 2   # ignore one-off co-occurrences as noise
+GRAPH_MAX_RELATED = 5
+GRAPH_EXPANSION_BOOST = 0.02  # smaller than the direct exact-reference boost (0.05)
 
 # Embedding model: a small, CPU-friendly BGE model. BGE's own docs call
 # for prefixing the QUERY (never the passage) with this instruction string

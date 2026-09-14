@@ -7,3 +7,4 @@ groq>=0.9,<1
 python-dotenv>=1.0,<2
 fastapi>=0.110,<1
 uvicorn[standard]>=0.29,<1
+networkx>=3.0,<4  # cross-reference graph (graph_build.py) - free/BSD-licensed, local only
