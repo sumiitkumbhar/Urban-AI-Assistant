@@ -70,6 +70,40 @@ RERANKER_MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 CHUNK_TARGET_CHARS = 1000
 CHUNK_OVERLAP_CHARS = 150
 
+# Corrective-RAG-style confidence thresholds and document-status boost
+# (architecture plan section 52, "next-increment" items 1-2: turn the
+# retrieval-quality confidence check on, and start using each chunk's
+# `status` field instead of treating current/historic/superseded
+# material as equally preferred). Centralized here for the same reason
+# EMBEDDING_QUERY_PREFIX is: retrieve.py and answer.py both need to
+# agree on what "low confidence" means without duplicating the numbers.
+#
+# STATUS_BOOST is a small nudge added to a chunk's fused score, same
+# mechanism as retrieve.py's exact-reference boost - it never filters
+# anything out, it just breaks ties in favour of current material when
+# a current and a historic/superseded version of the same policy both
+# come back for the same query (the known trade-off documented in
+# ingest.py's docstring and README.md).
+STATUS_BOOST = {
+    "current": 0.03,
+    "future": 0.0,
+    "consultation": -0.02,
+    "draft": -0.02,
+    "supporting_evidence": 0.0,
+    "historic": -0.04,
+    "superseded": -0.05,
+}
+
+# Cross-encoder rerank scores below this are "low confidence" (Corrective
+# RAG's confidence check); at/above this are "high confidence". Anything
+# in between is "medium". These are the raw ms-marco-MiniLM-L-6-v2 scores
+# from retrieve.py's reranker - not calibrated probabilities - so treat
+# them as directional, not absolute; revisit once real queries have been
+# run against the full 185-file corpus.
+CONFIDENCE_TOP_SCORE_HIGH = 0.55
+CONFIDENCE_TOP_SCORE_LOW = 0.15
+MIN_SOURCE_DIVERSITY_FOR_HIGH = 2
+
 DEFAULT_GROQ_MODEL = "llama-3.3-70b-versatile"
 
 

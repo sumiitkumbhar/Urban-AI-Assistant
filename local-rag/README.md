@@ -15,18 +15,20 @@ Right now it's a standalone service you can query directly (CLI or HTTP)
 to test and validate before deciding how/whether to connect it to the
 app.
 
-It ingests the whole corpus except confirmed exact-duplicate copies (10
+It ingests the whole corpus except confirmed exact-duplicate copies (17
 byte-identical PDFs the Phase 1 triage flagged) - see `corpus_manifest.json`
 and `Urban_AI_Corpus_Triage.xlsx` in the Corpus folder for the full
 per-file triage. That's a deliberate widening from the original
 ACTIVE_CORE/ACTIVE_SUPPORTING-only default (76 of 202 files): it now
 also pulls in REFERENCE_ONLY material - historic/superseded policy
 versions, consultation drafts, conservation-area audits for areas with
-no chosen demo site yet - so it's worth knowing that a query can now
-surface an outdated version of a policy alongside the current one with
-no automatic preference between them (each chunk does carry the
-manifest's `status` field for a future filtering pass to use - retrieval
-doesn't do that yet). The non-PDF biodiversity-metric calculator
+no chosen demo site yet - so a query can surface an outdated version of a
+policy alongside the current one. `retrieve.py` now gives current-status
+material a small score boost over historic/superseded/draft versions
+(each chunk carries the manifest's `status` field), so it's a soft
+preference rather than a hard filter - a historic version can still win
+if it's a genuinely stronger match, it just doesn't tie with the current
+one by default anymore. The non-PDF biodiversity-metric calculator
 spreadsheets (.xlsx/.xlsm) are attempted but always skipped with a
 logged warning - they need spreadsheet-specific extraction this pipeline
 doesn't have.
@@ -86,21 +88,41 @@ question
   |        \
   |         +-- exact-reference boost (regex for "Policy D3",
   |             "Paragraph 135", "Approved Document B", etc.)
+  |         +-- current-status boost (nudges current material over
+  |             historic/superseded/draft versions of the same policy)
   |
   +-- Reciprocal Rank Fusion
   |
   +-- local cross-encoder rerank (top ~8)
   |
-  +-- Groq (cloud) generates the cited answer
+  +-- Corrective-RAG-style confidence check (assess_coverage() in
+  |   retrieve.py) - if low-confidence, automatically retries once with
+  |   a wider net before giving up
+  |
+  +-- Groq (cloud) generates the cited answer, told explicitly when
+  |   confidence is low/medium
+  |
+  +-- Self-RAG-style verification/repair pass (only for low/medium
+      confidence - skipped on the normal high-confidence path to keep
+      that path a single Groq call)
 ```
 
-Local: embeddings, vector storage, sparse search, reranking. Cloud: only
-the final answer-writing call, via the same `GROQ_API_KEY` the Next.js
-app already uses - matches the README's "hybrid local/cloud" recommendation
-(section 6.2) rather than the fully-local-only option, since that would
-additionally need a local LLM runtime (Ollama wasn't found reachable from
-the bridge session that built this - if you do have it running and want
-the answer step local too, `answer.py` is the one place to change).
+Local: embeddings, vector storage, sparse search, reranking, the
+confidence check. Cloud: the answer-writing call (and, only when
+confidence is low/medium, one extra verification call), via the same
+`GROQ_API_KEY` the Next.js app already uses - matches the README's
+"hybrid local/cloud" recommendation (section 6.2) rather than the
+fully-local-only option, since that would additionally need a local LLM
+runtime (Ollama wasn't found reachable from the bridge session that
+built this - if you do have it running and want the answer step local
+too, `answer.py` is the one place to change).
+
+`retrieve(query)` now returns `(chunks, coverage)` instead of just a
+chunk list - `coverage` has `confidence` (`"high"`/`"medium"`/`"low"`),
+`top_rerank_score`, `source_count`, `reasons`, and
+`broadened_from_top_k` (set when the confidence check triggered a
+retry). `query_cli.py` prints this after every answer; `service.py`
+returns it under `"coverage"` in the JSON response.
 
 ## Known limitations / good next increments
 
@@ -111,10 +133,20 @@ the answer step local too, `answer.py` is the one place to change).
 - **No OCR.** A handful of older/scanned PDFs may extract little or no
   text - `data/ingest.log` will show a 0-chunk warning for any file like
   that.
-- **No document-version/temporal metadata yet** (section 20) beyond the
-  triage's `status` field - if a superseded and a current version of the
-  same document both end up ACTIVE_CORE, both get retrieved with no
-  automatic preference for the current one.
+- **Document-version/temporal preference is a soft boost, not a real
+  policy** (section 20) - `status: current` chunks get a small score
+  nudge over historic/superseded/draft ones (see "How retrieval works"
+  above), but there's no hard filtering, no `effective_from`/
+  `effective_until` date logic, and no way to deliberately ask for the
+  historic version of something.
+- **Confidence thresholds are untuned** - `CONFIDENCE_TOP_SCORE_HIGH`/
+  `_LOW` in `common.py` are reasonable starting guesses for the
+  ms-marco-MiniLM-L-6-v2 cross-encoder's raw score range, not calibrated
+  against real queries against the full 185-file corpus yet. Revisit
+  once there's a decent sample of real query/answer pairs to look at.
 - **Authority-hierarchy weighting** (national > London > Westminster,
   section 42) isn't implemented - retrieval currently treats all
   geographies equally within a query.
+- **Graph RAG, and Agentic/Multi-Agent orchestration are planned but not
+  built** - see section 52 of `urban-ai-architecture-plan.md` for the
+  confirmed scope and recommended build order.

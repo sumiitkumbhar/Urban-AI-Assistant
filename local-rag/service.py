@@ -82,17 +82,18 @@ def health():
 @app.post("/query")
 def query(req: QueryRequest):
     t0 = time.time()
-    chunks = retrieve(req.question, top_k=req.top_k, rerank_top_n=req.rerank_top_n)
+    chunks, coverage = retrieve(req.question, top_k=req.top_k, rerank_top_n=req.rerank_top_n)
     t1 = time.time()
-    result = generate_answer(req.question, chunks)
+    result = generate_answer(req.question, chunks, coverage=coverage)
     t2 = time.time()
 
     logger.info(
-        f"query={req.question!r} chunks={len(chunks)} "
+        f"query={req.question!r} chunks={len(chunks)} confidence={coverage['confidence']} "
         f"retrieval_ms={(t1-t0)*1000:.0f} generation_ms={(t2-t1)*1000:.0f}"
     )
     return {
         **result,
+        "coverage": coverage,
         "retrieval_ms": round((t1 - t0) * 1000, 1),
         "generation_ms": round((t2 - t1) * 1000, 1),
     }

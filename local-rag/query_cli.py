@@ -19,13 +19,25 @@ def main():
     query = " ".join(sys.argv[1:])
 
     t0 = time.time()
-    chunks = retrieve(query)
+    chunks, coverage = retrieve(query)
     t1 = time.time()
-    result = generate_answer(query, chunks)
+    result = generate_answer(query, chunks, coverage=coverage)
     t2 = time.time()
 
     print(f"\n=== Answer (retrieval {t1-t0:.2f}s, generation {t2-t1:.2f}s) ===\n")
     print(result["answer"])
+
+    broadened = coverage.get("broadened_from_top_k")
+    note = " (broadened search after a weak first pass)" if broadened else ""
+    print(f"\n=== Confidence: {coverage['confidence']}{note} ===")
+    if coverage.get("top_rerank_score") is not None:
+        print(f"  top rerank score: {coverage['top_rerank_score']}, "
+              f"source documents: {coverage['source_count']}")
+    for reason in coverage.get("reasons", []):
+        print(f"  - {reason}")
+    if result.get("verified"):
+        print("  (answer passed an extra groundedness check before being shown)")
+
     print("\n=== Citations ===")
     for c in result["citations"]:
         print(f"  [{c['id']}] {c['doc']} (p.{c['page']}) "
