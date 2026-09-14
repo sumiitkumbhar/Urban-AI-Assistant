@@ -204,18 +204,40 @@ def _retrieve_once(query, top_k, rerank_top_n, references, expanded_references, 
     # Dense (semantic/Qdrant) and sparse (BM25) search both always run,
     # on every query, unaffected by whether references/expanded_references
     # are empty - the graph signal below only re-scores what they found.
-    dense_ids = _dense_search(query, top_k)
-    sparse_ids = _sparse_search(query, top_k)
+    #
+    # BUG FOUND ON REAL VERIFICATION (2026-09-14, first real run of
+    # orchestrate.py): a domain-scoped agent asks the SAME full,
+    # multi-topic query text as every other agent - e.g. for "would
+    # converting this listed building's basement into a flat need fire
+    # safety upgrades and affordable housing contributions", the
+    # heritage and building_regulations agents got 0 chunks each, only
+    # planning got results. Root cause: dense_search()/sparse_search()
+    # were called with the *unscoped* top_k (25) regardless of
+    # domain_filter, so only ~25-50 globally-top-ranked chunks (across
+    # the whole 24k+-chunk corpus) were ever fetched before filtering -
+    # and a long mixed-topic query's top ~25 global matches skew toward
+    # whichever domain's wording it echoes most (here, planning - lots
+    # of "housing"/"contributions" chunks), even though the corpus does
+    # have plenty of genuinely relevant heritage/building_regs material.
+    # Widening the *fused list truncation* (what the comment below used
+    # to say) didn't help, because the fused list itself was never
+    # bigger than 2*top_k to begin with - the real fix has to widen how
+    # many candidates dense/sparse search themselves pull before a
+    # domain filter gets applied, so a domain that isn't the dominant
+    # theme of the raw query text still gets a fair, wide net to be
+    # found in. Both are cheap local operations (embedded Qdrant +
+    # in-memory BM25 over the full corpus) even at this width.
+    search_top_k = top_k * 8 if domain_filter else top_k
+    dense_ids = _dense_search(query, search_top_k)
+    sparse_ids = _sparse_search(query, search_top_k)
     fused = _reciprocal_rank_fusion(dense_ids, sparse_ids)
 
     chunks = _load_chunk_texts()
 
-    # A domain filter throws away most of the ranked list before rerank,
-    # so look further down it than the unfiltered path does (top_k*2) -
-    # otherwise a domain-scoped agent could end up with too few
-    # candidates just because its matches were fused-ranked past the
-    # unfiltered cutoff, not because they don't exist.
-    fused_window = top_k * 4 if domain_filter else top_k * 2
+    # With dense/sparse already widened above when domain-scoped, look at
+    # the whole fused list rather than re-truncating it a second time -
+    # it's already bounded (at most 2*search_top_k entries).
+    fused_window = len(fused) if domain_filter else top_k * 2
     candidates = []
     for chunk_id, rrf_score in fused[:fused_window]:
         chunk = chunks.get(chunk_id)
