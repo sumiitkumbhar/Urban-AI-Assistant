@@ -8,11 +8,26 @@ Run this from your own Terminal, inside this folder's venv:
 
 What it does, matching sections 37/39/40 of the architecture README:
 
-  1. Reads corpus_manifest.json (the Phase-1 triage) and keeps only files
-     tagged ACTIVE_CORE / ACTIVE_SUPPORTING - everything else (duplicates,
-     examination material, unrelated conservation-area docs, the
-     biodiversity calculator spreadsheets) is deliberately left out of
-     default retrieval.
+  1. Reads corpus_manifest.json (the Phase-1 triage) and ingests every
+     file EXCEPT confirmed exact-duplicate copies (byte-identical PDFs
+     the triage flagged with a `duplicate_group` - indexing the same
+     text twice under two filenames just pads out every result list with
+     a redundant hit). This is a deliberate widening from the original
+     ACTIVE_CORE/ACTIVE_SUPPORTING-only default (76 of 202 files) to "all
+     of it" per an explicit later request - it now also pulls in
+     REFERENCE_ONLY material (historic/superseded policy versions,
+     consultation drafts, conservation-area audits for areas with no
+     chosen demo site yet) and the handful of unlabeled "data-N.pdf"
+     files. Each chunk still carries the manifest's `status` field
+     (current/historic/superseded/consultation/etc, per README section
+     20), so a future retrieval pass can filter or de-prioritize
+     non-current material - retrieve.py doesn't do that yet, so right
+     now a historic and a current version of the same policy can both
+     come back for the same query with no automatic preference between
+     them. Non-PDF files (the .xlsx/.xlsm biodiversity-metric calculator
+     tools) are still attempted but will fail to open as a PDF and get
+     logged as a WARN + skipped - they need a spreadsheet-specific
+     extraction path this pipeline doesn't have, not PDF text chunking.
   2. Extracts text page-by-page with pypdf, splits it into ~1000-char
      overlapping chunks, and keeps the source page number on every chunk
      (this is an MVP paragraph/page chunker, not the structure-aware
@@ -30,8 +45,8 @@ What it does, matching sections 37/39/40 of the architecture README:
      alone are unreliable for exact references like "Policy D3".
 
 Safe to re-run: it wipes and rebuilds data/ from scratch each time rather
-than trying to diff/update in place - simpler, and this corpus is small
-enough (76 files, ~290MB) that a full rebuild takes minutes, not hours.
+than trying to diff/update in place - simpler, and even at the full ~190
+files/~1GB scope a rebuild is minutes, not hours, on a modern Mac CPU.
 """
 
 import json
@@ -73,9 +88,16 @@ def load_manifest():
         sys.exit(1)
     with open(MANIFEST_PATH) as f:
         rows = json.load(f)
-    active = [r for r in rows if r["bucket"] in ("ACTIVE_CORE", "ACTIVE_SUPPORTING")]
+    # Everything except confirmed exact-duplicate copies - see the module
+    # docstring for why this is wider than the original ACTIVE_CORE/
+    # ACTIVE_SUPPORTING-only default.
+    active = [r for r in rows if not r.get("duplicate_group")]
+    skipped = len(rows) - len(active)
+    from collections import Counter
+    bucket_counts = Counter(r["bucket"] for r in active)
     log(f"manifest loaded: {len(rows)} total files, {len(active)} eligible for ingestion "
-        f"(ACTIVE_CORE + ACTIVE_SUPPORTING)")
+        f"(skipping {skipped} confirmed exact-duplicate copies) - by bucket: "
+        f"{dict(bucket_counts)}")
     return active
 
 

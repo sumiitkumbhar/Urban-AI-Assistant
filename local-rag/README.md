@@ -15,10 +15,21 @@ Right now it's a standalone service you can query directly (CLI or HTTP)
 to test and validate before deciding how/whether to connect it to the
 app.
 
-It also only reads the ACTIVE_CORE + ACTIVE_SUPPORTING files from the
-Phase 1 triage (76 of the corpus's 202 files) - see
-`corpus_manifest.json` and `Urban_AI_Corpus_Triage.xlsx` in the Corpus
-folder for why each file landed where it did.
+It ingests the whole corpus except confirmed exact-duplicate copies (10
+byte-identical PDFs the Phase 1 triage flagged) - see `corpus_manifest.json`
+and `Urban_AI_Corpus_Triage.xlsx` in the Corpus folder for the full
+per-file triage. That's a deliberate widening from the original
+ACTIVE_CORE/ACTIVE_SUPPORTING-only default (76 of 202 files): it now
+also pulls in REFERENCE_ONLY material - historic/superseded policy
+versions, consultation drafts, conservation-area audits for areas with
+no chosen demo site yet - so it's worth knowing that a query can now
+surface an outdated version of a policy alongside the current one with
+no automatic preference between them (each chunk does carry the
+manifest's `status` field for a future filtering pass to use - retrieval
+doesn't do that yet). The non-PDF biodiversity-metric calculator
+spreadsheets (.xlsx/.xlsm) are attempted but always skipped with a
+logged warning - they need spreadsheet-specific extraction this pipeline
+doesn't have.
 
 ## One-time setup
 
