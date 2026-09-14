@@ -8,3 +8,5 @@ python-dotenv>=1.0,<2
 fastapi>=0.110,<1
 uvicorn[standard]>=0.29,<1
 networkx>=3.0,<4  # cross-reference graph (graph_build.py) - free/BSD-licensed, local only
+psycopg2-binary>=2.9,<3  # gis/ - local Postgres+PostGIS site-constraint lookup
+requests>=2.31,<3  # gis/ - planning.data.gov.uk + postcodes.io HTTP calls

@@ -8,12 +8,12 @@ The offline equivalent of `app/api/rag-chat/route.ts`'s `searchRAG()` +
 ## What it is / isn't (read this first)
 
 This proves offline retrieval works end to end - ask a question, get a
-cited answer, no Supabase involved. It is **not yet wired into the live
-Next.js chat UI** - that's Phase 4 orchestration work, deliberately left
-for later per the README's own "don't build everything at once" rule.
-Right now it's a standalone service you can query directly (CLI or HTTP)
-to test and validate before deciding how/whether to connect it to the
-app.
+cited answer, no Supabase involved. It's now **wired into the live
+Next.js chat UI** too - see `app/api/local-rag-chat/route.ts` and the
+"Cloud" / "Local (offline)" toggle in the chat UI - though that wiring
+hasn't been run end-to-end yet (see that route's own comment for exactly
+what to try). It's still also a standalone service you can query
+directly (CLI or HTTP), independent of the Next.js app.
 
 It ingests the whole corpus except confirmed exact-duplicate copies (17
 byte-identical PDFs the Phase 1 triage flagged) - see `corpus_manifest.json`
@@ -164,6 +164,50 @@ list - `coverage` has `confidence` (`"high"`/`"medium"`/`"low"`),
 check triggered a retry). `query_cli.py` prints this after every
 answer; `service.py` returns it under `"coverage"` in the JSON response.
 
+## Site constraints / GIS (`gis/`)
+
+A separate piece, deliberately **not** part of the text-retrieval
+pipeline above - architecture-plan section 27 is explicit that official
+spatial data ("is this site in a conservation area? listed? Article 4?
+Green Belt? which LPA?") should be a structured/spatial lookup via
+PostGIS, not text dumped into RAG. RAG's job stays "what does the policy
+say because that constraint applies" - a separate step downstream of
+this.
+
+Runs its own local Postgres+PostGIS database (`urban_ai_gis`, installed
+via Homebrew - see **"Setup and Ingest GIS Data.command"** on your
+Desktop), separate from Qdrant (this folder's own index) and from the
+Next.js app's Supabase Postgres. Reuses `local-rag/venv` rather than a
+second one - `requirements.txt` now includes `psycopg2-binary` and
+`requests` for it.
+
+Data comes from `planning.data.gov.uk`'s open entity API (no key
+required): `local_planning_authorities` is ingested nationally (~300
+authorities, cheap to keep local, since "which LPA applies" is
+meaningful for any UK site); the four constraint layers - conservation
+areas, listed building outlines, Article 4 direction areas, Green Belt -
+are ingested scoped to one authority at a time (Westminster by default,
+per section 29's starting geography), via `gis_ingest.py --lpa-entity
+<id> --lpa-name <name>` for any other authority later. This deliberately
+avoids mass-ingesting every constraint nationally (section 47).
+
+```bash
+cd gis
+source ../venv/bin/activate
+python3 gis_cli.py --postcode "SW1V 3LX"
+# or: uvicorn gis_service:app --host 0.0.0.0 --port 8011
+```
+
+Every result distinguishes "checked, none found" from "not ingested for
+this site's authority yet" (a `checked: false`/`coverage` flag per
+constraint layer) - section 27's explicit warning that an incomplete
+dataset must never be presented as proof a constraint doesn't exist.
+Postcode-level geocoding only for now (via the free `postcodes.io`), not
+full free-text addresses - see Known limitations below. Not yet wired
+into either the text-RAG pipeline's context package or the Next.js chat
+UI - this is the standalone lookup service first, same pattern as
+local-rag itself before its own Phase 4 wiring.
+
 ## Known limitations / good next increments
 
 - **Chunking is page + paragraph based**, not the structure-aware
@@ -204,6 +248,24 @@ answer; `service.py` returns it under `"coverage"` in the JSON response.
   regex-based reference extraction - a real classifier (a small local
   model, or an LLM pass) is the noted upgrade path if this proves too
   narrow in practice.
+- **Site-constraints (`gis/`) has been built but not yet run end-to-end**
+  - the database schema, ingestion, lookup, service and CLI are all
+  written and syntax-checked, but ingestion needs a real run against
+  `planning.data.gov.uk` from your Mac (via "Setup and Ingest GIS
+  Data.command") before any of it is confirmed working on real data.
+- **Site-constraints geocodes UK postcodes only, not free-text
+  addresses** - `postcodes.io` is free/no-key and accurate enough to
+  identify which conservation area/LPA a site sits in, but a full street
+  address needs a geocoder this project doesn't have wired in yet (the
+  free options carry usage-policy restrictions worth reading first; the
+  paid ones break the zero-budget rule - see `gis_lookup.py`'s
+  `geocode_postcode()` docstring).
+- **Site-constraints only has constraint-layer coverage for Westminster**
+  until `gis_ingest.py --lpa-entity <id>` is run for another authority -
+  a site outside Westminster will correctly report "not ingested for
+  this area" (via each result's `checked`/`coverage` flag) rather than a
+  false "no constraints found", but won't have real answers until that
+  authority is ingested.
 - **Orchestration has been verified end-to-end on the real corpus**
   - built and unit-tested (mocked retrieval), then run for real on a
   genuinely cross-domain query. The first real run caught an actual bug:
