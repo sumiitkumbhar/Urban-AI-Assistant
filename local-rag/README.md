@@ -113,6 +113,28 @@ question
       that path a single Groq call)
 ```
 
+**Agentic/Multi-Agent RAG (`orchestrate.py`)** sits in front of all of
+the above. Most queries only ever touch one subject area, so
+`orchestrate()` classifies the query (a free, local keyword match
+against `DOMAIN_KEYWORDS` in `common.py` - no LLM call) and, if it names
+just one domain (or none), runs the exact pipeline above completely
+unchanged - no orchestration overhead. Only when a query's wording
+genuinely spans more than one domain (e.g. "would converting this listed
+building's basement need fire safety upgrades and affordable housing
+contributions" touches heritage + building_regulations + planning) does
+it fan out into that many domain-scoped "agents" - each just the same
+`retrieve()` call above, filtered to its own domain's chunks - and fuse
+their evidence (dedup, sorted by rerank score, confidence = the worst of
+the agents that fired) before the single downstream Groq call writes the
+answer. There is still only ever one LLM call per query, no matter how
+many agents ran - retrieval is local and free, so running it more than
+once costs nothing, but a second/third Groq call would (rate limit and
+cost), so the orchestrator never adds one. `query_cli.py` prints an
+"Agents" section whenever more than one fired; `service.py` returns them
+under `coverage["agents"]`. One failed agent (an exception in its
+retrieve() call) is recorded and skipped rather than failing the whole
+request.
+
 Local: embeddings, vector storage, sparse search, the cross-reference
 graph, reranking, the confidence check. Cloud: the answer-writing call
 (and, only when confidence is low/medium, one extra verification call),
@@ -174,6 +196,15 @@ answer; `service.py` returns it under `"coverage"` in the JSON response.
   ("the London Plan", "this SPD") instead of an exact pattern. Real
   entity/relation extraction (spaCy or an LLM pass) is the noted next
   upgrade in `graph_build.py`'s module docstring.
-- **Agentic/Multi-Agent orchestration is planned but not built** - see
-  section 52 of `urban-ai-architecture-plan.md` for the confirmed scope
-  and recommended build order (this is the last item on that list).
+- **Agentic/Multi-Agent orchestration's query classifier is regex
+  keyword-matching, not an LLM call** (`DOMAIN_KEYWORDS` in `common.py`)
+  - deliberate, to keep decomposition free/local, but it means a query
+  about a domain using none of its listed phrasing won't route to that
+  domain's specialist agent. Same style of limitation as Graph RAG's
+  regex-based reference extraction - a real classifier (a small local
+  model, or an LLM pass) is the noted upgrade path if this proves too
+  narrow in practice.
+- **Orchestration hasn't been verified end-to-end on the real corpus
+  yet** - built and unit-tested (mocked retrieval) this session, same
+  "shipped, not yet seen on a real query" status the other increments
+  had before their first real Terminal run.

@@ -200,7 +200,7 @@ def assess_coverage(results, references):
     }
 
 
-def _retrieve_once(query, top_k, rerank_top_n, references, expanded_references):
+def _retrieve_once(query, top_k, rerank_top_n, references, expanded_references, domain_filter=None):
     # Dense (semantic/Qdrant) and sparse (BM25) search both always run,
     # on every query, unaffected by whether references/expanded_references
     # are empty - the graph signal below only re-scores what they found.
@@ -210,10 +210,25 @@ def _retrieve_once(query, top_k, rerank_top_n, references, expanded_references):
 
     chunks = _load_chunk_texts()
 
+    # A domain filter throws away most of the ranked list before rerank,
+    # so look further down it than the unfiltered path does (top_k*2) -
+    # otherwise a domain-scoped agent could end up with too few
+    # candidates just because its matches were fused-ranked past the
+    # unfiltered cutoff, not because they don't exist.
+    fused_window = top_k * 4 if domain_filter else top_k * 2
     candidates = []
-    for chunk_id, rrf_score in fused[: top_k * 2]:
+    for chunk_id, rrf_score in fused[:fused_window]:
         chunk = chunks.get(chunk_id)
         if not chunk:
+            continue
+        if domain_filter and chunk.get("domain") != domain_filter:
+            # Multi-Agent RAG's per-domain scoping (architecture plan
+            # section 52/orchestrate.py) - a domain-scoped "agent" only
+            # sees its own slice of the corpus. Applied after fusion
+            # rather than as a separate per-domain index: same dense+
+            # sparse search either way, just narrowed before rerank -
+            # cheaper than maintaining N separate Qdrant collections for
+            # a corpus this size (185 documents).
             continue
         boost = 0.0
         text_lower = chunk["text"].lower()
@@ -251,7 +266,7 @@ def _retrieve_once(query, top_k, rerank_top_n, references, expanded_references):
     return results
 
 
-def retrieve(query, top_k=25, rerank_top_n=8, allow_broaden=True):
+def retrieve(query, top_k=25, rerank_top_n=8, allow_broaden=True, domain_filter=None):
     """Returns (chunks, coverage): up to rerank_top_n chunk dicts (full
     text + metadata), best first, after dense (semantic) + sparse
     fusion, graph-signal boosting, and local cross-encoder reranking -
@@ -272,18 +287,28 @@ def retrieve(query, top_k=25, rerank_top_n=8, allow_broaden=True):
     and reused across both the first pass and any broadened retry, and
     surfaced in coverage["related_references"] so callers (query_cli.py)
     can show it. This never substitutes for the dense/semantic search
-    above; it only adds one more signal on top of it."""
+    above; it only adds one more signal on top of it.
+
+    domain_filter (Multi-Agent RAG, architecture plan section 52,
+    orchestrate.py): when set, scopes this call to chunks whose `domain`
+    metadata matches - this is what makes a "specialist agent" specialist.
+    None (the default) means unscoped, exactly the pre-orchestration
+    behaviour - orchestrate.py itself decides when scoping is worth it
+    for a given query; retrieve() just needs to know how to do it when
+    asked."""
     references = _exact_reference_boost(query)
     expanded_references = _graph_expand_references(references)
 
-    results = _retrieve_once(query, top_k, rerank_top_n, references, expanded_references)
+    results = _retrieve_once(
+        query, top_k, rerank_top_n, references, expanded_references, domain_filter
+    )
     coverage = assess_coverage(results, references)
     coverage["related_references"] = expanded_references
 
     if coverage["confidence"] == "low" and allow_broaden and top_k < 75:
         wider_top_k = min(top_k * 3, 75)
         wider_results = _retrieve_once(
-            query, wider_top_k, rerank_top_n, references, expanded_references
+            query, wider_top_k, rerank_top_n, references, expanded_references, domain_filter
         )
         wider_coverage = assess_coverage(wider_results, references)
         wider_coverage["broadened_from_top_k"] = top_k

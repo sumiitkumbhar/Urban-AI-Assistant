@@ -9,7 +9,7 @@ import sys
 import time
 
 from answer import generate_answer
-from retrieve import retrieve
+from orchestrate import orchestrate
 
 
 def main():
@@ -19,7 +19,7 @@ def main():
     query = " ".join(sys.argv[1:])
 
     t0 = time.time()
-    chunks, coverage = retrieve(query)
+    chunks, coverage = orchestrate(query)
     t1 = time.time()
     result = generate_answer(query, chunks, coverage=coverage)
     t2 = time.time()
@@ -40,6 +40,16 @@ def main():
     related = coverage.get("related_references")
     if related:
         print(f"  related references (via cross-reference graph): {', '.join(related)}")
+
+    agents = coverage.get("agents") or []
+    if len(agents) > 1:
+        print(f"\n=== Agents (Multi-Agent RAG: query spanned {len(agents)} domains) ===")
+        for a in agents:
+            if a.get("error"):
+                print(f"  - {a['domain']}: FAILED ({a['error']})")
+            else:
+                print(f"  - {a['domain']}: confidence={a['confidence']}, "
+                      f"{a['chunk_count']} chunks from {a['source_count']} source(s)")
 
     print("\n=== Citations ===")
     for c in result["citations"]:

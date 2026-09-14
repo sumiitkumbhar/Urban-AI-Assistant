@@ -132,6 +132,61 @@ CONFIDENCE_TOP_SCORE_HIGH = 0.55
 CONFIDENCE_TOP_SCORE_LOW = 0.15
 MIN_SOURCE_DIVERSITY_FOR_HIGH = 2
 
+# Agentic/Multi-Agent RAG (architecture plan section 52 - the last item
+# on the confirmed-in-scope list, section 13's "controlled orchestrator +
+# specialist subagents" sketch). DOMAIN_KEYWORDS is the (free, local,
+# zero-LLM-call) query classifier orchestrate.py uses to decide which
+# domain-scoped retrieval "agents" a query actually needs - see that
+# file's module docstring for the full reasoning on why this is regex
+# keyword-matching rather than an LLM call doing decomposition (section
+# 52/47: every extra agent is another call against a rate-limited free
+# tier, so classification itself has to be free). Keys must match the
+# `domain` values corpus_manifest.json actually uses (checked directly
+# against the real manifest: planning=87 files, heritage=84,
+# building_regulations=10, site_environment=7, legislation=1 - legislation
+# is too small a bucket to justify its own specialist agent, so queries
+# about acts/regulations are expected to be caught by the building_regs
+# or planning keyword sets instead, whichever the query is actually about).
+# Deliberately specific, multi-word phrases where possible rather than
+# single generic words like "policy" - a keyword so broad it fires on
+# almost every query would turn every query into a multi-agent query,
+# defeating section 13's "only use subagents when isolation/parallel
+# investigation genuinely helps."
+DOMAIN_KEYWORDS = {
+    "planning": [
+        r"\bplanning permission\b", r"\bplanning application\b",
+        r"\bdevelopment\b", r"\baffordable housing\b", r"\bviability\b",
+        r"\bCIL\b", r"\bcommunity infrastructure levy\b", r"\bdensity\b",
+        r"\bland use\b", r"\bpolicy [a-z]{0,2}\d+[a-z]?\b", r"\bmasterplan\b",
+        r"\bfloorspace\b", r"\bplot ratio\b",
+    ],
+    "heritage": [
+        r"\bconservation area\b", r"\blisted building\b",
+        r"\bheritage asset\b", r"\bhistoric character\b", r"\btownscape\b",
+        r"\bsetting of\b", r"\bhistoric england\b", r"\barchaeolog",
+        r"\bdemolition of\b", r"\bconservation area audit\b",
+    ],
+    "building_regulations": [
+        r"\bapproved document\b", r"\bbuilding regulations?\b",
+        r"\bfire safety\b", r"\bmeans of escape\b", r"\bparty wall\b",
+        r"\bstructural\b", r"\bventilation\b", r"\bpart m\b",
+        r"\bfire resistance\b", r"\bsound insulation\b", r"\bpart e\b",
+        r"\bdrainage\b", r"\bpart h\b",
+    ],
+    "site_environment": [
+        r"\bbiodiversity\b", r"\bcontaminated land\b", r"\bretrofit\b",
+        r"\bflood risk\b", r"\becology\b", r"\bair quality\b",
+        r"\bsustainability\b", r"\benergy efficiency\b", r"\btree survey\b",
+        r"\barboricultural\b",
+    ],
+}
+# Cap on how many domain agents a single query can fan out to, even if
+# more than this many domains' keywords match - a soft ceiling against
+# the "huge multi-agent swarm" section 47 explicitly warns against. There
+# are only 4 domains defined above anyway, so this mostly guards against
+# a future larger DOMAIN_KEYWORDS dict rather than doing much today.
+MAX_AGENTS = 3
+
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 # Groq retired llama-3.3-70b-versatile on 2026-08-16 (answer.py started
 # 404ing with "model does not exist or you do not have access to it" -

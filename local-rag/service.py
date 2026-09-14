@@ -27,7 +27,8 @@ from pydantic import BaseModel
 
 from common import DATA_DIR, CHUNKS_PATH, QDRANT_PATH, BM25_PATH
 from answer import generate_answer
-from retrieve import retrieve, _load_embedder, _load_reranker, _load_qdrant, _load_bm25, _load_chunk_texts
+from orchestrate import orchestrate
+from retrieve import _load_embedder, _load_reranker, _load_qdrant, _load_bm25, _load_chunk_texts
 
 LOG_FILE = DATA_DIR / "service.log"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -82,7 +83,7 @@ def health():
 @app.post("/query")
 def query(req: QueryRequest):
     t0 = time.time()
-    chunks, coverage = retrieve(req.question, top_k=req.top_k, rerank_top_n=req.rerank_top_n)
+    chunks, coverage = orchestrate(req.question, top_k=req.top_k, rerank_top_n=req.rerank_top_n)
     t1 = time.time()
     result = generate_answer(req.question, chunks, coverage=coverage)
     t2 = time.time()
