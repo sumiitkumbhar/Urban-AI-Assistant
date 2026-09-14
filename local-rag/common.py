@@ -19,12 +19,29 @@ from pathlib import Path
 LOCAL_RAG_DIR = Path(__file__).resolve().parent
 REPO_DIR = LOCAL_RAG_DIR.parent
 
-# Default corpus location: ~/Desktop/Corpus. Override with CORPUS_DIR in
-# the environment if you ever move it - using the home-relative default
-# rather than a relative "../../.." path from this folder, since the
-# exact nesting of Projects/ vs Desktop/ under your home directory isn't
-# something this code should have to assume.
-CORPUS_DIR = Path(os.environ.get("CORPUS_DIR", str(Path.home() / "Desktop" / "Corpus")))
+# Corpus location. This has already moved once - it started at
+# ~/Desktop/Corpus, then got reorganized (by hand, on the Mac) into
+# ~/Desktop/Urban AI Corpus/Corpus - so rather than hardcoding one path,
+# this picks whichever of the known locations actually exists on disk.
+# Override with CORPUS_DIR in the environment any time it moves again.
+def _resolve_corpus_dir():
+    override = os.environ.get("CORPUS_DIR")
+    if override:
+        return Path(override)
+    candidates = [
+        Path.home() / "Desktop" / "Urban AI Corpus" / "Corpus",  # current
+        Path.home() / "Desktop" / "Corpus",  # original location
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    # Nothing found - fall back to the current-layout guess. ingest.py
+    # checks CORPUS_DIR.exists() itself and prints a clear error naming
+    # this exact path plus the CORPUS_DIR env var override if it's wrong.
+    return candidates[0]
+
+
+CORPUS_DIR = _resolve_corpus_dir()
 
 # The triage manifest built during Phase 1 (corpus_manifest.json, sitting
 # beside this file) - filename -> bucket/domain/geography/doc_type/notes.
