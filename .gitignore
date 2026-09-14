@@ -33,3 +33,10 @@ scripts/_tmp_*.py
 scripts/_to_delete/
 stabilization-report.json
 .tmp-test/
+
+# Offline local RAG service (local-rag/) - Python venv and generated
+# indexes (Qdrant store, BM25 pickle, chunk jsonl, log files) are
+# machine-local build output, not source.
+local-rag/venv/
+local-rag/data/
+local-rag/__pycache__/

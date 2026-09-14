@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""One-time (re-run whenever the corpus changes) ingestion pipeline.
+
+Run this from your own Terminal, inside this folder's venv:
+
+    source venv/bin/activate
+    python3 ingest.py
+
+What it does, matching sections 37/39/40 of the architecture README:
+
+  1. Reads corpus_manifest.json (the Phase-1 triage) and keeps only files
+     tagged ACTIVE_CORE / ACTIVE_SUPPORTING - everything else (duplicates,
+     examination material, unrelated conservation-area docs, the
+     biodiversity calculator spreadsheets) is deliberately left out of
+     default retrieval.
+  2. Extracts text page-by-page with pypdf, splits it into ~1000-char
+     overlapping chunks, and keeps the source page number on every chunk
+     (this is an MVP paragraph/page chunker, not the structure-aware
+     chapter/section/clause detector the README describes as the target -
+     upgrading that is a good next increment once this baseline works).
+  3. Writes every chunk + its metadata to data/chunks.jsonl - the single
+     source of truth both indexes below are built from, so either index
+     can be rebuilt independently without re-parsing every PDF.
+  4. Embeds every chunk with a local sentence-transformers model and
+     writes them into a local (no server, no Docker) Qdrant collection on
+     disk under data/qdrant/.
+  5. Builds a BM25 lexical index over the same chunks and pickles it to
+     data/bm25_index.pkl - this is the "sparse/lexical search" half of
+     the hybrid retrieval in section 9, needed because dense embeddings
+     alone are unreliable for exact references like "Policy D3".
+
+Safe to re-run: it wipes and rebuilds data/ from scratch each time rather
+than trying to diff/update in place - simpler, and this corpus is small
+enough (76 files, ~290MB) that a full rebuild takes minutes, not hours.
+"""
+
+import json
+import pickle
+import re
+import shutil
+import sys
+import time
+
+from pypdf import PdfReader
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams, PointStruct
+from rank_bm25 import BM25Okapi
+from sentence_transformers import SentenceTransformer
+
+from common import (
+    CORPUS_DIR, MANIFEST_PATH, DATA_DIR, CHUNKS_PATH, QDRANT_PATH, BM25_PATH,
+    QDRANT_COLLECTION, EMBEDDING_MODEL_NAME, EMBEDDING_DIM,
+    CHUNK_TARGET_CHARS, CHUNK_OVERLAP_CHARS,
+)
+
+INGEST_LOG = DATA_DIR / "ingest.log"
+
+
+def log(msg):
+    line = f"[{time.strftime('%H:%M:%S')}] {msg}"
+    print(line, flush=True)
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        with open(INGEST_LOG, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+
+
+def load_manifest():
+    if not MANIFEST_PATH.exists():
+        log(f"ERROR: manifest not found at {MANIFEST_PATH}")
+        sys.exit(1)
+    with open(MANIFEST_PATH) as f:
+        rows = json.load(f)
+    active = [r for r in rows if r["bucket"] in ("ACTIVE_CORE", "ACTIVE_SUPPORTING")]
+    log(f"manifest loaded: {len(rows)} total files, {len(active)} eligible for ingestion "
+        f"(ACTIVE_CORE + ACTIVE_SUPPORTING)")
+    return active
+
+
+def extract_pages(pdf_path):
+    """Yields (page_number, text) for every page with extractable text.
+    Scanned/image-only pages come back empty and are skipped - this
+    corpus is almost entirely text-native PDFs (GOV.UK exports, council
+    SPDs), so OCR wasn't built for this first pass."""
+    try:
+        reader = PdfReader(str(pdf_path))
+    except Exception as e:
+        log(f"  WARN: could not open {pdf_path.name}: {e}")
+        return
+    for i, page in enumerate(reader.pages, start=1):
+        try:
+            text = page.extract_text() or ""
+        except Exception as e:
+            log(f"  WARN: page {i} of {pdf_path.name} failed to extract: {e}")
+            continue
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        if text:
+            yield i, text
+
+
+def chunk_page_text(text, target=CHUNK_TARGET_CHARS, overlap=CHUNK_OVERLAP_CHARS):
+    """Paragraph-aware sliding window: builds chunks out of whole
+    paragraphs so a chunk boundary doesn't land mid-sentence when
+    avoidable, falling back to a hard character split for a single
+    paragraph longer than the target on its own."""
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if not paragraphs:
+        paragraphs = [text]
+
+    chunks = []
+    current = ""
+    for para in paragraphs:
+        if len(para) > target * 2:
+            if current:
+                chunks.append(current)
+                current = ""
+            for i in range(0, len(para), target):
+                chunks.append(para[i:i + target])
+            continue
+        candidate = (current + "\n\n" + para) if current else para
+        if len(candidate) > target and current:
+            chunks.append(current)
+            # keep a tail of the previous chunk as overlap for continuity
+            tail = current[-overlap:] if len(current) > overlap else current
+            current = tail + "\n\n" + para
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def build_chunks(active_files):
+    chunks = []
+    for i, row in enumerate(active_files, start=1):
+        path = CORPUS_DIR / row["filename"]
+        if not path.exists():
+            log(f"  WARN: {row['filename']} listed in manifest but not found in {CORPUS_DIR}")
+            continue
+        log(f"[{i}/{len(active_files)}] extracting {row['filename']}")
+        doc_chunk_count = 0
+        for page_num, page_text in extract_pages(path):
+            for piece in chunk_page_text(page_text):
+                chunk_id = f"{len(chunks):08d}"
+                chunks.append({
+                    "chunk_id": chunk_id,
+                    "text": piece,
+                    "doc_filename": row["filename"],
+                    "page": page_num,
+                    "bucket": row["bucket"],
+                    "status": row["status"],
+                    "domain": row["domain"],
+                    "geography": row["geography"],
+                    "doc_type": row["doc_type"],
+                    "sha256": row["sha256"],
+                })
+                doc_chunk_count += 1
+        log(f"    -> {doc_chunk_count} chunks")
+    return chunks
+
+
+def write_chunks_jsonl(chunks):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    with open(CHUNKS_PATH, "w") as f:
+        for c in chunks:
+            f.write(json.dumps(c) + "\n")
+    log(f"wrote {len(chunks)} chunks to {CHUNKS_PATH}")
+
+
+def build_qdrant_index(chunks):
+    if QDRANT_PATH.exists():
+        shutil.rmtree(QDRANT_PATH)
+    QDRANT_PATH.mkdir(parents=True, exist_ok=True)
+
+    log(f"loading embedding model {EMBEDDING_MODEL_NAME} (first run downloads it, ~130MB)")
+    model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+
+    client = QdrantClient(path=str(QDRANT_PATH))
+    client.recreate_collection(
+        collection_name=QDRANT_COLLECTION,
+        vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
+    )
+
+    batch_size = 64
+    for start in range(0, len(chunks), batch_size):
+        batch = chunks[start:start + batch_size]
+        texts = [c["text"] for c in batch]
+        # Passages are embedded WITHOUT the query instruction prefix -
+        # BGE's asymmetric setup only prefixes the query side (see
+        # EMBEDDING_QUERY_PREFIX in common.py / retrieve.py).
+        vectors = model.encode(texts, show_progress_bar=False, normalize_embeddings=True)
+        points = [
+            PointStruct(id=int(c["chunk_id"]), vector=vec.tolist(), payload=c)
+            for c, vec in zip(batch, vectors)
+        ]
+        client.upsert(collection_name=QDRANT_COLLECTION, points=points)
+        if (start // batch_size) % 10 == 0:
+            log(f"  embedded {min(start + batch_size, len(chunks))}/{len(chunks)} chunks")
+
+    log(f"Qdrant collection '{QDRANT_COLLECTION}' built at {QDRANT_PATH} "
+        f"({len(chunks)} points)")
+
+
+def build_bm25_index(chunks):
+    tokenized = [re.findall(r"[a-z0-9]+", c["text"].lower()) for c in chunks]
+    bm25 = BM25Okapi(tokenized)
+    with open(BM25_PATH, "wb") as f:
+        pickle.dump({"bm25": bm25, "chunk_ids": [c["chunk_id"] for c in chunks]}, f)
+    log(f"BM25 index built and saved to {BM25_PATH}")
+
+
+def main():
+    log("=== Urban AI local RAG ingestion starting ===")
+    log(f"corpus dir: {CORPUS_DIR}")
+    if not CORPUS_DIR.exists():
+        log(f"ERROR: corpus dir does not exist: {CORPUS_DIR} "
+            f"(set CORPUS_DIR env var if it's somewhere else)")
+        sys.exit(1)
+
+    active_files = load_manifest()
+    chunks = build_chunks(active_files)
+    if not chunks:
+        log("ERROR: no chunks produced - nothing to index. Check the warnings above.")
+        sys.exit(1)
+    write_chunks_jsonl(chunks)
+    build_qdrant_index(chunks)
+    build_bm25_index(chunks)
+    log(f"=== done: {len(chunks)} chunks from {len(active_files)} documents indexed ===")
+    log("Try it: python3 query_cli.py \"what does policy d3 say\"")
+
+
+if __name__ == "__main__":
+    main()

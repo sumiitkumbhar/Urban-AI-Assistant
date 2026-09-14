@@ -1,0 +1,8 @@
+qdrant-client>=1.9,<2
+sentence-transformers>=2.6,<3
+rank-bm25>=0.2.2,<0.3
+pypdf>=4.0,<5
+groq>=0.9,<1
+python-dotenv>=1.0,<2
+fastapi>=0.110,<1
+uvicorn[standard]>=0.29,<1
