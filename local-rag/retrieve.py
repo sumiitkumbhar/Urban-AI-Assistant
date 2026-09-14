@@ -74,9 +74,13 @@ def _dense_search(query, top_k):
     model = _load_embedder()
     vec = model.encode(EMBEDDING_QUERY_PREFIX + query, normalize_embeddings=True).tolist()
     client = _load_qdrant()
-    hits = client.search(collection_name=QDRANT_COLLECTION, query_vector=vec, limit=top_k)
+    # client.search() was removed in newer qdrant-client (requirements.txt
+    # pins >=1.9,<2, and pip resolved that to 1.16.1, which dropped it) -
+    # query_points() is the current replacement; it returns a
+    # QueryResponse wrapping the same ScoredPoint list under .points.
+    result = client.query_points(collection_name=QDRANT_COLLECTION, query=vec, limit=top_k)
     # rank position, not raw score, is what RRF needs
-    return [str(h.id) for h in hits]
+    return [str(h.id) for h in result.points]
 
 
 def _sparse_search(query, top_k):

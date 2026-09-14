@@ -215,7 +215,11 @@ def build_qdrant_index(chunks):
     model = SentenceTransformer(EMBEDDING_MODEL_NAME)
 
     client = QdrantClient(path=str(QDRANT_PATH))
-    client.recreate_collection(
+    # QDRANT_PATH was just wiped and recreated above, so there's never an
+    # existing collection to replace here - create_collection() is the
+    # current, non-deprecated call (recreate_collection() warns it'll be
+    # removed, the same way client.search() already was - see retrieve.py).
+    client.create_collection(
         collection_name=QDRANT_COLLECTION,
         vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
     )
