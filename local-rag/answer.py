@@ -85,6 +85,99 @@ def _verify_and_repair(query, answer_text, context, client, model):
     return completion.choices[0].message.content
 
 
+def _extract_first_json_object(text):
+    """Groq's JSON-mode responses occasionally wrap the object in stray
+    prose or markdown fencing despite the prompt saying not to - find the
+    first balanced {...} block rather than assuming the whole response is
+    clean JSON. Returns None if no balanced object is found."""
+    start = text.find("{")
+    if start == -1:
+        return None
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return None
+
+
+GROUNDEDNESS_JUDGE_PROMPT = """You are a strict fact-checking judge. You do NOT answer questions - you only grade whether an already-written ANSWER is actually backed by the given SOURCE EXCERPTS.
+
+Score groundedness 0-100:
+- 100 = every substantive claim in the ANSWER is directly supported by the SOURCE EXCERPTS.
+- 50 = some claims are supported, others are not backed by the excerpts (invented, assumed, or from general knowledge instead of the excerpts).
+- 0 = the ANSWER is unsupported by, or contradicts, the SOURCE EXCERPTS.
+
+Do not reward good writing, confident tone, or plausibility. Only reward factual grounding in the given excerpts. List any specific claims in the ANSWER that are NOT backed by the excerpts (empty array if none).
+
+Respond with JSON only, no other text, no markdown fencing:
+{"groundedness": <integer 0-100>, "unsupportedClaims": ["short claim", "..."]}"""
+
+
+def _check_groundedness(query, answer_text, context, client, model):
+    """Claim-level groundedness (architecture-plan section 52/Phase 5's
+    "claim-level groundedness" item) - Ragas-style "faithfulness"
+    LLM-as-judge, deliberately mirroring the cloud path's own
+    checkGroundedness() in app/api/rag-chat/route.ts field-for-field
+    (same 0-100 scale, same {groundedness, unsupportedClaims} shape) so
+    ChatInterface.tsx's existing groundedness badge - already built for
+    the cloud path, previously always null for local mode because this
+    check didn't exist here - renders identically for both.
+
+    This is a genuinely different signal from retrieve.py's
+    Corrective-RAG confidence: confidence asks "did we find material
+    that looks relevant to the question", this asks "does the answer we
+    actually wrote say anything the retrieved material doesn't support."
+    A high-confidence retrieval can still produce a claim the model
+    invented; a low-confidence retrieval can still produce an answer
+    that honestly and fully sticks to the thin evidence it had. Runs
+    unconditionally whenever there's a generated answer to grade (not
+    gated by confidence, unlike _verify_and_repair() above) - grading
+    only the answers retrieve() already flagged as shaky would defeat
+    the point of an independent check. Best-effort: any failure (rate
+    limit, malformed JSON, network) yields (None, []), same as the cloud
+    path's own fallback, rather than blocking the response."""
+    try:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": GROUNDEDNESS_JUDGE_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"QUESTION:\n{query}\n\nSOURCE EXCERPTS:\n{context}"
+                        f"\n\nANSWER TO GRADE:\n{answer_text}"
+                    ),
+                },
+            ],
+            temperature=0.0,
+            max_tokens=600,
+        )
+        raw = (completion.choices[0].message.content or "").strip()
+        json_text = _extract_first_json_object(raw)
+        if not json_text:
+            return None, []
+
+        import json
+
+        parsed = json.loads(json_text)
+        score = parsed.get("groundedness")
+        groundedness = (
+            max(0, min(100, round(score))) if isinstance(score, (int, float)) else None
+        )
+        claims = parsed.get("unsupportedClaims")
+        unsupported_claims = (
+            [c for c in claims if isinstance(c, str) and c.strip()][:5]
+            if isinstance(claims, list) else []
+        )
+        return groundedness, unsupported_claims
+    except Exception:
+        return None, []
+
+
 def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL):
     """coverage is the dict retrieve() now returns alongside chunks
     (architecture plan section 52) - optional so this still works if a
@@ -98,6 +191,8 @@ def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL):
             "citations": [],
             "confidence": confidence or "low",
             "verified": False,
+            "groundedness": None,
+            "unsupported_claims": [],
         }
 
     load_dotenv_from_repo()
@@ -112,6 +207,8 @@ def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL):
             "retrieved_only": True,
             "confidence": confidence,
             "verified": False,
+            "groundedness": None,
+            "unsupported_claims": [],
         }
 
     context, citations = build_context(chunks)
@@ -154,9 +251,15 @@ def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL):
         except Exception:
             pass
 
+    groundedness, unsupported_claims = _check_groundedness(
+        query, answer_text, context, client, model
+    )
+
     return {
         "answer": answer_text,
         "citations": citations,
         "confidence": confidence,
         "verified": verified,
+        "groundedness": groundedness,
+        "unsupported_claims": unsupported_claims,
     }

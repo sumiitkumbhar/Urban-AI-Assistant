@@ -55,10 +55,21 @@ def main():
     for reason in coverage.get("reasons", []):
         print(f"  - {reason}")
     if result.get("verified"):
-        print("  (answer passed an extra groundedness check before being shown)")
+        print("  (answer passed an extra Self-RAG repair/verification pass before being shown)")
     related = coverage.get("related_references")
     if related:
         print(f"  related references (via cross-reference graph): {', '.join(related)}")
+
+    groundedness = result.get("groundedness")
+    if groundedness is not None:
+        print(f"\n=== Groundedness: {groundedness}/100 ===")
+        unsupported = result.get("unsupported_claims") or []
+        if unsupported:
+            print("  Claims NOT backed by the retrieved evidence:")
+            for claim in unsupported:
+                print(f"  - {claim}")
+        else:
+            print("  Every claim checked out against the retrieved evidence.")
 
     agents = coverage.get("agents") or []
     if len(agents) > 1:

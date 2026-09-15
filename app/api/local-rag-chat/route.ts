@@ -144,8 +144,18 @@ export async function POST(req: Request) {
         confidenceLabel != null ? CONFIDENCE_SCORE[confidenceLabel] ?? null : null,
       confidenceLabel,
       webFallbackUsed: false,
-      groundedness: null,
-      unsupportedClaims: [],
+      // local-rag now runs its own claim-level groundedness judge
+      // (local-rag/answer.py's _check_groundedness(), added alongside
+      // this route - deliberately mirroring the cloud path's own
+      // checkGroundedness() in app/api/rag-chat/route.ts field-for-
+      // field) instead of always reporting null, so the groundedness
+      // badge in ChatInterface.tsx now renders for local mode too, not
+      // just Cloud.
+      groundedness:
+        typeof data?.groundedness === "number" ? data.groundedness : null,
+      unsupportedClaims: Array.isArray(data?.unsupported_claims)
+        ? data.unsupported_claims
+        : [],
       agents: data?.coverage?.agents,
       verified: data?.verified,
       source: "local-rag",
