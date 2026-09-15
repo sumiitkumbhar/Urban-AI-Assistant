@@ -28,6 +28,7 @@ from pydantic import BaseModel
 from common import DATA_DIR, CHUNKS_PATH, QDRANT_PATH, BM25_PATH
 from answer import generate_answer
 from orchestrate import orchestrate
+from site_context import build_site_context
 from retrieve import _load_embedder, _load_reranker, _load_qdrant, _load_bm25, _load_chunk_texts
 
 LOG_FILE = DATA_DIR / "service.log"
@@ -104,6 +105,53 @@ def query(req: QueryRequest):
     return {
         **result,
         "coverage": coverage,
+        "retrieval_ms": round((t1 - t0) * 1000, 1),
+        "generation_ms": round((t2 - t1) * 1000, 1),
+    }
+
+
+class SiteAnswerRequest(BaseModel):
+    # Site constraints/context/policy engine (architecture-plan section
+    # 27's final step) - given a site, ask GIS/PostGIS
+    # (local-rag/gis/gis_lookup.py, a separate database from this
+    # service's own Qdrant index) what constraints actually apply, turn
+    # the real matches into a policy question, and let this service's
+    # own orchestrate()/generate_answer() answer it exactly like any
+    # other query - see site_context.py's module docstring.
+    postcode: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+    question: str | None = None
+    top_k: int = 25
+    rerank_top_n: int = 8
+
+
+@app.post("/site-answer")
+def site_answer(req: SiteAnswerRequest):
+    t0 = time.time()
+    ctx = build_site_context(
+        postcode=req.postcode, lat=req.lat, lon=req.lon, extra_question=req.question,
+        top_k=req.top_k, rerank_top_n=req.rerank_top_n,
+    )
+    if "error" in ctx:
+        return ctx
+    t1 = time.time()
+    result = generate_answer(ctx["policy_question"], ctx["chunks"], coverage=ctx["coverage"])
+    t2 = time.time()
+
+    logger.info(
+        f"site-answer postcode={req.postcode!r} lat={req.lat} lon={req.lon} "
+        f"geography={ctx['geography']} question={ctx['policy_question']!r} "
+        f"confidence={ctx['coverage']['confidence']} "
+        f"retrieval_ms={(t1-t0)*1000:.0f} generation_ms={(t2-t1)*1000:.0f}"
+    )
+    return {
+        **result,
+        "site_constraints": ctx["site_constraints"],
+        "geography": ctx["geography"],
+        "policy_question": ctx["policy_question"],
+        "map_citations": ctx["map_citations"],
+        "coverage": ctx["coverage"],
         "retrieval_ms": round((t1 - t0) * 1000, 1),
         "generation_ms": round((t2 - t1) * 1000, 1),
     }
