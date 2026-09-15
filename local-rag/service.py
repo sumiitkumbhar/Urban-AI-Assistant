@@ -72,6 +72,12 @@ class QueryRequest(BaseModel):
     question: str
     top_k: int = 25
     rerank_top_n: int = 8
+    # Council/geography scoping (added 2026-09-15) - mirrors the live
+    # app's Supabase filter_lpa_slug semantics: None means unscoped
+    # (search everything), a value like "westminster" restricts local
+    # material to that geography while national documents (e.g. the
+    # NPPF) remain in scope regardless. See retrieve.py's docstring.
+    geography: str | None = None
 
 
 @app.get("/health")
@@ -83,7 +89,10 @@ def health():
 @app.post("/query")
 def query(req: QueryRequest):
     t0 = time.time()
-    chunks, coverage = orchestrate(req.question, top_k=req.top_k, rerank_top_n=req.rerank_top_n)
+    chunks, coverage = orchestrate(
+        req.question, top_k=req.top_k, rerank_top_n=req.rerank_top_n,
+        geography_filter=req.geography,
+    )
     t1 = time.time()
     result = generate_answer(req.question, chunks, coverage=coverage)
     t2 = time.time()

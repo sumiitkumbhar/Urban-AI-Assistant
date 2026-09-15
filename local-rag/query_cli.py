@@ -3,6 +3,13 @@
 
     source venv/bin/activate
     python3 query_cli.py "what does policy d3 say about design"
+
+Optionally scope to a council/geography (mirrors the live app's
+filter_lpa_slug - a "national" chunk like the NPPF is always in scope,
+only local material outside the given geography is excluded):
+
+    python3 query_cli.py -g westminster "what does policy d3 say about design"
+    python3 query_cli.py --geography westminster "..."
 """
 
 import sys
@@ -13,13 +20,25 @@ from orchestrate import orchestrate
 
 
 def main():
-    if len(sys.argv) < 2:
-        print('Usage: python3 query_cli.py "your question here"')
+    args = sys.argv[1:]
+    geography = None
+    for flag in ("-g", "--geography"):
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 >= len(args):
+                print(f"Usage: {flag} <geography> (e.g. westminster)")
+                sys.exit(1)
+            geography = args[i + 1]
+            del args[i:i + 2]
+            break
+
+    if not args:
+        print('Usage: python3 query_cli.py ["-g <geography>"] "your question here"')
         sys.exit(1)
-    query = " ".join(sys.argv[1:])
+    query = " ".join(args)
 
     t0 = time.time()
-    chunks, coverage = orchestrate(query)
+    chunks, coverage = orchestrate(query, geography_filter=geography)
     t1 = time.time()
     result = generate_answer(query, chunks, coverage=coverage)
     t2 = time.time()

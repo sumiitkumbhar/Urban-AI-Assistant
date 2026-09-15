@@ -205,7 +205,7 @@ def assess_coverage(results, references):
     }
 
 
-def _retrieve_once(query, top_k, rerank_top_n, references, expanded_references, domain_filter=None):
+def _retrieve_once(query, top_k, rerank_top_n, references, expanded_references, domain_filter=None, geography_filter=None):
     # Dense (semantic/Qdrant) and sparse (BM25) search both always run,
     # on every query, unaffected by whether references/expanded_references
     # are empty - the graph signal below only re-scores what they found.
@@ -232,17 +232,19 @@ def _retrieve_once(query, top_k, rerank_top_n, references, expanded_references, 
     # theme of the raw query text still gets a fair, wide net to be
     # found in. Both are cheap local operations (embedded Qdrant +
     # in-memory BM25 over the full corpus) even at this width.
-    search_top_k = top_k * 8 if domain_filter else top_k
+    scoped = domain_filter or geography_filter
+    search_top_k = top_k * 8 if scoped else top_k
     dense_ids = _dense_search(query, search_top_k)
     sparse_ids = _sparse_search(query, search_top_k)
     fused = _reciprocal_rank_fusion(dense_ids, sparse_ids)
 
     chunks = _load_chunk_texts()
 
-    # With dense/sparse already widened above when domain-scoped, look at
-    # the whole fused list rather than re-truncating it a second time -
-    # it's already bounded (at most 2*search_top_k entries).
-    fused_window = len(fused) if domain_filter else top_k * 2
+    # With dense/sparse already widened above when scoped (domain and/or
+    # geography), look at the whole fused list rather than re-truncating
+    # it a second time - it's already bounded (at most 2*search_top_k
+    # entries).
+    fused_window = len(fused) if scoped else top_k * 2
     candidates = []
     for chunk_id, rrf_score in fused[:fused_window]:
         chunk = chunks.get(chunk_id)
@@ -256,6 +258,22 @@ def _retrieve_once(query, top_k, rerank_top_n, references, expanded_references, 
             # sparse search either way, just narrowed before rerank -
             # cheaper than maintaining N separate Qdrant collections for
             # a corpus this size (185 documents).
+            continue
+        if geography_filter and chunk.get("geography") not in (geography_filter, "national"):
+            # Council/geography scoping - added 2026-09-15, mirroring the
+            # live app's Supabase migration (sql/2026-09-07-council-aware-
+            # retrieval.sql) filter_lpa_slug semantics exactly: a national
+            # document (the NPPF) is always in scope regardless of which
+            # council/geography was asked about, only local material
+            # outside the requested geography is excluded. This closes
+            # the same "policy bleed" gap that migration fixed on the
+            # cloud path - previously `geography` was stored on every
+            # chunk (see corpus_manifest.json) but never actually
+            # enforced here, only displayed by query_cli.py. Simplified
+            # to an exact string match (no hierarchy - e.g. "westminster"
+            # does not automatically also match a "greater_london" chunk)
+            # since nothing else in the corpus currently encodes that
+            # hierarchy either; revisit if/when that's needed.
             continue
         boost = 0.0
         text_lower = chunk["text"].lower()
@@ -293,7 +311,7 @@ def _retrieve_once(query, top_k, rerank_top_n, references, expanded_references, 
     return results
 
 
-def retrieve(query, top_k=25, rerank_top_n=8, allow_broaden=True, domain_filter=None):
+def retrieve(query, top_k=25, rerank_top_n=8, allow_broaden=True, domain_filter=None, geography_filter=None):
     """Returns (chunks, coverage): up to rerank_top_n chunk dicts (full
     text + metadata), best first, after dense (semantic) + sparse
     fusion, graph-signal boosting, and local cross-encoder reranking -
@@ -322,12 +340,19 @@ def retrieve(query, top_k=25, rerank_top_n=8, allow_broaden=True, domain_filter=
     None (the default) means unscoped, exactly the pre-orchestration
     behaviour - orchestrate.py itself decides when scoping is worth it
     for a given query; retrieve() just needs to know how to do it when
-    asked."""
+    asked.
+
+    geography_filter (council/geography scoping, added 2026-09-15):
+    when set, scopes this call to chunks whose `geography` metadata
+    exactly matches, plus anything tagged "national" (e.g. the NPPF)
+    regardless of which geography was asked for - see the inline comment
+    in _retrieve_once() for the full reasoning. None (the default) means
+    unscoped. Independent of domain_filter - both can be set at once."""
     references = _exact_reference_boost(query)
     expanded_references = _graph_expand_references(references)
 
     results = _retrieve_once(
-        query, top_k, rerank_top_n, references, expanded_references, domain_filter
+        query, top_k, rerank_top_n, references, expanded_references, domain_filter, geography_filter
     )
     coverage = assess_coverage(results, references)
     coverage["related_references"] = expanded_references
@@ -335,7 +360,8 @@ def retrieve(query, top_k=25, rerank_top_n=8, allow_broaden=True, domain_filter=
     if coverage["confidence"] == "low" and allow_broaden and top_k < 75:
         wider_top_k = min(top_k * 3, 75)
         wider_results = _retrieve_once(
-            query, wider_top_k, rerank_top_n, references, expanded_references, domain_filter
+            query, wider_top_k, rerank_top_n, references, expanded_references,
+            domain_filter, geography_filter
         )
         wider_coverage = assess_coverage(wider_results, references)
         wider_coverage["broadened_from_top_k"] = top_k

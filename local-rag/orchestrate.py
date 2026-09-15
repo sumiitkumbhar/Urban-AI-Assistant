@@ -67,14 +67,15 @@ def classify_domains(query):
     return matched[:MAX_AGENTS]
 
 
-def _run_agent(query, domain, top_k, rerank_top_n):
+def _run_agent(query, domain, top_k, rerank_top_n, geography_filter=None):
     """One domain-scoped retrieve() call, wrapped so a failure here
     (e.g. a corrupted index, an unexpected exception in a dependency)
     degrades that one agent instead of the whole request - section 14's
     'graceful degradation' for optional branches."""
     try:
         chunks, coverage = retrieve(
-            query, top_k=top_k, rerank_top_n=rerank_top_n, domain_filter=domain
+            query, top_k=top_k, rerank_top_n=rerank_top_n, domain_filter=domain,
+            geography_filter=geography_filter,
         )
         return {
             "domain": domain,
@@ -167,7 +168,7 @@ def _fuse(agent_results, rerank_top_n):
     return fused_chunks, coverage
 
 
-def orchestrate(query, top_k=25, rerank_top_n=8):
+def orchestrate(query, top_k=25, rerank_top_n=8, geography_filter=None):
     """Top-level entry point for query_cli.py/service.py - same
     (chunks, coverage) return shape as retrieve(), so it's a drop-in
     replacement and generate_answer() needs no changes.
@@ -181,13 +182,20 @@ def orchestrate(query, top_k=25, rerank_top_n=8):
     concurrency across the shared embedder/reranker models is a later
     optimization, not a correctness requirement, since MAX_AGENTS caps
     this at 3 calls) and then fused into one evidence set for exactly
-    one downstream Groq synthesis call."""
+    one downstream Groq synthesis call.
+
+    geography_filter is passed straight through to every retrieve()/
+    _run_agent() call this makes (single-domain or fanned-out) - see
+    retrieve()'s own docstring for its semantics (a chunk tagged
+    "national" is always in scope; anything else must match the given
+    value)."""
     domains = classify_domains(query)
 
     if len(domains) <= 1:
         domain_filter = domains[0] if domains else None
         chunks, coverage = retrieve(
-            query, top_k=top_k, rerank_top_n=rerank_top_n, domain_filter=domain_filter
+            query, top_k=top_k, rerank_top_n=rerank_top_n, domain_filter=domain_filter,
+            geography_filter=geography_filter,
         )
         coverage["agents"] = [{
             "domain": domain_filter or "general",
@@ -198,5 +206,8 @@ def orchestrate(query, top_k=25, rerank_top_n=8):
         coverage["domains_queried"] = [domain_filter] if domain_filter else []
         return chunks, coverage
 
-    agent_results = [_run_agent(query, d, top_k, rerank_top_n) for d in domains]
+    agent_results = [
+        _run_agent(query, d, top_k, rerank_top_n, geography_filter=geography_filter)
+        for d in domains
+    ]
     return _fuse(agent_results, rerank_top_n)
