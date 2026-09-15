@@ -65,7 +65,8 @@ from sentence_transformers import SentenceTransformer
 from common import (
     CORPUS_DIR, MANIFEST_PATH, DATA_DIR, CHUNKS_PATH, QDRANT_PATH, BM25_PATH,
     GRAPH_PATH, QDRANT_COLLECTION, EMBEDDING_MODEL_NAME, EMBEDDING_DIM,
-    CHUNK_TARGET_CHARS, CHUNK_OVERLAP_CHARS,
+    CHUNK_TARGET_CHARS, CHUNK_OVERLAP_CHARS, MAP_GRAPHIC_FILENAMES,
+    MAP_DOCUMENTS_PATH,
 )
 from graph_build import build_graph, save_graph
 
@@ -163,6 +164,39 @@ def chunk_page_text(text, target=CHUNK_TARGET_CHARS, overlap=CHUNK_OVERLAP_CHARS
     if current:
         chunks.append(current)
     return chunks
+
+
+def split_out_map_documents(active_files):
+    """Separates pure map-graphic PDFs (MAP_GRAPHIC_FILENAMES - see
+    common.py for why these are excluded from text chunking) from
+    everything that should go through the normal extract/chunk/embed
+    pipeline below. Returns (text_files, map_files)."""
+    text_files = [r for r in active_files if r["filename"] not in MAP_GRAPHIC_FILENAMES]
+    map_files = [r for r in active_files if r["filename"] in MAP_GRAPHIC_FILENAMES]
+    return text_files, map_files
+
+
+def write_map_documents(map_files):
+    """Sidecar index of map-graphic PDFs that were excluded from the text
+    index, for the planned visual-citation feature (attach the real map
+    next to a GIS conservation-area/policy-area lookup result instead of
+    text-searching it) - not consumed by anything yet, but keeps the list
+    in one machine-readable place rather than re-deriving it later."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "filename": r["filename"],
+            "doc_type": r["doc_type"],
+            "domain": r["domain"],
+            "geography": r["geography"],
+            "bucket": r["bucket"],
+        }
+        for r in map_files
+    ]
+    with open(MAP_DOCUMENTS_PATH, "w") as f:
+        json.dump(records, f, indent=2)
+    log(f"wrote {len(records)} map-graphic documents to {MAP_DOCUMENTS_PATH} "
+        f"(excluded from text index - visual reference only)")
 
 
 def build_chunks(active_files):
@@ -270,7 +304,12 @@ def main():
         sys.exit(1)
 
     active_files = load_manifest()
-    chunks = build_chunks(active_files)
+    text_files, map_files = split_out_map_documents(active_files)
+    log(f"{len(map_files)} of {len(active_files)} files are map-graphic PDFs - "
+        f"excluded from text chunking (see MAP_GRAPHIC_FILENAMES in common.py), "
+        f"{len(text_files)} go through the normal pipeline")
+    write_map_documents(map_files)
+    chunks = build_chunks(text_files)
     if not chunks:
         log("ERROR: no chunks produced - nothing to index. Check the warnings above.")
         sys.exit(1)
@@ -286,7 +325,8 @@ def main():
     save_graph(reference_graph)
     log(f"reference graph saved to {GRAPH_PATH}")
 
-    log(f"=== done: {len(chunks)} chunks from {len(active_files)} documents indexed ===")
+    log(f"=== done: {len(chunks)} chunks from {len(text_files)} documents indexed "
+        f"({len(map_files)} map-graphic PDFs excluded, see above) ===")
     log("Try it: python3 query_cli.py \"what does policy d3 say\"")
 
 

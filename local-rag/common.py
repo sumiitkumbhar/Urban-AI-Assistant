@@ -57,6 +57,54 @@ QDRANT_PATH = DATA_DIR / "qdrant"
 BM25_PATH = DATA_DIR / "bm25_index.pkl"
 GRAPH_PATH = DATA_DIR / "reference_graph.pkl"
 QDRANT_COLLECTION = "regulatory_knowledge"  # matches section 21 of the README
+MAP_DOCUMENTS_PATH = DATA_DIR / "map_documents.json"
+
+# Map-graphic PDFs are pure scanned/vector maps (conservation-area
+# boundary maps, borough Policies Maps) that carry no real prose - their
+# "extracted text" is scrambled street-label fragments off a graphic,
+# e.g. "Pl ON W AT E RO SO AD RD N'S PL Ms EB E YL AR..." (confirmed by
+# hand against Bayswater conservation area map.pdf and the 31MB
+# city-plan-2019-2040-adoption-policies-map.pdf). Chunking and embedding
+# that noise doesn't help retrieval - it dilutes the index with junk
+# vectors that can outrank real policy text for no reason. Excluded from
+# ingest.py's text-chunking pipeline as of 2026-09-15; ingest.py instead
+# records them to MAP_DOCUMENTS_PATH as a lightweight index for a planned
+# visual-citation feature (attach the real map alongside a GIS
+# conservation-area/policy-area lookup result, instead of text-searching
+# it) - see local-rag-status.md's "Map documents" section.
+#
+# This is an explicit filename list, not a substring/doc_type rule,
+# because doc_type alone doesn't distinguish map graphics from real text
+# documents that happen to be *about* a map - e.g. "CORE_004 Schedule of
+# changes to Policies Map.pdf" and "CORE_006 Addendum to Schedule of
+# Changes to Policies Map (I) (November 2024).pdf" share the "City Plan
+# Review examination material" doc_type with the actual map PDFs, but are
+# genuine prose/tabular schedules (checked by hand: CORE_004 page 1 reads
+# "Regulation 19 Consultation / March 2024", not map-graphic noise) and
+# stay in the normal text pipeline.
+MAP_GRAPHIC_FILENAMES = frozenset({
+    "Aldridge and Leamington Road villas conservation area map.pdf",
+    "Bayswater conservation area map.pdf",
+    "Belgravia conservation area map.pdf",
+    "CORE_003 Reg19 Policies Map.pdf",
+    "CORE_005 Submission Policies Map.pdf",
+    "Charlotte Street West conservation area map.pdf",
+    "Chinatown conservation area map.pdf",
+    "Covent Garden conservation area map.pdf",
+    "Dolphin Square conservation area map.pdf",
+    "Dorset Square conservation area map.pdf",
+    "East Marylebone conservation area map.pdf",
+    "Fisherton Street Estate conservation area map.pdf",
+    "Grosvenor Gardens conservation area map.pdf",
+    "Hallfield Estate conservation area map.pdf",
+    "Hanway Street conservation area map.pdf",
+    "Haymarket conservation area map.pdf",
+    "Knightbridge Green conservation area map.pdf",
+    "Knightsbridge conservation area map.pdf",
+    "churchillgardensmap.pdf",
+    "city-plan-2019-2040-adoption-policies-map-january-2026.pdf",
+})
+
 
 # Exact-reference regex patterns - originally lived only in retrieve.py's
 # exact-reference boost, centralized here now that graph_build.py also
