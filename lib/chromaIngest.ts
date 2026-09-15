@@ -166,10 +166,35 @@ async function ingestOnePdf(
         .from("chunks")
         .select("id", { count: "exact", head: true })
         .eq("document_id", existing.id);
+
+      if ((count ?? 0) > 0) {
+        console.log(
+          `  skip (already ingested): ${title} -> document_id=${existing.id}, ${count} chunks`
+        );
+        return { file: file.name, document_id: existing.id as number, chunks: count as number };
+      }
+
+      // A documents row exists for this exact content but has zero chunks -
+      // a leftover shell from a prior run that inserted the document row
+      // then crashed (e.g. a Gemini 429) before any chunk embedding
+      // finished. Treating that as "already ingested" (the old behaviour)
+      // silently and permanently stranded this council with no real
+      // content: content_sha256 has a unique index, so every future retry
+      // would hit this same empty row and skip again forever. Delete the
+      // empty shell and fall through to a normal fresh insert below.
       console.log(
-        `  skip (already ingested): ${title} -> document_id=${existing.id}, ${count ?? 0} chunks`
+        `  found empty leftover document (id=${existing.id}, 0 chunks) for ${title} - ` +
+          `deleting it and re-ingesting from scratch`
       );
-      return { file: file.name, document_id: existing.id as number, chunks: count ?? 0 };
+      const { error: deleteError } = await supabase
+        .from("documents")
+        .delete()
+        .eq("id", existing.id);
+      if (deleteError) {
+        throw new Error(
+          `Failed to delete empty leftover document ${existing.id} for ${file.name}: ${deleteError.message}`
+        );
+      }
     }
   }
 
