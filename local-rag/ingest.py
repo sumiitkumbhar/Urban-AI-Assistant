@@ -55,6 +55,7 @@ import re
 import shutil
 import sys
 import time
+from pathlib import Path
 
 from pypdf import PdfReader
 from qdrant_client import QdrantClient
@@ -101,6 +102,24 @@ def load_manifest():
         f"(skipping {skipped} confirmed exact-duplicate copies) - by bucket: "
         f"{dict(bucket_counts)}")
     return active
+
+
+def load_council_manifest():
+    """UK council Local Plans downloaded by council_ingest.py (data/
+    council_manifest.json) - a separate, additive track from the curated
+    corpus_manifest.json above. Returns [] if council_ingest.py hasn't
+    been run yet (or found nothing to download), so this is a no-op for
+    anyone who hasn't touched that script - the existing corpus-only
+    pipeline is unaffected."""
+    from common import COUNCIL_MANIFEST_PATH  # local import: optional dependency
+    if not COUNCIL_MANIFEST_PATH.exists():
+        return []
+    with open(COUNCIL_MANIFEST_PATH) as f:
+        rows = json.load(f)
+    if rows:
+        log(f"council manifest loaded: {len(rows)} council Local Plan(s) "
+            f"(from council_ingest.py, see data/council_download_status.json)")
+    return rows
 
 
 def extract_pages(pdf_path):
@@ -202,7 +221,11 @@ def write_map_documents(map_files):
 def build_chunks(active_files):
     chunks = []
     for i, row in enumerate(active_files, start=1):
-        path = CORPUS_DIR / row["filename"]
+        # Council files (council_ingest.py) store an absolute path already
+        # (they live under data/council_pdfs/, not the curated CORPUS_DIR);
+        # the original corpus's filenames are always relative to CORPUS_DIR.
+        raw_path = Path(row["filename"])
+        path = raw_path if raw_path.is_absolute() else CORPUS_DIR / row["filename"]
         if not path.exists():
             log(f"  WARN: {row['filename']} listed in manifest but not found in {CORPUS_DIR}")
             continue
@@ -304,6 +327,8 @@ def main():
         sys.exit(1)
 
     active_files = load_manifest()
+    council_files = load_council_manifest()
+    active_files += council_files
     text_files, map_files = split_out_map_documents(active_files)
     log(f"{len(map_files)} of {len(active_files)} files are map-graphic PDFs - "
         f"excluded from text chunking (see MAP_GRAPHIC_FILENAMES in common.py), "

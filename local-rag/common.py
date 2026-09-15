@@ -59,6 +59,12 @@ GRAPH_PATH = DATA_DIR / "reference_graph.pkl"
 QDRANT_COLLECTION = "regulatory_knowledge"  # matches section 21 of the README
 MAP_DOCUMENTS_PATH = DATA_DIR / "map_documents.json"
 
+# UK council Local Plans (council_ingest.py) - a separate, additive
+# manifest from MANIFEST_PATH above, folded in by ingest.py's
+# load_council_manifest(). See council_ingest.py's module docstring for
+# the full two-step download-then-index design.
+COUNCIL_MANIFEST_PATH = DATA_DIR / "council_manifest.json"
+
 # Map-graphic PDFs are pure scanned/vector maps (conservation-area
 # boundary maps, borough Policies Maps) that carry no real prose - their
 # "extracted text" is scrambled street-label fragments off a graphic,
