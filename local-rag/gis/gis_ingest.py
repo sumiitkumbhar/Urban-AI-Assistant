@@ -49,11 +49,18 @@ from gis_common import (
     get_conn,
 )
 
-PAGE_LIMIT = 200
-# planning.data.gov.uk has been observed to be slow/flaky in practice (a
-# real ingestion run hit a 30s read timeout on a small national-dataset
-# request) - bumped from 30s and given real retries below rather than
-# just failing the whole run on one slow response.
+# Diagnosed 2026-09-15 against a real ingestion run: this is NOT a
+# server outage, rate-limit, or a TLS-stack bug (all three were tested
+# and ruled out - the API is operational, and neither request headers
+# nor streamed reads changed anything). It's simply that LPA boundary
+# polygons are large (measured ~130-190KB/row) and effective download
+# throughput to this host was measured at a consistent ~600-650 KB/s
+# (limit=10 -> 1.9MB/3.2s, limit=20 -> 3.3MB/4.9s, limit=50 -> 6.3MB/10.4s,
+# limit=100 -> 12.6MB/19.7s - all linear). At limit=200 that's a
+# ~25-38MB page, 40-60+s to download - right at/over any reasonable
+# timeout. limit=50 keeps each page to ~10s, a comfortable margin under
+# REQUEST_TIMEOUT even with a slow connection.
+PAGE_LIMIT = 50
 REQUEST_TIMEOUT = 60
 REQUEST_RETRIES = 4
 REQUEST_RETRY_BACKOFF_S = 3  # 3s, 6s, 12s, 24s between attempts
@@ -73,8 +80,6 @@ def _get_with_retry(url, params):
     for attempt in range(REQUEST_RETRIES + 1):
         try:
             resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
-            if resp.status_code >= 500:
-                resp.raise_for_status()  # goes to except below, gets retried
             resp.raise_for_status()
             return resp
         except requests.exceptions.HTTPError as e:
