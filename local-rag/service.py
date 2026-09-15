@@ -16,6 +16,7 @@ Port 8010 is deliberately different from voice-service's 8008 and the
 Next.js app's 3000, so all three can run side by side.
 """
 
+import json
 import logging
 import os
 import time
@@ -23,10 +24,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from common import DATA_DIR, CHUNKS_PATH, QDRANT_PATH, BM25_PATH
-from answer import generate_answer
+from answer import generate_answer, stream_answer
 from orchestrate import orchestrate
 from site_context import build_site_context
 from retrieve import _load_embedder, _load_reranker, _load_qdrant, _load_bm25, _load_chunk_texts
@@ -108,6 +110,58 @@ def query(req: QueryRequest):
         "retrieval_ms": round((t1 - t0) * 1000, 1),
         "generation_ms": round((t2 - t1) * 1000, 1),
     }
+
+
+@app.post("/query/stream")
+def query_stream(req: QueryRequest):
+    """Server-Sent Events counterpart to /query (architecture-plan Phase
+    5's "streaming" item) - retrieval (orchestrate()) still runs to
+    completion first, same as /query, since there's nothing to stream
+    from a local Qdrant/BM25 lookup that typically finishes in a couple
+    of seconds; only the Groq generation call - the actual latency a
+    user waits through - streams token-by-token via answer.py's
+    stream_answer(). Three named SSE event types, in order:
+
+      event: coverage  - the retrieval coverage dict, sent immediately
+                          (before any answer text) so a client can show
+                          the confidence/agents badge right away.
+      event: delta      - {"text": "..."} for each token/fragment as it
+                          arrives from Groq.
+      event: done        - exactly once, the final result (answer,
+                          citations, confidence, verified, groundedness,
+                          unsupported_claims, coverage, timings) - see
+                          stream_answer()'s docstring for why this final
+                          answer can differ slightly from the
+                          concatenation of every delta.
+    """
+    t0 = time.time()
+    chunks, coverage = orchestrate(
+        req.question, top_k=req.top_k, rerank_top_n=req.rerank_top_n,
+        geography_filter=req.geography,
+    )
+    t1 = time.time()
+
+    def event_stream():
+        yield f"event: coverage\ndata: {json.dumps(coverage)}\n\n"
+        for kind, payload in stream_answer(req.question, chunks, coverage=coverage):
+            if kind == "delta":
+                yield f"event: delta\ndata: {json.dumps({'text': payload})}\n\n"
+            else:  # "done"
+                t2 = time.time()
+                result = {
+                    **payload,
+                    "coverage": coverage,
+                    "retrieval_ms": round((t1 - t0) * 1000, 1),
+                    "generation_ms": round((t2 - t1) * 1000, 1),
+                }
+                logger.info(
+                    f"query(stream)={req.question!r} chunks={len(chunks)} "
+                    f"confidence={coverage['confidence']} "
+                    f"retrieval_ms={(t1-t0)*1000:.0f} generation_ms={(t2-t1)*1000:.0f}"
+                )
+                yield f"event: done\ndata: {json.dumps(result)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 class SiteAnswerRequest(BaseModel):

@@ -10,42 +10,29 @@ only local material outside the given geography is excluded):
 
     python3 query_cli.py -g westminster "what does policy d3 say about design"
     python3 query_cli.py --geography westminster "..."
+
+Optionally stream the answer token-by-token instead of waiting for the
+full response (architecture-plan Phase 5's "streaming" item -
+answer.py's stream_answer(), the same generator service.py's
+/query/stream SSE endpoint uses - this just calls it in-process, no
+server needed, so it's the fastest way to confirm the Groq streaming
+call itself works before testing the HTTP/frontend path):
+
+    python3 query_cli.py --stream "what does policy d3 say about design"
 """
 
 import sys
 import time
 
-from answer import generate_answer
+from answer import generate_answer, stream_answer
 from orchestrate import orchestrate
 
 
-def main():
-    args = sys.argv[1:]
-    geography = None
-    for flag in ("-g", "--geography"):
-        if flag in args:
-            i = args.index(flag)
-            if i + 1 >= len(args):
-                print(f"Usage: {flag} <geography> (e.g. westminster)")
-                sys.exit(1)
-            geography = args[i + 1]
-            del args[i:i + 2]
-            break
-
-    if not args:
-        print('Usage: python3 query_cli.py ["-g <geography>"] "your question here"')
-        sys.exit(1)
-    query = " ".join(args)
-
-    t0 = time.time()
-    chunks, coverage = orchestrate(query, geography_filter=geography)
-    t1 = time.time()
-    result = generate_answer(query, chunks, coverage=coverage)
-    t2 = time.time()
-
-    print(f"\n=== Answer (retrieval {t1-t0:.2f}s, generation {t2-t1:.2f}s) ===\n")
-    print(result["answer"])
-
+def _print_result_details(result, coverage):
+    """Everything after the answer text itself - confidence, the
+    Self-RAG repair note, related references, groundedness, agents (for
+    a multi-domain query), and citations. Shared by both the plain and
+    --stream paths so they report identically once the answer is done."""
     broadened = coverage.get("broadened_from_top_k")
     note = " (broadened search after a weak first pass)" if broadened else ""
     print(f"\n=== Confidence: {coverage['confidence']}{note} ===")
@@ -86,6 +73,52 @@ def main():
         print(f"  [{c['id']}] {c['doc']} (p.{c['page']}) "
               f"domain={c['domain']} geography={c['geography']} "
               f"rerank={c['rerank_score']}")
+
+
+def main():
+    args = sys.argv[1:]
+    geography = None
+    for flag in ("-g", "--geography"):
+        if flag in args:
+            i = args.index(flag)
+            if i + 1 >= len(args):
+                print(f"Usage: {flag} <geography> (e.g. westminster)")
+                sys.exit(1)
+            geography = args[i + 1]
+            del args[i:i + 2]
+            break
+
+    stream = "--stream" in args
+    if stream:
+        args.remove("--stream")
+
+    if not args:
+        print('Usage: python3 query_cli.py ["-g <geography>"] ["--stream"] "your question here"')
+        sys.exit(1)
+    query = " ".join(args)
+
+    t0 = time.time()
+    chunks, coverage = orchestrate(query, geography_filter=geography)
+    t1 = time.time()
+
+    if stream:
+        print(f"\n=== Answer (retrieval {t1-t0:.2f}s, streaming...) ===\n")
+        result = None
+        for kind, payload in stream_answer(query, chunks, coverage=coverage):
+            if kind == "delta":
+                print(payload, end="", flush=True)
+            else:  # "done"
+                result = payload
+        t2 = time.time()
+        print(f"\n\n(generation {t2-t1:.2f}s total, including the post-stream "
+              f"repair/groundedness passes)")
+    else:
+        result = generate_answer(query, chunks, coverage=coverage)
+        t2 = time.time()
+        print(f"\n=== Answer (retrieval {t1-t0:.2f}s, generation {t2-t1:.2f}s) ===\n")
+        print(result["answer"])
+
+    _print_result_details(result, coverage)
 
 
 if __name__ == "__main__":

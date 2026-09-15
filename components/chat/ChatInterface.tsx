@@ -40,7 +40,8 @@ const FEATURES: Record<
   | "drawingAnalysis"
   | "diagramSvgFetch"
   | "diagramPngExport"
-  | "ragSourceToggle",
+  | "ragSourceToggle"
+  | "localStreamingAnswers",
   boolean
 > = {
   modeSelector: false,
@@ -54,6 +55,16 @@ const FEATURES: Record<
   // service running separately (uvicorn service:app --port 8010) and only
   // covers plain Q&A, not feasibility/drawing analysis.
   ragSourceToggle: true,
+  // Streams local mode's answer token-by-token via
+  // /api/local-rag-chat/stream (SSE, proxying local-rag/service.py's
+  // /query/stream - see that route's comments) instead of waiting for the
+  // full response and fake-revealing it with useTypedText's typewriter
+  // effect (see MessageBubble below - skipTypewriter is set true for a
+  // streamed message since the reveal is now real, not simulated). Off
+  // falls back to the existing non-streaming /api/local-rag-chat path.
+  // Cloud mode and feasibility/drawing-analysis mode are unaffected either
+  // way - neither backend route streams yet.
+  localStreamingAnswers: true,
 };
 
 export interface Citation {
@@ -1205,6 +1216,119 @@ export default function ChatInterface() {
     };
   }, [ragSource]);
 
+  // Streams local mode's answer via /api/local-rag-chat/stream (SSE) -
+  // see FEATURES.localStreamingAnswers and app/api/local-rag-chat/
+  // stream/route.ts's own comments for the full design. Inserts an
+  // empty assistant message immediately (skipTypewriter: true - this is
+  // real incremental text, not useTypedText's fake reveal) and appends
+  // each "delta" event's text to it as it arrives; the "done" event
+  // then sets the authoritative final answer text/metadata (citations,
+  // confidence, groundedness) - see stream_answer()'s docstring in
+  // local-rag/answer.py for why the final text can differ slightly from
+  // the concatenation of every delta (the post-stream repair/
+  // groundedness passes).
+  const sendLocalStreaming = async (prompt: string, sessionToken: number) => {
+    const assistantId = `${Date.now()}-assistant`;
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: assistantId,
+        type: "assistant",
+        content: "",
+        timestamp: new Date(),
+        skipTypewriter: true,
+      },
+    ]);
+
+    const res = await fetch("/api/local-rag-chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: prompt }),
+    });
+
+    if (!res.ok || !res.body) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data?.error || `API returned ${res.status}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let accumulated = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      let idx: number;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        const rawEvent = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        if (!rawEvent.trim()) continue;
+
+        let eventName = "message";
+        let dataLine = "";
+        for (const line of rawEvent.split("\n")) {
+          if (line.startsWith("event:")) eventName = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataLine += line.slice(5).trim();
+        }
+        if (!dataLine) continue;
+
+        let payload: any;
+        try {
+          payload = JSON.parse(dataLine);
+        } catch {
+          continue;
+        }
+
+        if (eventName === "delta") {
+          accumulated += payload.text || "";
+          if (chatSessionRef.current !== sessionToken) continue;
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, content: accumulated } : m
+            )
+          );
+        } else if (eventName === "done") {
+          if (chatSessionRef.current !== sessionToken) return;
+
+          const finalAnswer = payload.answer || accumulated;
+          const mappedCitations = mapBackendCitations(
+            extractRawCitations({ citations: payload.citations })
+          );
+
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? {
+                    ...m,
+                    content: finalAnswer,
+                    metadata: {
+                      processingtime:
+                        (payload.retrieval_ms || 0) + (payload.generation_ms || 0),
+                      confidence: payload.confidence,
+                      groundedness: payload.groundedness,
+                      unsupportedClaims: payload.unsupportedClaims || [],
+                      citations: mappedCitations,
+                    },
+                  }
+                : m
+            )
+          );
+
+          if (voiceModeEnabled && ttsSupported) {
+            const speechText = sanitizeForSpeech(finalAnswer);
+            speak(speechText, () => {
+              if (voiceModeEnabledRef.current) startListening();
+            });
+          }
+        }
+      }
+    }
+  };
+
   const handleSend = async (overridePrompt?: string) => {
     const prompt = (overridePrompt ?? inputValue).trim();
     if ((!prompt && !drawingFile) || isLoading || isUploadingDoc) return;
@@ -1225,6 +1349,17 @@ export default function ChatInterface() {
     const sessionToken = chatSessionRef.current;
 
     try {
+      const useLocalStreaming =
+        FEATURES.localStreamingAnswers &&
+        ragSource === "local" &&
+        !(chatMode === "feasibility" && drawingFile);
+
+      if (useLocalStreaming) {
+        await sendLocalStreaming(prompt, sessionToken);
+        setDrawingFile(null);
+        return;
+      }
+
       let res: Response;
 
       if (chatMode === "feasibility" && drawingFile) {

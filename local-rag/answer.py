@@ -178,6 +178,29 @@ def _check_groundedness(query, answer_text, context, client, model):
         return None, []
 
 
+
+def _build_system_prompt(confidence):
+    """Shared by generate_answer() and stream_answer() so the two paths'
+    system prompts can never quietly drift apart - the confidence-aware
+    note appended here is what tells the model to hedge/double-check on
+    medium/low-confidence retrieval, and both the streaming and
+    non-streaming answer paths need to say the exact same thing."""
+    system_prompt = SYSTEM_PROMPT
+    if confidence == "low":
+        system_prompt += (
+            "\n\nNote: automated retrieval confidence for this query is LOW "
+            "- the evidence above may be thin or only loosely related. Say so "
+            "explicitly in the answer rather than answering with unwarranted "
+            "confidence."
+        )
+    elif confidence == "medium":
+        system_prompt += (
+            "\n\nNote: automated retrieval confidence for this query is MEDIUM "
+            "- double-check that each claim you make is actually backed by its "
+            "cited evidence before stating it."
+        )
+    return system_prompt
+
 def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL):
     """coverage is the dict retrieve() now returns alongside chunks
     (architecture plan section 52) - optional so this still works if a
@@ -214,20 +237,7 @@ def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL):
     context, citations = build_context(chunks)
     client = Groq(api_key=api_key)
 
-    system_prompt = SYSTEM_PROMPT
-    if confidence == "low":
-        system_prompt += (
-            "\n\nNote: automated retrieval confidence for this query is LOW "
-            "- the evidence above may be thin or only loosely related. Say so "
-            "explicitly in the answer rather than answering with unwarranted "
-            "confidence."
-        )
-    elif confidence == "medium":
-        system_prompt += (
-            "\n\nNote: automated retrieval confidence for this query is MEDIUM "
-            "- double-check that each claim you make is actually backed by its "
-            "cited evidence before stating it."
-        )
+    system_prompt = _build_system_prompt(confidence)
 
     completion = client.chat.completions.create(
         model=model,
@@ -256,6 +266,101 @@ def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL):
     )
 
     return {
+        "answer": answer_text,
+        "citations": citations,
+        "confidence": confidence,
+        "verified": verified,
+        "groundedness": groundedness,
+        "unsupported_claims": unsupported_claims,
+    }
+
+
+def stream_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL):
+    """Streaming counterpart to generate_answer() (architecture-plan
+    Phase 5's "streaming" item). Yields ("delta", text) tuples as the
+    draft answer streams in from Groq, followed by exactly one
+    ("done", result) tuple where result is the same dict shape
+    generate_answer() returns (answer, citations, confidence, verified,
+    groundedness, unsupported_claims).
+
+    result["answer"] is authoritative and can differ slightly from the
+    concatenation of every "delta" text seen: the Self-RAG repair pass
+    (only for low/medium confidence, same gating as generate_answer())
+    and the groundedness check both still run AFTER the stream
+    finishes - there's no way to re-verify a claim while it's still
+    mid-stream. This trades a small chance of the final text silently
+    correcting a couple of words for real token-by-token latency on
+    every query. A caller that needs the streamed text to be guaranteed
+    byte-for-byte final should use generate_answer() instead - this
+    generator exists purely for perceived-latency UX (time-to-first-
+    token), not as a stricter replacement.
+    """
+    confidence = coverage.get("confidence") if coverage else None
+
+    if not chunks:
+        yield "done", {
+            "answer": "I don't have any indexed material relevant to this question.",
+            "citations": [],
+            "confidence": confidence or "low",
+            "verified": False,
+            "groundedness": None,
+            "unsupported_claims": [],
+        }
+        return
+
+    load_dotenv_from_repo()
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        yield "done", {
+            "answer": (
+                "GROQ_API_KEY isn't set (checked the repo's .env.local) - retrieval "
+                "worked, but I can't call the answer model without it."
+            ),
+            "citations": [],
+            "retrieved_only": True,
+            "confidence": confidence,
+            "verified": False,
+            "groundedness": None,
+            "unsupported_claims": [],
+        }
+        return
+
+    context, citations = build_context(chunks)
+    client = Groq(api_key=api_key)
+    system_prompt = _build_system_prompt(confidence)
+
+    stream = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Evidence:\n\n{context}\n\n---\n\nQuestion: {query}"},
+        ],
+        temperature=0.1,
+        max_tokens=800,
+        stream=True,
+    )
+
+    answer_parts = []
+    for chunk in stream:
+        delta = chunk.choices[0].delta.content if chunk.choices else None
+        if delta:
+            answer_parts.append(delta)
+            yield "delta", delta
+    answer_text = "".join(answer_parts)
+
+    verified = False
+    if confidence in ("low", "medium"):
+        try:
+            answer_text = _verify_and_repair(query, answer_text, context, client, model)
+            verified = True
+        except Exception:
+            pass
+
+    groundedness, unsupported_claims = _check_groundedness(
+        query, answer_text, context, client, model
+    )
+
+    yield "done", {
         "answer": answer_text,
         "citations": citations,
         "confidence": confidence,
