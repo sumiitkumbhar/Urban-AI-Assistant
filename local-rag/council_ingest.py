@@ -193,8 +193,14 @@ def build_council_manifest(status):
     for ref, entry in status.items():
         if entry.get("state") != "downloaded":
             continue
+        doc_type_label = (entry["doc_type"] or "local_plan").replace("_", " ").title()
         records.append({
-            "filename": entry["path"],  # absolute path - see ingest.py's build_chunks() change
+            "filename": entry["path"],  # absolute path - used to open the file, see ingest.py's build_chunks()
+            # Readable name for citations (ingest.py's build_chunks() uses
+            # this for doc_filename instead of the absolute path above,
+            # which would otherwise show up verbatim in every citation -
+            # "/Users/.../council_pdfs/E60000001.pdf" is useless to read).
+            "display_name": f"{entry['organisation_name']} - {doc_type_label}.pdf",
             "size_mb": round(entry["bytes"] / 1024 / 1024, 2),
             "sha256": entry["sha256"],
             "bucket": "COUNCIL_PLAN",

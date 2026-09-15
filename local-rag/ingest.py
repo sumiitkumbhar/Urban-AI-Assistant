@@ -238,7 +238,7 @@ def build_chunks(active_files):
                     chunks.append({
                         "chunk_id": chunk_id,
                         "text": piece,
-                        "doc_filename": row["filename"],
+                        "doc_filename": row.get("display_name") or row["filename"],
                         "page": page_num,
                         "bucket": row["bucket"],
                         "status": row["status"],
