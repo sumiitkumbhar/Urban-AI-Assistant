@@ -18,7 +18,12 @@ fix - see common.py's MAP_GRAPHIC_FILENAMES) for the constraint(s)
 actually matched. These are exactly the documents excluded from the text
 index for carrying no real prose (scrambled OCR off a graphic) - the
 picture is the citation here, not a text description of a boundary the
-retrieval pipeline was deliberately never given.
+retrieval pipeline was deliberately never given. As of the map-images
+feature below, each citation also carries a rendered `image_url` (a PNG
+of the actual map page, via map_images.py/PyMuPDF) whenever rendering
+succeeds - `image_url: None` means the filename-only citation still
+works, it just has nothing to display (source PDF missing, or
+PyMuPDF/Pillow not installed).
 """
 
 import csv
@@ -65,7 +70,12 @@ def _describe_constraints(site):
     an unchecked/not-ingested dataset contributes nothing here, matching
     section 27's explicit warning against treating missing data as a
     negative result (a `checked: False` block is silently skipped, not
-    read as "no constraint")."""
+    read as "no constraint").
+
+    Works equally on gis_lookup.site_constraints()'s live return value
+    and on project_state.py's stored `constraints_json` (service.py's
+    project-scoped /query reuses this) - both are the exact same shape,
+    since the latter is just the former persisted to Postgres."""
     phrases = []
     area_names = []
 
@@ -108,7 +118,14 @@ def _find_map_citations(area_names, geography):
     common.py's MAP_GRAPHIC_FILENAMES docstring). Falls back to the
     borough-wide Policies Map for the site's geography when no specific
     area map matches (e.g. an Article 4/Green Belt-only site, or an area
-    name that doesn't appear in any indexed map's filename)."""
+    name that doesn't appear in any indexed map's filename).
+
+    Each returned citation also carries a rendered `image_url` (see
+    map_images.render_map_image()) pointing at service.py's /map-images
+    static mount, so a caller can actually display the map instead of
+    just naming the PDF - rendering happens here, synchronously, since
+    there's normally at most one or two citations per request and the
+    result is cached to disk after the first render."""
     if not MAP_DOCUMENTS_PATH.exists():
         return []
     with open(MAP_DOCUMENTS_PATH) as f:
@@ -131,7 +148,15 @@ def _find_map_citations(area_names, geography):
                 citations.append(m)
                 break
 
-    return citations
+    from map_images import render_map_image
+
+    enriched = []
+    for m in citations:
+        entry = dict(m)
+        image_path = render_map_image(m["filename"])
+        entry["image_url"] = f"/map-images/{image_path.name}" if image_path else None
+        enriched.append(entry)
+    return enriched
 
 
 def build_site_context(postcode=None, lat=None, lon=None, extra_question=None,

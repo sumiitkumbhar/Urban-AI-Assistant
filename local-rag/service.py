@@ -25,12 +25,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from common import DATA_DIR, CHUNKS_PATH, QDRANT_PATH, BM25_PATH
 from answer import generate_answer, stream_answer
 from orchestrate import orchestrate
-from site_context import build_site_context
+from site_context import build_site_context, _describe_constraints, _find_map_citations
+from map_images import MAP_IMAGES_DIR
 import project_state as project_state_module
 from retrieve import _load_embedder, _load_reranker, _load_qdrant, _load_bm25, _load_chunk_texts
 
@@ -71,6 +73,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Serves the map images map_images.render_map_image() renders on demand
+# (see site_context.py's _find_map_citations()) - mounted before any
+# request can reach it, and the directory is created up front since
+# StaticFiles refuses to mount over a path that doesn't exist yet even
+# though nothing needs to be in it until the first map citation renders.
+MAP_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/map-images", StaticFiles(directory=str(MAP_IMAGES_DIR)), name="map_images")
+
 
 class QueryRequest(BaseModel):
     question: str
@@ -98,17 +108,27 @@ def _resolve_project_context(project_id, geography):
     """Shared by /query and /query/stream: looks up the project (404 if
     it doesn't exist), builds its context summary, and defaults
     `geography` from the project's own stored geography when the caller
-    didn't already pass one explicitly. Returns (project_context,
-    geography)."""
+    didn't already pass one explicitly. Also resolves map citations from
+    the project's own already-matched constraints (site_context.py's
+    _describe_constraints()/_find_map_citations() - the exact same shape
+    as gis_lookup.site_constraints(), since project_state.py's
+    constraints_json is just that result persisted), so a project-scoped
+    query gets the same visual citation /site-answer already produces,
+    without a second live GIS lookup. Returns (project_context,
+    geography, map_citations)."""
     if project_id is None:
-        return None, geography
+        return None, geography, []
     project = project_state_module.get_project(project_id)
     if project is None:
         raise HTTPException(status_code=404, detail=f"No project with id {project_id}.")
     project_context = project_state_module.build_context_summary(project_id)
     if geography is None:
         geography = project["geography"]
-    return project_context, geography
+    map_citations = []
+    if project.get("constraints"):
+        _, area_names = _describe_constraints(project["constraints"])
+        map_citations = _find_map_citations(area_names, project["geography"])
+    return project_context, geography, map_citations
 
 
 @app.get("/health")
@@ -120,7 +140,9 @@ def health():
 @app.post("/query")
 def query(req: QueryRequest):
     t0 = time.time()
-    project_context, geography = _resolve_project_context(req.project_id, req.geography)
+    project_context, geography, map_citations = _resolve_project_context(
+        req.project_id, req.geography
+    )
     chunks, coverage = orchestrate(
         req.question, top_k=req.top_k, rerank_top_n=req.rerank_top_n,
         geography_filter=geography,
@@ -136,6 +158,7 @@ def query(req: QueryRequest):
     return {
         **result,
         "coverage": coverage,
+        "map_citations": map_citations,
         "retrieval_ms": round((t1 - t0) * 1000, 1),
         "generation_ms": round((t2 - t1) * 1000, 1),
     }
@@ -149,7 +172,7 @@ def query_stream(req: QueryRequest):
     from a local Qdrant/BM25 lookup that typically finishes in a couple
     of seconds; only the Groq generation call - the actual latency a
     user waits through - streams token-by-token via answer.py's
-    stream_answer(). Three named SSE event types, in order:
+    stream_answer(). Four named SSE event types, in order:
 
       event: coverage  - the retrieval coverage dict, sent immediately
                           (before any answer text) so a client can show
@@ -157,14 +180,16 @@ def query_stream(req: QueryRequest):
       event: delta      - {"text": "..."} for each token/fragment as it
                           arrives from Groq.
       event: done        - exactly once, the final result (answer,
-                          citations, confidence, verified, groundedness,
-                          unsupported_claims, coverage, timings) - see
-                          stream_answer()'s docstring for why this final
-                          answer can differ slightly from the
-                          concatenation of every delta.
+                          citations, map_citations, confidence, verified,
+                          groundedness, unsupported_claims, coverage,
+                          timings) - see stream_answer()'s docstring for
+                          why this final answer can differ slightly from
+                          the concatenation of every delta.
     """
     t0 = time.time()
-    project_context, geography = _resolve_project_context(req.project_id, req.geography)
+    project_context, geography, map_citations = _resolve_project_context(
+        req.project_id, req.geography
+    )
     chunks, coverage = orchestrate(
         req.question, top_k=req.top_k, rerank_top_n=req.rerank_top_n,
         geography_filter=geography,
@@ -183,6 +208,7 @@ def query_stream(req: QueryRequest):
                 result = {
                     **payload,
                     "coverage": coverage,
+                    "map_citations": map_citations,
                     "retrieval_ms": round((t1 - t0) * 1000, 1),
                     "generation_ms": round((t2 - t1) * 1000, 1),
                 }
