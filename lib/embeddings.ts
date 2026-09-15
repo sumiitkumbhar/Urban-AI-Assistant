@@ -32,17 +32,56 @@ function getAI() {
   return _ai;
 }
 
+// Retry/backoff for Gemini's free-tier rate limit (429 RESOURCE_EXHAUSTED,
+// metric "embed_content_free_tier_requests"). Hit for real 2026-09-15 during
+// council-plan bulk ingestion: 3 of 5 councils in one batch failed on this
+// with no retry at all, permanently marking otherwise-good rows "error" in
+// the tracker. NOTE: the error's own "Please retry in Ns" hint (seen as low
+// as 5s) suggests a short burst-rate window, but "free_tier_requests" could
+// also be Google's account-level DAILY quota - this backoff fixes the
+// former for free; if it's actually the latter, all retries below will
+// still fail and the caller sees the same error after ~waiting - that's the
+// signal to stop ingesting for the day rather than hammer the API further.
+const EMBED_MAX_RETRIES = 3;
+const EMBED_RETRY_BACKOFF_MS = [15_000, 30_000, 60_000];
+
+function isRateLimitError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  const status = (err as { status?: number; code?: number })?.status
+    ?? (err as { status?: number; code?: number })?.code;
+  return status === 429 || /RESOURCE_EXHAUSTED|"code":429/.test(msg);
+}
+
+async function embedContentWithRetry(cleanText: string) {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= EMBED_MAX_RETRIES; attempt++) {
+    try {
+      return await getAI().models.embedContent({
+        model: GEMINI_EMBEDDING_MODEL,
+        contents: cleanText,
+        config: { outputDimensionality: EMBEDDING_DIMENSIONS },
+      });
+    } catch (err) {
+      lastErr = err;
+      if (!isRateLimitError(err) || attempt === EMBED_MAX_RETRIES) throw err;
+      const delayMs = EMBED_RETRY_BACKOFF_MS[attempt];
+      console.warn(
+        `  embedContent rate-limited (attempt ${attempt + 1}/${EMBED_MAX_RETRIES + 1}), ` +
+        `retrying in ${delayMs / 1000}s...`
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
 export async function generateEmbedding(text: string): Promise<number[]> {
   const cleanText = text.trim();
   if (!cleanText) {
     throw new Error("Cannot generate embedding for empty text");
   }
 
-  const response = await getAI().models.embedContent({
-    model: GEMINI_EMBEDDING_MODEL,
-    contents: cleanText,
-    config: { outputDimensionality: EMBEDDING_DIMENSIONS },
-  });
+  const response = await embedContentWithRetry(cleanText);
 
   const values = response.embeddings?.[0]?.values;
   if (!values?.length) {
