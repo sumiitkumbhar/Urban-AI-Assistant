@@ -201,11 +201,30 @@ def _build_system_prompt(confidence):
         )
     return system_prompt
 
-def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL):
+
+def _build_user_content(query, context, project_context=None):
+    """Shared by generate_answer() and stream_answer() - prepends the
+    structured "CURRENT PROJECT STATE" block (project_state.py's
+    build_context_summary(), architecture-plan section 26) ahead of the
+    retrieved evidence when a caller passes one, so the model sees both
+    what's currently true about the project and what the text corpus
+    says. Deliberately NOT folded into the retrieval query itself - see
+    build_context_summary()'s own docstring for why that would pollute
+    embedding search with proposal details that aren't semantically
+    about the question being asked."""
+    user_content = f"Evidence:\n\n{context}\n\n---\n\nQuestion: {query}"
+    if project_context:
+        user_content = f"{project_context}\n\n---\n\n{user_content}"
+    return user_content
+
+
+def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, project_context=None):
     """coverage is the dict retrieve() now returns alongside chunks
     (architecture plan section 52) - optional so this still works if a
     caller passes chunks straight from somewhere else, but query_cli.py
-    and service.py always pass it through."""
+    and service.py always pass it through. project_context, if given, is
+    project_state.py's build_context_summary() output - see
+    _build_user_content()."""
     confidence = coverage.get("confidence") if coverage else None
 
     if not chunks:
@@ -243,7 +262,7 @@ def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL):
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Evidence:\n\n{context}\n\n---\n\nQuestion: {query}"},
+            {"role": "user", "content": _build_user_content(query, context, project_context)},
         ],
         temperature=0.1,
         max_tokens=800,
@@ -275,7 +294,7 @@ def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL):
     }
 
 
-def stream_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL):
+def stream_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, project_context=None):
     """Streaming counterpart to generate_answer() (architecture-plan
     Phase 5's "streaming" item). Yields ("delta", text) tuples as the
     draft answer streams in from Groq, followed by exactly one
@@ -294,6 +313,9 @@ def stream_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL):
     byte-for-byte final should use generate_answer() instead - this
     generator exists purely for perceived-latency UX (time-to-first-
     token), not as a stricter replacement.
+
+    project_context, if given, is project_state.py's
+    build_context_summary() output - see _build_user_content().
     """
     confidence = coverage.get("confidence") if coverage else None
 
@@ -333,7 +355,7 @@ def stream_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL):
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"Evidence:\n\n{context}\n\n---\n\nQuestion: {query}"},
+            {"role": "user", "content": _build_user_content(query, context, project_context)},
         ],
         temperature=0.1,
         max_tokens=800,

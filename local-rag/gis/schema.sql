@@ -111,3 +111,56 @@ CREATE TABLE IF NOT EXISTS sites (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_sites_geom ON sites USING GIST (geom);
+
+-- Structured project state (architecture-plan section 22/23/28's
+-- "structured project state" layer - Phase 7's first slice, chosen and
+-- scoped with the product owner 2026-09-15, in preference to a fourth
+-- local database or a new Supabase table: this reuses the existing
+-- local urban_ai_gis Postgres database GIS already runs, evolving the
+-- `sites` table above from its original bare placeholder ("deliberately
+-- deferred until something actually needs to persist a project's state
+-- across queries" - see its own comment) into the fuller section-28
+-- project record. See local-rag/project_state.py for the Python layer;
+-- the underlying table stays named `sites` (it's the same row - a
+-- project's core identity IS its site) but every function there is
+-- named/framed around "project", matching how a user actually thinks
+-- about this. Deliberately NOT the rest of section 23's memory
+-- architecture (semantic memory, episodic memory, conflict handling,
+-- consolidation, reusable skills/workflows) - this is only the "what is
+-- currently true" structured-state layer; the rest of Phase 7 needs its
+-- own separate scoping before it's built.
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS lpa_reference TEXT;
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS geography TEXT;
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS proposed_use TEXT;
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS units INTEGER;
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS storeys INTEGER;
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS floorspace_sqm NUMERIC;
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS height_m NUMERIC;
+-- Free text, not an enum - "what stages exist" is a product decision
+-- nobody has made yet (enquiry/pre-app/application/appeal/... vary by
+-- authority and project type); a CHECK constraint here would just be a
+-- guess. Revisit once real project data shows what values actually get
+-- used.
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS stage TEXT;
+-- Cached copy of gis_lookup.py's site_constraints() result (the same
+-- JSON shape /site-answer already returns) so a project's constraints
+-- don't need re-querying PostGIS on every turn - refreshed explicitly
+-- via project_state.refresh_constraints(), not on a timer, since GIS
+-- coverage itself only changes when someone re-runs gis_ingest.py.
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS constraints_json JSONB;
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS constraints_checked_at TIMESTAMPTZ;
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+-- A project's outstanding/open questions (section 28's "Outstanding
+-- questions" list) - a separate table since a project can have any
+-- number of them, unlike the single-row fields above.
+CREATE TABLE IF NOT EXISTS project_open_questions (
+    id SERIAL PRIMARY KEY,
+    site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+    question TEXT NOT NULL,
+    resolved BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_project_open_questions_site
+    ON project_open_questions (site_id);
