@@ -50,12 +50,17 @@ def _load_chunk_texts():
 
 @functools.lru_cache(maxsize=1)
 def _load_embedder():
-    return SentenceTransformer(EMBEDDING_MODEL_NAME)
+    # device="cpu" - see ingest.py's build_qdrant_index() comment for why:
+    # MPS (Apple Silicon GPU) memory is shared with the rest of the Mac
+    # and can run out under normal system load; CPU has no such ceiling.
+    # A single query's embedding is small enough that this cost is
+    # negligible per-request.
+    return SentenceTransformer(EMBEDDING_MODEL_NAME, device="cpu")
 
 
 @functools.lru_cache(maxsize=1)
 def _load_reranker():
-    return CrossEncoder(RERANKER_MODEL_NAME)
+    return CrossEncoder(RERANKER_MODEL_NAME, device="cpu")
 
 
 @functools.lru_cache(maxsize=1)

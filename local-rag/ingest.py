@@ -213,7 +213,15 @@ def build_qdrant_index(chunks):
     QDRANT_PATH.mkdir(parents=True, exist_ok=True)
 
     log(f"loading embedding model {EMBEDDING_MODEL_NAME} (first run downloads it, ~130MB)")
-    model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+    # device="cpu" is deliberate, not a placeholder - sentence-transformers
+    # auto-selects Apple Silicon's MPS backend otherwise, which shares
+    # memory with everything else running on the Mac and can hit
+    # "MPS backend out of memory" mid-ingestion if other apps are using a
+    # lot of RAM at the time (hit for real on 2026-09-15, ~3264/24469
+    # chunks in). bge-small is a ~130MB model - CPU encoding is slower but
+    # has no shared-memory ceiling to hit, and this only runs once per
+    # ingestion, not per query.
+    model = SentenceTransformer(EMBEDDING_MODEL_NAME, device="cpu")
 
     client = QdrantClient(path=str(QDRANT_PATH))
     # QDRANT_PATH was just wiped and recreated above, so there's never an
