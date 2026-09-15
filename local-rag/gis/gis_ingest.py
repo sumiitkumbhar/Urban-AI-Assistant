@@ -50,11 +50,45 @@ from gis_common import (
 )
 
 PAGE_LIMIT = 200
-REQUEST_TIMEOUT = 30
+# planning.data.gov.uk has been observed to be slow/flaky in practice (a
+# real ingestion run hit a 30s read timeout on a small national-dataset
+# request) - bumped from 30s and given real retries below rather than
+# just failing the whole run on one slow response.
+REQUEST_TIMEOUT = 60
+REQUEST_RETRIES = 4
+REQUEST_RETRY_BACKOFF_S = 3  # 3s, 6s, 12s, 24s between attempts
 # "Apply polite rate-limiting between requests" is the only guidance
 # Planning Data's own docs give (no documented numeric limit) - this is a
 # deliberately conservative gap between paginated requests.
 REQUEST_DELAY_S = 0.3
+
+
+def _get_with_retry(url, params):
+    """GET with retries for transient network errors (timeouts, connection
+    resets, 5xx) - a single slow/flaky response used to kill an entire
+    ingestion run and force starting over from page 0. Only network-level
+    and 5xx failures are retried; a 4xx (bad params/dataset slug) fails
+    immediately since retrying won't fix it."""
+    last_exc = None
+    for attempt in range(REQUEST_RETRIES + 1):
+        try:
+            resp = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            if resp.status_code >= 500:
+                resp.raise_for_status()  # goes to except below, gets retried
+            resp.raise_for_status()
+            return resp
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code < 500:
+                raise  # 4xx - not transient, don't retry
+            last_exc = e
+        except requests.exceptions.RequestException as e:
+            last_exc = e
+        if attempt < REQUEST_RETRIES:
+            wait = REQUEST_RETRY_BACKOFF_S * (2 ** attempt)
+            print(f"  ... request failed ({last_exc}), retrying in {wait}s "
+                  f"(attempt {attempt + 1}/{REQUEST_RETRIES}) ...")
+            time.sleep(wait)
+    raise last_exc
 
 
 def _fetch_pages(dataset, params):
@@ -62,12 +96,7 @@ def _fetch_pages(dataset, params):
     offset = 0
     while True:
         query = dict(params, dataset=dataset, limit=PAGE_LIMIT, offset=offset)
-        resp = requests.get(
-            f"{PLANNING_DATA_BASE}/entity.geojson",
-            params=query,
-            timeout=REQUEST_TIMEOUT,
-        )
-        resp.raise_for_status()
+        resp = _get_with_retry(f"{PLANNING_DATA_BASE}/entity.geojson", query)
         data = resp.json()
         features = data.get("features", [])
         for f in features:
