@@ -59,6 +59,17 @@ GRAPH_PATH = DATA_DIR / "reference_graph.pkl"
 QDRANT_COLLECTION = "regulatory_knowledge"  # matches section 21 of the README
 MAP_DOCUMENTS_PATH = DATA_DIR / "map_documents.json"
 
+# Resume/incremental-ingestion caches (added 2026-09-17, once local-rag
+# became the sole path for further council ingestion - re-embedding the
+# entire corpus from scratch on every run stopped being an acceptable
+# cost once "every run" started meaning "every batch of dozens more
+# council PDFs", not just an occasional curated-corpus refresh). See
+# ingest.py's load_extraction_cache()/load_embedding_cache() for how
+# these are used and versioned (chunking params / embedding model name)
+# so a config change can't silently serve stale cached data.
+EXTRACTION_CACHE_PATH = DATA_DIR / "extraction_cache.pkl"
+EMBEDDING_CACHE_PATH = DATA_DIR / "embedding_cache.pkl"
+
 # UK council Local Plans (council_ingest.py) - a separate, additive
 # manifest from MANIFEST_PATH above, folded in by ingest.py's
 # load_council_manifest(). See council_ingest.py's module docstring for
