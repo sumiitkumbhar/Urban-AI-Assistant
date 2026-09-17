@@ -91,6 +91,7 @@ from common import (
     GRAPH_PATH, QDRANT_COLLECTION, EMBEDDING_MODEL_NAME, EMBEDDING_DIM,
     CHUNK_TARGET_CHARS, CHUNK_OVERLAP_CHARS, MAP_GRAPHIC_FILENAMES,
     MAP_DOCUMENTS_PATH, EXTRACTION_CACHE_PATH, EMBEDDING_CACHE_PATH,
+    NATIONAL_DOCS_MANIFEST_PATH,
 )
 from graph_build import build_graph, save_graph
 
@@ -142,6 +143,26 @@ def load_council_manifest():
     if rows:
         log(f"council manifest loaded: {len(rows)} council Local Plan(s) "
             f"(from council_ingest.py, see data/council_download_status.json)")
+    return rows
+
+
+def load_national_docs_manifest():
+    """National building-regulation/fire-safety/flood-risk documents
+    downloaded by national_docs_ingest.py (data/national_docs_manifest.json)
+    - a third separate, additive track alongside corpus_manifest.json and
+    council_manifest.json above. Added 2026-09-17 alongside the pivot from
+    growing council coverage to covering these national regulatory topics
+    (see NATIONAL_DOCS_MANIFEST_PATH's comment in common.py). Returns []
+    if national_docs_ingest.py hasn't been run yet, so this is a no-op for
+    anyone who hasn't touched that script."""
+    if not NATIONAL_DOCS_MANIFEST_PATH.exists():
+        return []
+    with open(NATIONAL_DOCS_MANIFEST_PATH) as f:
+        rows = json.load(f)
+    rows = [r for r in rows if r.get("state") == "downloaded"]
+    if rows:
+        log(f"national docs manifest loaded: {len(rows)} national regulation "
+            f"document(s) (from national_docs_ingest.py)")
     return rows
 
 
@@ -472,7 +493,9 @@ def main():
 
     active_files = load_manifest()
     council_files = load_council_manifest()
+    national_files = load_national_docs_manifest()
     active_files += council_files
+    active_files += national_files
     text_files, map_files = split_out_map_documents(active_files)
     log(f"{len(map_files)} of {len(active_files)} files are map-graphic PDFs - "
         f"excluded from text chunking (see MAP_GRAPHIC_FILENAMES in common.py), "

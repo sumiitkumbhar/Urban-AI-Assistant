@@ -70,6 +70,16 @@ CONSTRAINT_DATASETS = {
         "name_field": "name",
         "extra_fields": {},
     },
+    # Added 2026-09-17 alongside the pivot to national regulatory
+    # coverage (building law/fire safety/flood risk) - see
+    # local-rag-status.md's decision note. Slots into the exact same
+    # generic dict-driven pattern the four constraints above already
+    # use, so gis_ingest.py needed zero changes to pick this up.
+    "flood-risk-zone": {
+        "table": "flood_risk_zones",
+        "name_field": "name",
+        "extra_fields": {},
+    },
 }
 
 

@@ -164,3 +164,36 @@ CREATE TABLE IF NOT EXISTS project_open_questions (
 );
 CREATE INDEX IF NOT EXISTS idx_project_open_questions_site
     ON project_open_questions (site_id);
+
+-- Flood risk zone (2026-09-17) - added when the product decision shifted
+-- from growing council coverage further to covering national regulatory
+-- topics that apply everywhere: building law, fire safety, flood risk
+-- (see local-rag-status.md's decision note, same date). Mirrors
+-- conservation_areas/green_belt's shape exactly - this is the same
+-- generic CONSTRAINT_DATASETS-driven pattern gis_ingest.py already uses,
+-- so no changes to gis_ingest.py itself were needed, only this table
+-- plus the new dict entry in gis_common.py.
+--
+-- Source: planning.data.gov.uk's flood-risk-zone dataset (Environment
+-- Agency guidance, England - "flood zone 1 areas least likely to flood,
+-- flood zone 3 areas more likely to flood"). No `extra_fields` are
+-- pulled yet beyond name/reference - the exact property key the API
+-- uses to carry the zone 1/2/3 category wasn't confirmed from outside a
+-- live query (this session's own network can't reach planning.data.gov.uk
+-- to inspect a real response - see local-rag-status.md). If `name` or
+-- `reference` doesn't already carry the zone number once this is
+-- actually run, gis_ingest.py's per-feature `properties` dict has
+-- everything needed to add a proper extra_fields mapping afterward -
+-- this table already has room to grow (ADD COLUMN IF NOT EXISTS is safe
+-- to run any time).
+CREATE TABLE IF NOT EXISTS flood_risk_zones (
+    entity BIGINT PRIMARY KEY,
+    reference TEXT,
+    name TEXT,
+    organisation_entity BIGINT,
+    geom GEOMETRY(MultiPolygon, 4326) NOT NULL,
+    source_url TEXT,
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_flood_risk_zones_geom
+    ON flood_risk_zones USING GIST (geom);

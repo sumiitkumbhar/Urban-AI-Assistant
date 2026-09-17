@@ -106,6 +106,18 @@ def _describe_constraints(site):
     if gb["matches"]:
         phrases.append("within the Green Belt")
 
+    # Added 2026-09-17 alongside the flood-risk-zone GIS layer (see
+    # gis_lookup.py/gis_common.py) - deliberately phrased as "in a
+    # mapped flood risk zone" rather than naming a specific zone number,
+    # since the ingested dataset doesn't yet carry a confirmed zone 1/2/3
+    # category field (see schema.sql's flood_risk_zones comment) - this
+    # stays accurate either way: it only claims what's actually known
+    # (the point falls inside a flood-risk-zone polygon), not a category
+    # that hasn't been verified yet.
+    frz = site["flood_risk_zones"]
+    if frz["matches"]:
+        phrases.append("in a mapped flood risk zone")
+
     return phrases, area_names
 
 

@@ -76,6 +76,17 @@ EMBEDDING_CACHE_PATH = DATA_DIR / "embedding_cache.pkl"
 # the full two-step download-then-index design.
 COUNCIL_MANIFEST_PATH = DATA_DIR / "council_manifest.json"
 
+# National building-regulation/fire-safety/flood-risk documents
+# (national_docs_ingest.py) - added 2026-09-17 when the product decision
+# shifted from growing council coverage further to covering national
+# regulatory topics that apply everywhere (building law, fire safety,
+# flood risk), rather than more individual council Local Plans. A third
+# separate, additive manifest alongside MANIFEST_PATH and
+# COUNCIL_MANIFEST_PATH above, folded in by ingest.py's
+# load_national_docs_manifest(). See national_docs_ingest.py's module
+# docstring for the fixed, hand-curated document list.
+NATIONAL_DOCS_MANIFEST_PATH = DATA_DIR / "national_docs_manifest.json"
+
 # Map-graphic PDFs are pure scanned/vector maps (conservation-area
 # boundary maps, borough Policies Maps) that carry no real prose - their
 # "extracted text" is scrambled street-label fragments off a graphic,

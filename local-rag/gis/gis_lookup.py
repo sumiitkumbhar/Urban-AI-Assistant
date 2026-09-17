@@ -144,6 +144,9 @@ def site_constraints(lat, lon):
                     extra_cols=("article_4_direction",),
                 )
                 green_belt = _lookup_containing(cur, "green_belt", lat, lon)
+                flood_risk_zones = _lookup_containing(
+                    cur, "flood_risk_zones", lat, lon
+                )
                 listed_buildings = _lookup_nearby_listed_buildings(
                     cur, lat, lon, LISTED_BUILDING_NEARBY_RADIUS_M
                 )
@@ -172,6 +175,10 @@ def site_constraints(lat, lon):
         "green_belt": {
             "checked": _checked("green-belt"),
             "matches": green_belt,
+        },
+        "flood_risk_zones": {
+            "checked": _checked("flood-risk-zone"),
+            "matches": flood_risk_zones,
         },
         "coverage": coverage,
     }
