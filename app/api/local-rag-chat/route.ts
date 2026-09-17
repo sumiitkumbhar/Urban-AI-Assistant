@@ -28,6 +28,26 @@ export const runtime = "nodejs";
 
 const LOCAL_RAG_URL = process.env.LOCAL_RAG_URL || "http://localhost:8010";
 
+// A UK postcode found in the typed query routes this request to
+// local-rag's /site-answer instead of /query - see service.py's
+// SiteAnswerRequest/site_answer(). That endpoint runs the real
+// GIS/PostGIS site-constraints lookup (gis_lookup.site_constraints())
+// and, when a matched constraint has a corresponding map PDF (see
+// site_context.py's _find_map_citations()), returns a rendered map
+// image alongside the answer - which /query never does, since it has
+// no site to look constraints up for. So "what can I build at SW1V
+// 3LX" gets a real, site-scoped answer with a visual citation, while
+// any other question still goes through the ordinary unscoped
+// retrieval path. Deliberately a simple full-postcode-format heuristic
+// (not outward-code-only, not free-text address lookup) - enough to
+// drive this without a dedicated postcode-input UI.
+const UK_POSTCODE_RE = /\b[A-Z]{1,2}[0-9][A-Z0-9]?\s*[0-9][A-Z]{2}\b/i;
+
+function extractPostcode(text: string): string | null {
+  const match = text.match(UK_POSTCODE_RE);
+  return match ? match[0].toUpperCase() : null;
+}
+
 // local-rag's Corrective-RAG confidence is a label (low/medium/high), not
 // a score - ChatInterface.tsx's ConfidenceBadge expects a 0-100 number
 // (see metadata.confidence's usage at components/chat/ChatInterface.tsx).
@@ -46,6 +66,18 @@ interface LocalRagCitation {
   domain: string;
   geography?: string;
   rerank_score: number;
+}
+
+// Shape of an entry in the upstream response's `map_citations` array -
+// see local-rag/site_context.py's _find_map_citations() docstring and
+// data/map_documents.json's records for the fields' origin.
+interface LocalRagMapCitation {
+  filename: string;
+  doc_type?: string;
+  domain?: string;
+  geography?: string;
+  bucket?: string;
+  image_url?: string | null;
 }
 
 function transformCitations(citations: LocalRagCitation[] | undefined) {
@@ -70,6 +102,22 @@ function transformCitations(citations: LocalRagCitation[] | undefined) {
   }));
 }
 
+// image_url comes back from the upstream service as a path relative to
+// *that* service (e.g. "/map-images/xxxx_p1.png", served by its own
+// StaticFiles mount) - the browser renders this page from Next.js's own
+// origin, not local-rag's, so it has to be made absolute against
+// LOCAL_RAG_URL here or an <img> tag would request it from the Next.js
+// dev server instead and 404.
+function transformMapCitations(mapCitations: LocalRagMapCitation[] | undefined) {
+  return (mapCitations || []).map((m) => ({
+    filename: m.filename,
+    docType: m.doc_type,
+    domain: m.domain,
+    geography: m.geography,
+    imageUrl: m.image_url ? `${LOCAL_RAG_URL}${m.image_url}` : null,
+  }));
+}
+
 export async function POST(req: Request) {
   const startedAt = Date.now();
 
@@ -91,12 +139,18 @@ export async function POST(req: Request) {
     );
   }
 
+  const postcode = extractPostcode(query);
+  const upstreamPath = postcode ? "/site-answer" : "/query";
+  const upstreamBody = postcode
+    ? { postcode, question: query }
+    : { question: query };
+
   let upstream: Response;
   try {
-    upstream = await fetch(`${LOCAL_RAG_URL}/query`, {
+    upstream = await fetch(`${LOCAL_RAG_URL}${upstreamPath}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: query }),
+      body: JSON.stringify(upstreamBody),
       signal: AbortSignal.timeout(60_000),
     });
   } catch (e: any) {
@@ -125,7 +179,41 @@ export async function POST(req: Request) {
   }
 
   const data = await upstream.json();
+
+  // /site-answer returns {"error": "..."} (no "answer") when the
+  // postcode didn't resolve to a real site (e.g. outside GIS coverage) -
+  // see site_context.py's build_site_context(). Surface that as a normal
+  // chat answer rather than as a blank/broken message.
+  if (postcode && data?.error) {
+    return NextResponse.json(
+      {
+        success: true,
+        answer: `I couldn't find site data for ${postcode}: ${data.error}`,
+        data: {
+          citations: [],
+          query,
+          region: null,
+          resultsCount: 0,
+          references: { documents: [], web: [] },
+        },
+        metadata: {
+          processing_time: Date.now() - startedAt,
+          confidence: null,
+          confidenceLabel: undefined,
+          webFallbackUsed: false,
+          groundedness: null,
+          unsupportedClaims: [],
+          source: "local-rag",
+          postcode,
+        },
+        mapCitations: [],
+      },
+      { status: 200 }
+    );
+  }
+
   const citations = transformCitations(data.citations);
+  const mapCitations = transformMapCitations(data.map_citations);
   const confidenceLabel: string | undefined = data?.coverage?.confidence;
 
   const response = {
@@ -159,7 +247,18 @@ export async function POST(req: Request) {
       agents: data?.coverage?.agents,
       verified: data?.verified,
       source: "local-rag",
+      // Set only on the /site-answer path (postcode detected in the
+      // query) - lets the UI label which site a map citation belongs to
+      // without re-parsing the question text.
+      postcode: postcode || undefined,
     },
+    // Top-level (not nested under data/metadata) so ChatInterface.tsx's
+    // handleSend() can read it with one straightforward
+    // `data?.mapCitations` regardless of which branch built the
+    // response - see local-rag/site_context.py's _find_map_citations()
+    // for where these come from and map_images.py for how the image is
+    // rendered.
+    mapCitations,
   };
 
   return NextResponse.json(response, { status: 200 });

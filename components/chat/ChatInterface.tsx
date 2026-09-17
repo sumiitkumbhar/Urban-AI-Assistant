@@ -97,6 +97,24 @@ export interface DiagramData {
   svgContent?: string;
 }
 
+// A rendered map image local-rag matched to the site/constraints this
+// answer is about (see local-rag/site_context.py's
+// _find_map_citations() and map_images.py) - imageUrl already points at
+// the local-rag service's own origin (see app/api/local-rag-chat/
+// route.ts and .../stream/route.ts's transformMapCitations()), so it
+// can be dropped straight into an <img src>. imageUrl is null when the
+// PDF exists in data/map_documents.json but couldn't be rendered
+// (missing PyMuPDF/Pillow, bad PDF, etc - see map_images.py's
+// render_map_image() docstring) - callers fall back to just naming the
+// document in that case.
+export interface MapCitation {
+  filename: string;
+  docType?: string;
+  domain?: string;
+  geography?: string;
+  imageUrl?: string | null;
+}
+
 export interface ChatMessage {
   id: string;
   type: "user" | "assistant";
@@ -120,6 +138,13 @@ export interface ChatMessage {
     // the user rather than applied silently - if it guessed wrong, the
     // answer is about the wrong thing and they need to be able to see that.
     corrections?: Array<{ from: string; to: string; confidence: number }>;
+    // Set when the backend matched a real map PDF to this answer's site
+    // (see route.ts's UK_POSTCODE_RE / /site-answer path) - rendered by
+    // MapCitationsSection below. sitePostcode is the postcode that
+    // triggered the site-scoped lookup, shown as a small label above
+    // the map(s) so it's clear which site they're for.
+    mapCitations?: MapCitation[];
+    sitePostcode?: string;
   };
   diagramData?: DiagramData;
 }
@@ -1312,6 +1337,10 @@ export default function ChatInterface() {
                       groundedness: payload.groundedness,
                       unsupportedClaims: payload.unsupportedClaims || [],
                       citations: mappedCitations,
+                      mapCitations: Array.isArray(payload.mapCitations)
+                        ? payload.mapCitations
+                        : [],
+                      sitePostcode: payload.postcode,
                     },
                   }
                 : m
@@ -1423,6 +1452,13 @@ export default function ChatInterface() {
       const termCorrections = Array.isArray(data?.data?.corrections)
         ? data.data.corrections
         : undefined;
+      // Only present on local-rag's postcode-triggered /site-answer path
+      // (see app/api/local-rag-chat/route.ts) - undefined/empty for
+      // every other query, which MapCitationsSection treats as "nothing
+      // to show" the same as it does for the streaming path.
+      const mapCitations = Array.isArray(data?.mapCitations)
+        ? data.mapCitations
+        : [];
 
       const aiMessage: ChatMessage = {
         id: `${Date.now()}-assistant`,
@@ -1441,6 +1477,8 @@ export default function ChatInterface() {
             data?.complianceResult ??
             data?.data?.complianceResult ??
             data?.metadata?.complianceResult,
+          mapCitations,
+          sitePostcode: data?.metadata?.postcode,
         },
       };
 
@@ -2090,6 +2128,57 @@ function MessageActions({
   );
 }
 
+// Renders the map image(s) local-rag matched to a site-scoped answer
+// (see ChatMessage.metadata.mapCitations's own comment for where these
+// come from). Deliberately separate from SourcesSection just above it
+// in MessageBubble - these are images, not text citations, and mixing
+// them into ExpandableCitation's text-excerpt UI would be a worse fit
+// than a small captioned image grid. A citation whose image failed to
+// render server-side (imageUrl null - see map_images.py's
+// render_map_image()) still shows its filename, so the answer stays
+// honest about which document backs it even without a picture.
+function MapCitationsSection({
+  maps,
+  postcode,
+}: {
+  maps: MapCitation[];
+  postcode?: string;
+}) {
+  if (!maps.length) return null;
+  return (
+    <div className="rounded-2xl border border-neutral-950/10 bg-neutral-950/[0.03] p-4">
+      <p className="mb-3 text-xs font-medium tracking-wide text-neutral-600">
+        {postcode ? `Map${maps.length > 1 ? "s" : ""} for ${postcode}` : "Referenced map"}
+      </p>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        {maps.map((m, i) => (
+          <div
+            key={`${m.filename}-${i}`}
+            className="overflow-hidden rounded-xl border border-neutral-950/10 bg-white"
+          >
+            {m.imageUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={m.imageUrl}
+                alt={m.filename}
+                className="block w-full object-contain"
+                loading="lazy"
+              />
+            ) : (
+              <div className="flex h-32 items-center justify-center bg-neutral-950/5 text-xs text-neutral-500">
+                Map image unavailable
+              </div>
+            )}
+            <p className="truncate px-3 py-2 text-[11px] text-neutral-600" title={m.filename}>
+              {m.filename}
+            </p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function MessageBubble({
   message,
   setMessages,
@@ -2342,6 +2431,16 @@ function MessageBubble({
                           ⚠️ Not clearly backed by the sources:
                         </span>{" "}
                         {message.metadata.unsupportedClaims.join("; ")}
+                      </div>
+                    )}
+
+                  {Array.isArray(message.metadata?.mapCitations) &&
+                    message.metadata.mapCitations.length > 0 && (
+                      <div className="mt-5 w-full">
+                        <MapCitationsSection
+                          maps={message.metadata.mapCitations}
+                          postcode={message.metadata.sitePostcode}
+                        />
                       </div>
                     )}
 
