@@ -42,10 +42,17 @@ function getAI() {
 // former for free; if it's actually the latter, all retries below will
 // still fail and the caller sees the same error after ~waiting - that's the
 // signal to stop ingesting for the day rather than hammer the API further.
+//
+// Confirmed 2026-09-16: it IS (at least partly) a daily cap - retrying
+// through this full backoff still fails once the day's ~1000 free-tier
+// requests are used up. scripts/ingest-council-plans.ts uses
+// isRateLimitError() (exported below) to detect that case specifically and
+// stop the whole batch run rather than burning through every remaining
+// council's full retry budget for a guaranteed-doomed attempt.
 const EMBED_MAX_RETRIES = 3;
 const EMBED_RETRY_BACKOFF_MS = [15_000, 30_000, 60_000];
 
-function isRateLimitError(err: unknown): boolean {
+export function isRateLimitError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err);
   const status = (err as { status?: number; code?: number })?.status
     ?? (err as { status?: number; code?: number })?.code;

@@ -30,6 +30,27 @@
 // all at once - Gemini embedding calls are the bottleneck, and a single
 // large Local Plan can be hundreds of pages.
 //
+// QUOTA HANDLING (added 2026-09-16, after two real runs both hit Gemini's
+// free-tier daily cap partway through a batch): a 429/RESOURCE_EXHAUSTED
+// failure is NOT the same kind of failure as a dead URL or a 403 - it says
+// nothing about this particular council, only that today's shared embedding
+// budget is spent. Treating it like any other error (permanently marking
+// the row "error", requiring a human to notice and manually reset it before
+// it's ever retried - see the git history around commit daac79f/Redcar and
+// Cleveland for how that played out) is wrong twice over: it hides a
+// perfectly good, still-pending council behind a false "error", and it lets
+// the batch loop plow into every other queued row and pay the FULL retry
+// backoff for each one, even though they're all doomed the moment the first
+// one confirms the quota is out. So: a quota failure leaves the row's status
+// exactly as it was (pending_ingest - untouched, no CSV write needed for
+// status) and STOPS the batch immediately; the very next invocation of this
+// script (whenever that is - later today if it was a short burst window,
+// tomorrow if it's the daily cap) picks the same row right back up, and
+// lib/chromaIngest.ts's own resume logic (see ingestOnePdf()) means a
+// document that got partway through embedding continues from its last
+// completed chunk instead of re-embedding (and re-spending quota on) work
+// already done.
+//
 // REQUIRES REAL INTERNET ACCESS to both the council websites AND to
 // Supabase + the Gemini embeddings API (via lib/chromaIngest.ts). If
 // you're running this from an environment with restricted network egress
@@ -57,6 +78,7 @@ import crypto from "crypto";
 import { createClient } from "@supabase/supabase-js";
 
 import { ingestMultiplePdfs } from "../lib/chromaIngest";
+import { isRateLimitError } from "../lib/embeddings";
 import { toLpaSlug } from "../lib/domain-vocabulary";
 
 // A Policies Map is a cartographic PDF: site allocations drawn on a base map,
@@ -297,6 +319,8 @@ async function main() {
 
   let totalBytes = 0;
   let totalChunks = 0;
+  let processedCount = 0;
+  let stoppedForQuota = false;
 
   for (const row of batch) {
     console.log(`\n=== ${row.organisation_name} (${row.jurisdiction_key}) ===`);
@@ -348,14 +372,43 @@ async function main() {
       );
 
       totalBytes += buffer.length;
-      totalChunks += result.chunks;
+      // Only the chunks actually embedded/inserted THIS run count toward the
+      // capacity projection below - result.chunks is the document's TOTAL
+      // (including any chunks a previous, quota-cut-short run already
+      // committed), which would double-count on a resumed document.
+      totalChunks += result.newlyInserted;
+      processedCount++;
 
       row.status = "ingested";
-      row.notes = `${result.chunks} chunks, document_id=${result.document_id}, lpa=${lpaSlug}`;
+      row.notes =
+        result.newlyInserted === result.chunks
+          ? `${result.chunks} chunks, document_id=${result.document_id}, lpa=${lpaSlug}`
+          : `${result.chunks} chunks total (${result.newlyInserted} newly embedded this run, ` +
+            `resumed from a prior partial run), document_id=${result.document_id}, lpa=${lpaSlug}`;
       console.log(
-        `OK: ${result.chunks} chunks ingested (document_id=${result.document_id}, lpa_slug=${lpaSlug})`
+        result.newlyInserted === result.chunks
+          ? `OK: ${result.chunks} chunks ingested (document_id=${result.document_id}, lpa_slug=${lpaSlug})`
+          : `OK: ${result.chunks} chunks total, ${result.newlyInserted} newly embedded this run ` +
+            `(document_id=${result.document_id}, lpa_slug=${lpaSlug})`
       );
     } catch (err: any) {
+      if (isRateLimitError(err)) {
+        // Not this council's fault, and not permanent - see this file's
+        // header comment. Leave status/notes untouched (it's still
+        // "pending_ingest") so the very next run picks it straight back up,
+        // and stop the batch now rather than let every remaining row pay
+        // the full retry backoff for a guaranteed-doomed attempt.
+        console.error(
+          `\nEMBEDDING QUOTA APPEARS EXHAUSTED: ${String(err?.message || err).slice(0, 300)}\n` +
+            `Leaving "${row.organisation_name}" as pending_ingest (any chunks already embedded for ` +
+            `it this run are kept, per lib/chromaIngest.ts's resume logic) and stopping this batch here.\n` +
+            `Re-run the same command later (today if this was a short burst window, tomorrow if it's ` +
+            `the daily cap) to continue exactly where this left off.`
+        );
+        stoppedForQuota = true;
+        saveTracker(trackerPath, rows);
+        break;
+      }
       row.status = "error";
       row.notes = String(err?.message || err).slice(0, 500);
       console.error(`FAILED: ${row.notes}`);
@@ -373,7 +426,14 @@ async function main() {
   console.log("\n=== Tracker status summary ===");
   console.log(summary);
 
-  await reportCapacity(totalBytes, totalChunks, batch.length);
+  if (stoppedForQuota) {
+    console.log(
+      `\nStopped early: ${processedCount}/${batch.length} council(s) in this batch were attempted ` +
+        `before the quota hit; ${batch.length - processedCount} were left untouched (still pending_ingest).`
+    );
+  }
+
+  await reportCapacity(totalBytes, totalChunks, processedCount);
 }
 
 /**
@@ -445,9 +505,9 @@ async function reportCapacity(
   const estimatedDbBytes = (embeddingBytes + totalBytes * 0.35) * 2.2;
 
   console.log("\n=== Capacity (measured, this run) ===");
-  console.log(`  councils ingested:     ${councilCount}`);
+  console.log(`  councils processed:    ${councilCount}`);
   console.log(`  PDFs downloaded:       ${mb(totalBytes)} MB`);
-  console.log(`  chunks created:        ${totalChunks}`);
+  console.log(`  chunks newly embedded: ${totalChunks}`);
   console.log(`  chunks per council:    ${Math.round(totalChunks / councilCount)}`);
   console.log(`  est. database growth:  ~${mb(estimatedDbBytes)} MB`);
   console.log(`  => per council:        ~${mb(estimatedDbBytes / councilCount)} MB`);
