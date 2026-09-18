@@ -22,7 +22,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -442,3 +442,66 @@ def get_lpa_knowledge(geography: str):
 @app.post("/lpa-knowledge/{geography}/distill")
 def distill_lpa_knowledge(geography: str):
     return memory_module.distill_lpa_knowledge(geography)
+
+
+# --- Proposal compliance review (2026-09-18) - accepts one or more
+# uploaded proposal documents (a Design & Access Statement/planning
+# statement, typically) plus a site (project_id, or postcode, or
+# lat/lon - the same three ways every other site-aware endpoint here
+# accepts a site) and assesses the proposal against the corpus + the
+# site's real GIS constraints. Multipart/form-data, not JSON, since this
+# endpoint takes file uploads - see proposal_review.py's module
+# docstring for the full pipeline; this is a thin HTTP wrapper, same
+# pattern as every other endpoint in this file.
+
+
+@app.post("/proposal-review")
+async def proposal_review_endpoint(
+    files: list[UploadFile] = File(...),
+    project_id: int | None = Form(None),
+    postcode: str | None = Form(None),
+    lat: float | None = Form(None),
+    lon: float | None = Form(None),
+):
+    """curl example:
+      curl -s -X POST http://localhost:8010/proposal-review \
+        -F "files=@/path/to/Design and Access Statement.pdf" \
+        -F "postcode=SW1V 3LX"
+    """
+    import tempfile
+    from pathlib import Path as _Path
+
+    from proposal_review import extract_proposal_text, review_proposal
+
+    t0 = time.time()
+    document_texts = []
+    pages_not_assessed = {}
+    with tempfile.TemporaryDirectory() as tmp:
+        for upload in files:
+            dest = _Path(tmp) / upload.filename
+            dest.write_bytes(await upload.read())
+            text, _pages_with_text, pages_without_text, error = extract_proposal_text(dest)
+            if error:
+                raise HTTPException(status_code=400, detail=f"{upload.filename}: {error}")
+            document_texts.append((upload.filename, text))
+            if pages_without_text:
+                pages_not_assessed[upload.filename] = pages_without_text
+
+    result = review_proposal(
+        document_texts, project_id=project_id, postcode=postcode, lat=lat, lon=lon,
+    )
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    t1 = time.time()
+    logger.info(
+        f"proposal-review files={[f.filename for f in files]} project_id={project_id} "
+        f"postcode={postcode!r} geography={result.get('geography')} "
+        f"issues={len(result['assessment'].get('issues', []))} "
+        f"total_ms={(t1-t0)*1000:.0f}"
+    )
+    return {
+        **result,
+        "pages_not_assessed": pages_not_assessed,
+        "total_ms": round((t1 - t0) * 1000, 1),
+    }

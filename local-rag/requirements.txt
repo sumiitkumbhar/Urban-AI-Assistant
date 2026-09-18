@@ -12,3 +12,4 @@ psycopg2-binary>=2.9,<3  # gis/ - local Postgres+PostGIS site-constraint lookup
 requests>=2.31,<3  # gis/ - planning.data.gov.uk + postcodes.io HTTP calls
 pymupdf>=1.24,<2  # map_images.py - renders map-graphic PDFs (conservation-area/Policies Map pages) to PNG for the visual-citation feature
 pillow>=10,<12  # map_images.py - trims blank margins off the rendered map page
+python-multipart>=0.0.9,<0.1  # proposal_review.py / service.py - multipart file uploads for /proposal-review
