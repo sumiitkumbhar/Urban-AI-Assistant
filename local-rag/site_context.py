@@ -107,16 +107,28 @@ def _describe_constraints(site):
         phrases.append("within the Green Belt")
 
     # Added 2026-09-17 alongside the flood-risk-zone GIS layer (see
-    # gis_lookup.py/gis_common.py) - deliberately phrased as "in a
-    # mapped flood risk zone" rather than naming a specific zone number,
-    # since the ingested dataset doesn't yet carry a confirmed zone 1/2/3
-    # category field (see schema.sql's flood_risk_zones comment) - this
-    # stays accurate either way: it only claims what's actually known
-    # (the point falls inside a flood-risk-zone polygon), not a category
-    # that hasn't been verified yet.
-    frz = site["flood_risk_zones"]
-    if frz["matches"]:
-        phrases.append("in a mapped flood risk zone")
+    # gis_lookup.py/gis_common.py); the zone 1/2/3 category field
+    # ("flood_risk_level") was confirmed and wired in 2026-09-18 - see
+    # gis_common.py's CONSTRAINT_DATASETS comment for the source. Uses
+    # .get() rather than direct indexing because this function also runs
+    # on project_state.py's STORED constraints_json (see this function's
+    # own docstring) - a project created before 2026-09-17 has a
+    # constraints_json that predates this key entirely, and a direct
+    # site["flood_risk_zones"] crashed with a real KeyError on exactly
+    # that case (project 1, created 2026-09-15) the first time this path
+    # was actually exercised, 2026-09-18. Falls back to the generic
+    # phrase for any row ingested before the flood_risk_level column
+    # existed - matching this function's own rule of only claiming what
+    # is actually known.
+    frz = site.get("flood_risk_zones") or {}
+    if frz.get("matches"):
+        levels = sorted(
+            {m["flood_risk_level"] for m in frz["matches"] if m.get("flood_risk_level")}
+        )
+        if levels:
+            phrases.append(f"in a mapped Flood Zone {'/'.join(levels)} area")
+        else:
+            phrases.append("in a mapped flood risk zone")
 
     return phrases, area_names
 

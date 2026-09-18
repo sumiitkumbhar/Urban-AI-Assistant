@@ -25,6 +25,9 @@ def _print_matches(label, block):
             extra = f" [Grade {m['listed_grade']}]"
         if "article_4_direction" in m and m["article_4_direction"]:
             extra = f" [{m['article_4_direction']}]"
+        if "flood_risk_level" in m and m["flood_risk_level"]:
+            type_suffix = f", {m['flood_risk_type']}" if m.get("flood_risk_type") else ""
+            extra = f" [Flood Zone {m['flood_risk_level']}{type_suffix}]"
         if "distance_m" in m:
             tag = "ON SITE" if m.get("on_site") else f"{m['distance_m']:.0f}m away"
             extra += f" ({tag})"
@@ -60,6 +63,7 @@ def main():
     _print_matches("Listed buildings nearby", result["listed_buildings"])
     _print_matches("Article 4 directions", result["article_4_directions"])
     _print_matches("Green Belt", result["green_belt"])
+    _print_matches("Flood risk zones", result["flood_risk_zones"])
 
 
 if __name__ == "__main__":

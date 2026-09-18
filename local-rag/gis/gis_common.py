@@ -75,10 +75,22 @@ CONSTRAINT_DATASETS = {
     # local-rag-status.md's decision note. Slots into the exact same
     # generic dict-driven pattern the four constraints above already
     # use, so gis_ingest.py needed zero changes to pick this up.
+    #
+    # extra_fields confirmed 2026-09-18 by inspecting a real Planning
+    # Data entity (https://www.planning.data.gov.uk/entity/65000155.json,
+    # reference "156/2") since this session's network couldn't reach a
+    # live entity.geojson response at build time (see the comment this
+    # replaces, and local-rag-status.md's "Pivot" section) - the raw
+    # entity carries "flood-risk-level" (e.g. "2", "3" - the zone
+    # category) and "flood-risk-type" (e.g. "Coastal Events" - which
+    # kind of flooding), both separate from "reference".
     "flood-risk-zone": {
         "table": "flood_risk_zones",
         "name_field": "name",
-        "extra_fields": {},
+        "extra_fields": {
+            "flood_risk_level": "flood-risk-level",
+            "flood_risk_type": "flood-risk-type",
+        },
     },
 }
 

@@ -176,16 +176,7 @@ CREATE INDEX IF NOT EXISTS idx_project_open_questions_site
 --
 -- Source: planning.data.gov.uk's flood-risk-zone dataset (Environment
 -- Agency guidance, England - "flood zone 1 areas least likely to flood,
--- flood zone 3 areas more likely to flood"). No `extra_fields` are
--- pulled yet beyond name/reference - the exact property key the API
--- uses to carry the zone 1/2/3 category wasn't confirmed from outside a
--- live query (this session's own network can't reach planning.data.gov.uk
--- to inspect a real response - see local-rag-status.md). If `name` or
--- `reference` doesn't already carry the zone number once this is
--- actually run, gis_ingest.py's per-feature `properties` dict has
--- everything needed to add a proper extra_fields mapping afterward -
--- this table already has room to grow (ADD COLUMN IF NOT EXISTS is safe
--- to run any time).
+-- flood zone 3 areas more likely to flood").
 CREATE TABLE IF NOT EXISTS flood_risk_zones (
     entity BIGINT PRIMARY KEY,
     reference TEXT,
@@ -197,6 +188,18 @@ CREATE TABLE IF NOT EXISTS flood_risk_zones (
 );
 CREATE INDEX IF NOT EXISTS idx_flood_risk_zones_geom
     ON flood_risk_zones USING GIST (geom);
+
+-- Added 2026-09-18: the zone 1/2/3 category field was confirmed by
+-- inspecting a real Planning Data entity outside this session's own
+-- restricted network (see gis_common.py's CONSTRAINT_DATASETS comment
+-- for the exact source) - it's "flood-risk-level" ("1"/"2"/"3"), plus a
+-- separate "flood-risk-type" ("Coastal Events" etc: which kind of
+-- flooding, not how severe). ADD COLUMN IF NOT EXISTS is safe to run
+-- any time, including against the 2 rows already ingested for
+-- Westminster on 2026-09-17 - re-running gis_ingest.py after this
+-- schema change will backfill both columns for them.
+ALTER TABLE flood_risk_zones ADD COLUMN IF NOT EXISTS flood_risk_level TEXT;
+ALTER TABLE flood_risk_zones ADD COLUMN IF NOT EXISTS flood_risk_type TEXT;
 
 -- Episodic + semantic memory + conflict detection (2026-09-18) -
 -- architecture-plan section 23's remaining Phase 7 tiers, picked up

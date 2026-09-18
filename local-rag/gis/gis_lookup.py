@@ -145,7 +145,11 @@ def site_constraints(lat, lon):
                 )
                 green_belt = _lookup_containing(cur, "green_belt", lat, lon)
                 flood_risk_zones = _lookup_containing(
-                    cur, "flood_risk_zones", lat, lon
+                    cur,
+                    "flood_risk_zones",
+                    lat,
+                    lon,
+                    extra_cols=("flood_risk_level", "flood_risk_type"),
                 )
                 listed_buildings = _lookup_nearby_listed_buildings(
                     cur, lat, lon, LISTED_BUILDING_NEARBY_RADIUS_M
