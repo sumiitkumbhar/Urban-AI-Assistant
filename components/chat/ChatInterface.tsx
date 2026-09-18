@@ -1864,29 +1864,28 @@ export default function ChatInterface() {
           {FEATURES.ragSourceToggle && (
             <div className="mt-2 flex items-center justify-center gap-2 text-[11px] text-neutral-600">
               <span>Answers from:</span>
-              <div className="inline-flex overflow-hidden rounded-full border border-neutral-950/10">
-                <button
-                  type="button"
-                  onClick={() => setRagSource("cloud")}
-                  className={`px-2.5 py-1 ${
-                    ragSource === "cloud"
-                      ? "bg-neutral-950 text-neutral-100"
-                      : "hover:bg-neutral-950/5"
-                  }`}
-                >
-                  Cloud
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRagSource("local")}
-                  className={`px-2.5 py-1 ${
-                    ragSource === "local"
-                      ? "bg-neutral-950 text-neutral-100"
-                      : "hover:bg-neutral-950/5"
-                  }`}
-                >
-                  Local (offline)
-                </button>
+              <div className="relative inline-flex overflow-hidden rounded-full border border-neutral-950/10">
+                {(["cloud", "local"] as const).map((source) => (
+                  <button
+                    key={source}
+                    type="button"
+                    onClick={() => setRagSource(source)}
+                    className={`relative z-10 px-2.5 py-1 transition-colors duration-150 ${
+                      ragSource === source
+                        ? "text-neutral-100"
+                        : "hover:bg-neutral-950/5"
+                    }`}
+                  >
+                    {ragSource === source && (
+                      <motion.span
+                        layoutId="ragSourcePill"
+                        className="absolute inset-0 -z-10 rounded-full bg-neutral-950"
+                        transition={{ type: "spring", stiffness: 500, damping: 35 }}
+                      />
+                    )}
+                    {source === "cloud" ? "Cloud" : "Local (offline)"}
+                  </button>
+                ))}
               </div>
               {ragSource === "local" && localRagStatus === "checking" && (
                 <span className="text-neutral-500">checking…</span>

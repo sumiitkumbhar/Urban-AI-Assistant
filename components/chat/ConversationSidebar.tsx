@@ -198,12 +198,19 @@ export default function ConversationSidebar({
   return (
     <>
       {/* mobile scrim */}
-      {isOpen && (
-        <div
-          className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm lg:hidden"
-          onClick={onClose}
-        />
-      )}
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div
+            key="sidebar-scrim"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18, ease: "easeOut" }}
+            className="fixed inset-0 z-30 bg-black/50 backdrop-blur-sm lg:hidden"
+            onClick={onClose}
+          />
+        )}
+      </AnimatePresence>
 
       <aside
         className={`fixed inset-y-0 left-0 z-40 flex w-72 shrink-0 flex-col border-r border-neutral-950/5 bg-[#f7f4ee]/95 backdrop-blur-xl transition-[transform,width] duration-200 ease-out lg:static lg:z-auto lg:translate-x-0 ${
