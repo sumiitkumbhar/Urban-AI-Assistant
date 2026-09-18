@@ -197,3 +197,58 @@ CREATE TABLE IF NOT EXISTS flood_risk_zones (
 );
 CREATE INDEX IF NOT EXISTS idx_flood_risk_zones_geom
     ON flood_risk_zones USING GIST (geom);
+
+-- Episodic + semantic memory + conflict detection (2026-09-18) -
+-- architecture-plan section 23's remaining Phase 7 tiers, picked up
+-- after structured project state (the "canonical current state" tier,
+-- the ALTER TABLE sites / project_open_questions block above) shipped
+-- 2026-09-15. See memory.py's module docstring for the full design;
+-- these three tables are just the storage.
+
+-- Episodic memory: a timestamped log of what happened on ONE project -
+-- questions asked (auto-logged by service.py whenever a /query carries
+-- a project_id), decisions made, freeform notes. Mirrors
+-- project_open_questions's site_id/ON DELETE CASCADE shape.
+CREATE TABLE IF NOT EXISTS project_events (
+    id SERIAL PRIMARY KEY,
+    site_id INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+    event_type TEXT NOT NULL,  -- 'query' | 'decision' | 'note'
+    summary TEXT NOT NULL,
+    detail TEXT,
+    source TEXT NOT NULL DEFAULT 'manual',  -- 'manual' | 'auto'
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_project_events_site
+    ON project_events (site_id, created_at DESC);
+
+-- Semantic memory: knowledge distilled ACROSS projects, scoped by
+-- geography (an LPA slug, e.g. "westminster" - the same slug local-rag's
+-- own corpus/geography_filter already use) rather than per-project,
+-- since the point of this tier is patterns that generalize beyond one
+-- site. Populated only by memory.distill_lpa_knowledge() - an explicit,
+-- on-demand LLM distillation, never written to directly.
+CREATE TABLE IF NOT EXISTS lpa_knowledge (
+    id SERIAL PRIMARY KEY,
+    geography TEXT NOT NULL,
+    fact TEXT NOT NULL,
+    source_event_ids INTEGER[] NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_lpa_knowledge_geography
+    ON lpa_knowledge (geography);
+
+-- Conflicts: flagged when a new "decision" project_events entry appears
+-- to genuinely contradict an earlier event on the same project, or
+-- existing lpa_knowledge for its authority - see memory.detect_conflicts().
+-- Never auto-resolved; a person reviews each one and sets status.
+CREATE TABLE IF NOT EXISTS memory_conflicts (
+    id SERIAL PRIMARY KEY,
+    site_id INTEGER REFERENCES sites(id) ON DELETE CASCADE,
+    new_event_id INTEGER REFERENCES project_events(id) ON DELETE CASCADE,
+    conflicting_with TEXT NOT NULL,
+    explanation TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',  -- 'open' | 'acknowledged' | 'dismissed'
+    detected_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_memory_conflicts_site
+    ON memory_conflicts (site_id);

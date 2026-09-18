@@ -34,6 +34,7 @@ from orchestrate import orchestrate
 from site_context import build_site_context, _describe_constraints, _find_map_citations
 from map_images import MAP_IMAGES_DIR
 import project_state as project_state_module
+import memory as memory_module
 from retrieve import _load_embedder, _load_reranker, _load_qdrant, _load_bm25, _load_chunk_texts
 
 LOG_FILE = DATA_DIR / "service.log"
@@ -131,6 +132,27 @@ def _resolve_project_context(project_id, geography):
     return project_context, geography, map_citations
 
 
+def _auto_log_query_event(project_id, question, answer_text):
+    """Auto-logs a "query" episodic-memory event whenever a project-
+    scoped /query or /query/stream call finishes - this is what makes a
+    project's episodic history (memory.py) fill in from normal chat use
+    rather than requiring a separate manual step. Deliberately
+    best-effort: any failure (memory tables not yet applied, DB down) is
+    logged and swallowed, never turned into a 500 for what was otherwise
+    a successful answer - the same "never let a side-effect break the
+    real response" instinct as the groundedness/conflict-detection
+    LLM-judge calls elsewhere in this project."""
+    if project_id is None:
+        return
+    try:
+        memory_module.log_event(
+            project_id, "query", question[:200],
+            detail=f"A: {(answer_text or '')[:500]}", source="auto",
+        )
+    except Exception:
+        logger.exception(f"Failed to auto-log query event for project {project_id}")
+
+
 @app.get("/health")
 def health():
     ready = CHUNKS_PATH.exists() and QDRANT_PATH.exists() and BM25_PATH.exists()
@@ -150,6 +172,8 @@ def query(req: QueryRequest):
     t1 = time.time()
     result = generate_answer(req.question, chunks, coverage=coverage, project_context=project_context)
     t2 = time.time()
+
+    _auto_log_query_event(req.project_id, req.question, result.get("answer"))
 
     logger.info(
         f"query={req.question!r} chunks={len(chunks)} confidence={coverage['confidence']} "
@@ -212,6 +236,7 @@ def query_stream(req: QueryRequest):
                     "retrieval_ms": round((t1 - t0) * 1000, 1),
                     "generation_ms": round((t2 - t1) * 1000, 1),
                 }
+                _auto_log_query_event(req.project_id, req.question, payload.get("answer"))
                 logger.info(
                     f"query(stream)={req.question!r} chunks={len(chunks)} "
                     f"confidence={coverage['confidence']} "
@@ -356,3 +381,64 @@ def resolve_question(project_id: int, question_id: int):
     if question is None:
         raise HTTPException(status_code=404, detail=f"No question with id {question_id}.")
     return question
+
+
+# --- Episodic/semantic memory + conflict detection (memory.py,
+# architecture-plan section 23's remaining Phase 7 tiers, 2026-09-18) -
+# same thin-HTTP-wrapper pattern as the /projects endpoints above: all
+# the real logic lives in memory.py, this layer only turns None/ValueError
+# into 404/400.
+
+
+class EventCreateRequest(BaseModel):
+    event_type: str
+    summary: str
+    detail: str | None = None
+
+
+class ConflictUpdateRequest(BaseModel):
+    status: str
+
+
+@app.post("/projects/{project_id}/events")
+def create_event(project_id: int, req: EventCreateRequest):
+    try:
+        event = memory_module.log_event(
+            project_id, req.event_type, req.summary, detail=req.detail, source="manual"
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if event is None:
+        raise HTTPException(status_code=404, detail=f"No project with id {project_id}.")
+    return event
+
+
+@app.get("/projects/{project_id}/events")
+def list_events(project_id: int):
+    return memory_module.list_events(project_id)
+
+
+@app.get("/projects/{project_id}/conflicts")
+def list_project_conflicts(project_id: int):
+    return memory_module.list_conflicts(project_id=project_id)
+
+
+@app.patch("/conflicts/{conflict_id}")
+def update_conflict(conflict_id: int, req: ConflictUpdateRequest):
+    try:
+        conflict = memory_module.resolve_conflict(conflict_id, req.status)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if conflict is None:
+        raise HTTPException(status_code=404, detail=f"No conflict with id {conflict_id}.")
+    return conflict
+
+
+@app.get("/lpa-knowledge/{geography}")
+def get_lpa_knowledge(geography: str):
+    return memory_module.get_lpa_knowledge(geography)
+
+
+@app.post("/lpa-knowledge/{geography}/distill")
+def distill_lpa_knowledge(geography: str):
+    return memory_module.distill_lpa_knowledge(geography)

@@ -382,4 +382,35 @@ def build_context_summary(project_id):
         for q in unresolved:
             lines.append(f"  - {q}")
 
+    # Episodic + semantic memory (memory.py, added 2026-09-18) - both
+    # wrapped in their own try/except rather than one shared try around
+    # both calls, and deliberately best-effort/silent on failure (append
+    # nothing rather than raise) for the same reason every cache-miss and
+    # LLM-judge failure elsewhere in this project degrades quietly: a
+    # project that predates memory.py's tables (schema not yet
+    # re-applied) must keep working exactly as it did before this
+    # feature existed, not start raising on every context build.
+    try:
+        from memory import list_events
+
+        recent = list_events(project_id, limit=5)
+    except Exception:
+        recent = []
+    if recent:
+        lines.append("- Recent history:")
+        for e in recent:
+            lines.append(f"  - [{e['event_type']}] {e['summary']}")
+
+    if project["geography"]:
+        try:
+            from memory import get_lpa_knowledge
+
+            facts = get_lpa_knowledge(project["geography"])
+        except Exception:
+            facts = []
+        if facts:
+            lines.append(f"- Known patterns for {project['geography']}:")
+            for f in facts[:5]:
+                lines.append(f"  - {f['fact']}")
+
     return "\n".join(lines)
