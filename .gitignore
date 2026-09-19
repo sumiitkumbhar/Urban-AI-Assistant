@@ -39,4 +39,11 @@ stabilization-report.json
 # machine-local build output, not source.
 local-rag/venv/
 local-rag/data/
+local-rag/reports/
 local-rag/__pycache__/
+
+# Copied from node_modules/pdfjs-dist by the copy-pdf-worker script
+# (package.json predev/prebuild) - see components/chat/DocumentPanel.tsx's
+# worker-setup comment for why it has to be a plain public/ static file
+# rather than webpack-bundled. Regenerated automatically, so not committed.
+public/pdf.worker.min.mjs

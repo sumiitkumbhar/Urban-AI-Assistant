@@ -4,6 +4,9 @@
   "description": "AI-powered construction and land analysis copilot with drawing analysis capabilities",
   "private": true,
   "scripts": {
+    "copy-pdf-worker": "cp node_modules/pdfjs-dist/build/pdf.worker.min.mjs public/pdf.worker.min.mjs",
+    "predev": "npm run copy-pdf-worker",
+    "prebuild": "npm run copy-pdf-worker",
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
@@ -57,14 +60,14 @@
     "openai": "^6.9.1",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^1.1.4",
-    "pdfjs-dist": "^4.10.38",
+    "pdfjs-dist": "4.8.69",
     "pg": "^8.16.3",
     "pptxgenjs": "^4.0.1",
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "react-hot-toast": "^2.6.0",
     "react-markdown": "^10.1.0",
-    "react-pdf": "^10.2.0",
+    "react-pdf": "9.2.1",
     "react-rnd": "^10.5.2",
     "recharts": "^3.3.0",
     "remark-gfm": "^4.0.1",
@@ -96,5 +99,8 @@
   },
   "engines": {
     "node": ">=18.17.0"
+  },
+  "overrides": {
+    "pdfjs-dist": "4.8.69"
   }
 }

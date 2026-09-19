@@ -33,18 +33,36 @@ this:
   4. Merges/dedupes the retrieved chunks across topics into one numbered
      evidence set (answer.py's own build_context()), then makes exactly
      ONE Groq call - not one per topic, so a single coherent report
-     comes back rather than N disconnected mini-answers - asking for a
-     structured JSON list of issues: what the proposal is missing,
-     unclear about, or appears not to comply with, why (citing evidence
-     by [N]), and a concrete suggested change. Mirrors answer.py's own
-     "cite everything, never invent" system-prompt discipline and its
-     _extract_first_json_object() parsing helper.
+     comes back rather than N disconnected mini-answers - asking for TWO
+     things in one structured JSON response: a list of issues (what the
+     proposal is missing, unclear about, or appears not to comply with,
+     why, citing evidence by [N], and a concrete suggested change), and
+     a checklist of the specific items (statements, assessments, plans)
+     the evidence indicates a proposal like this should include, each
+     marked present/missing/unclear against the proposal's own text
+     (added 2026-09-18, per explicit request: "tell if any of the
+     clauses are remaining to put inside the proposal... suggest what
+     things to be included" - see REVIEW_SYSTEM_PROMPT and STANDARD_TOPICS'
+     dedicated "required content" topic). Mirrors answer.py's own "cite
+     everything, never invent" system-prompt discipline and its
+     _extract_first_json_object() parsing helper. The summary and each
+     issue/checklist note are written as real prose with citations woven
+     into the sentences themselves ("the site sits within a conservation
+     area [5], which places specific design constraints..." rather than a
+     citation list bolted on after a terse clause) - added 2026-09-18 per
+     explicit request: "make it descriptive and more detailed... in-text
+     citations".
 
 Deliberately does NOT add the uploaded proposal into the corpus/index -
 this is a one-off assessment of a document someone hands in, not new
 reference material for local-rag to answer future unrelated queries
 from. If a document should become permanent corpus content, that's a
 job for ingest.py/council_ingest.py, not this module.
+
+Functions as a first-pass planning adviser, not a professional one - every
+successful assessment carries a DISCLAIMER (see below) saying so plainly,
+since a specific, citation-backed report can otherwise read as a final
+judgement rather than a starting point for a real review.
 """
 
 import json
@@ -76,34 +94,79 @@ STANDARD_TOPICS = [
     ("Green Belt policy and very special circumstances", "green_belt"),
     ("flood risk, the Sequential Test and the Exception Test", "flood_risk_zones"),
     ("fire safety and building regulations", None),
+    # Added 2026-09-18 per explicit request ("tell if any of the clauses
+    # are remaining to put inside the proposal... suggest what things to
+    # be included") - a dedicated topic so the requirements checklist
+    # below (see REVIEW_SYSTEM_PROMPT's "checklist" field) has real
+    # evidence to check against, rather than relying on whatever the
+    # other topics happened to retrieve. Deliberately always-applies
+    # (constraint_key=None): every proposal needs to be checked for
+    # required content, regardless of which constraints the site has.
+    ("required content and mandatory sections of a planning application, "
+     "design and access statement, or supporting documents", None),
 ]
 
-REVIEW_SYSTEM_PROMPT = """You are a UK planning compliance reviewer. You are given: \
-(1) the site's known constraints (if any), (2) numbered policy evidence extracts \
-from UK planning/building-regulation sources, and (3) the full text of a proposal \
-document submitted for that site. \
-Compare the proposal against the evidence and the site's constraints. Identify \
-specific issues: anything the proposal does not address, appears to conflict with, \
-or should state more clearly given the applicable policy or constraint. For each \
-issue, cite the evidence that supports it using its number in square brackets, e.g. \
-[2] - never invent a citation, policy number, or page, and never cite evidence that \
-doesn't actually support the point. If the proposal already addresses a topic \
-adequately, do not flag it. If there isn't enough evidence to assess a topic, say so \
-rather than guessing. \
+REVIEW_SYSTEM_PROMPT = """You are a UK planning compliance reviewer writing a proper advisory \
+report, not a bare list of bullet points. You are given: (1) the site's known constraints (if \
+any), (2) numbered policy evidence extracts from UK planning/building-regulation sources, and \
+(3) the full text of a proposal document submitted for that site. \
+Write a "summary" as a real narrative paragraph of 3-5 sentences - not a one-line blurb - that \
+reads like the opening of an advisory letter: describe the site and its constraints, \
+characterize what the proposal covers, and preview the main concerns, weaving citations \
+directly into the sentences themselves in square brackets, e.g. "the site sits within a \
+conservation area [5], which places specific design constraints on roof profiles [6]." Every \
+factual claim in the summary needs an inline citation like that, as part of the sentence, not \
+listed separately afterward. \
+Then do two things, in the same inline-citation style throughout. \
+First, identify specific issues: anything the proposal does not address, appears to conflict \
+with, or should state more clearly given the applicable policy or constraint. For each issue, \
+write a fuller explanation of 2-4 sentences (not a single clause): state the specific policy or \
+constraint requirement and cite it inline as part of the sentence, explain why it matters for \
+this site, and describe what is actually missing or unclear in the proposal. \
+Second, build a checklist of specific items (named statements, assessments, plans, or sections \
+- e.g. "heritage statement", "flood risk assessment", "site location plan") that the evidence \
+indicates a proposal like this should include. Base this ONLY on what the evidence actually says \
+is required for this site's circumstances - never a generic assumption about what proposals \
+usually contain. For each checklist item, mark it "present" if the proposal document text \
+clearly includes it, "missing" if it does not appear at all, or "unclear" if it's ambiguous or \
+only partially covered, and write a note of 1-2 sentences explaining why it's required (with an \
+inline citation) and, if missing or unclear, what to add. \
+Rules that apply throughout: cite evidence using its number in square brackets as part of the \
+sentence wherever a claim depends on it, not only in a trailing list - never invent a citation, \
+policy number, or page, and never cite evidence that doesn't actually support the point. Also \
+still return the citation numbers you used for each issue/checklist item as a separate numeric \
+array (for cross-referencing), even though the same numbers already appear inline in your \
+prose. If the proposal already addresses a topic or checklist item adequately, mark it "present" \
+rather than flagging it as an issue. If there isn't enough evidence to assess a topic or \
+establish a requirement, say so plainly rather than guessing. \
 Respond with JSON only, no other text, no markdown fencing, in this exact shape: \
-{"summary": "one or two sentence overview", "issues": [{"topic": "short topic label", \
-"issue": "what's missing, unclear, or non-compliant", "citations": [1, 3], \
-"suggested_change": "a specific, actionable change"}]}"""
+{"summary": "a 3-5 sentence narrative with inline [N] citations woven into the prose", "issues": \
+[{"topic": "short topic label", "issue": "a 2-4 sentence explanation with inline [N] citations \
+woven into the prose", "citations": [1, 3], "suggested_change": "a specific, actionable \
+change"}], "checklist": [{"item": "short name of the required item", "status": \
+"present"|"missing"|"unclear", "citations": [4], "note": "1-2 sentences with an inline [N] \
+citation - why it's required and, if missing or unclear, what to add"}]}"""
 
 # Real budget, not just a safety net (found the hard way 2026-09-18): this
 # repo's Groq org is on a tier capped at 8000 tokens/minute per request
 # ("Request too large ... Limit 8000, Requested 11845" - the original
 # 60000-char cap alone was ~12-15k tokens, before even adding the evidence
 # context). At a conservative ~3.5 chars/token for dense policy/proposal
-# prose, 12000 chars is roughly 3400 tokens - leaving room for the system
-# prompt (~350 tokens), the evidence context (bounded by MAX_EVIDENCE_CHUNKS
-# below), and MAX_COMPLETION_TOKENS, comfortably under the 8000 limit.
-MAX_PROPOSAL_CHARS = 12000
+# prose:
+#   REVIEW_SYSTEM_PROMPT (~1000 tokens as of the "descriptive, in-text
+#   citations" rewrite 2026-09-18 - up from ~610 when the checklist
+#   instructions were added, ~350 before that) + proposal text + evidence
+#   context (bounded by MAX_EVIDENCE_CHUNKS) + MAX_COMPLETION_TOKENS must
+#   stay comfortably under 8000. Each prompt expansion so far has grown
+#   BOTH the prompt itself and the expected completion (longer narrative
+#   summary, longer per-issue explanations), so MAX_PROPOSAL_CHARS keeps
+#   absorbing the cut - evidence quality (MAX_EVIDENCE_CHUNKS) is kept up
+#   instead, since richer inline citations need a bigger evidence pool to
+#   draw on, not a smaller one; the proposal text was already truncated
+#   before (and truncation is reported to the caller via
+#   "proposal_truncated"), so trimming it further degrades the result
+#   less than trimming evidence or the completion budget would.
+MAX_PROPOSAL_CHARS = 5000
 # Hard cap on the merged/deduped evidence set, applied AFTER merging across
 # every topic - without this, more applicable constraint topics (a site
 # with conservation area + Article 4 + flood risk all matched) directly
@@ -112,8 +175,31 @@ MAX_PROPOSAL_CHARS = 12000
 # sorted by rerank_score first so the cap keeps the best evidence across
 # ALL topics, not just however many happen to fit from the first topics
 # processed.
-MAX_EVIDENCE_CHUNKS = 10
-MAX_COMPLETION_TOKENS = 1024
+MAX_EVIDENCE_CHUNKS = 8
+# Raised again 2026-09-18 (1024 -> 1400 -> 2200): the "descriptive, more
+# detail, in-text citations" rewrite asks for a 3-5 sentence narrative
+# summary plus 2-4 sentence explanations per issue (previously a single
+# clause each) - real prose, not just structured fields, needs real room.
+# reasoning_effort="low" (below) is what keeps this from repeating the
+# empty-content failure a bigger completion budget alone can't fix.
+MAX_COMPLETION_TOKENS = 2200
+
+# Attached to every successful assessment (CLI report and API response
+# alike, since service.py's /proposal-review just spreads review_proposal()'s
+# return dict) - added 2026-09-18 at the user's own request, after
+# confirming this tool functions as a first-pass adviser: it should say so
+# plainly rather than let a specific, confidently-worded report read as a
+# final professional judgement. Kept short and attached to the data, not
+# just mentioned in chat, so it survives however the report is delivered -
+# CLI, curl, or (once built) a browser UI.
+DISCLAIMER = (
+    "This is an automated first-pass check against the indexed corpus and the site's "
+    "GIS-matched constraints - not professional planning or legal advice. It can only "
+    "flag what the corpus and constraints actually cover, and it can still miss things "
+    "or misjudge relevance. Treat each issue as something to verify, not a final answer, "
+    "and have a qualified planning consultant or solicitor review anything before it is "
+    "submitted or relied on."
+)
 
 
 def extract_proposal_text(pdf_path):
@@ -334,8 +420,23 @@ def review_proposal(document_texts, project_id=None, postcode=None, lat=None, lo
     # "never let a real failure look like an ugly stack trace" instinct as
     # every other Groq call in this project (generate_answer()'s missing-
     # API-key early return, _check_groundedness()'s best-effort catch).
-    try:
-        completion = client.chat.completions.create(
+    # reasoning_effort="low" added 2026-09-18: openai/gpt-oss-120b is a
+    # reasoning model - it spends tokens "thinking" before it writes the
+    # actual JSON answer, and that thinking counts against max_tokens like
+    # everything else. The single-array "issues" prompt left enough of the
+    # 1024-token budget for a real answer after its (short) reasoning; the
+    # two-array "issues" + "checklist" prompt made reasoning long enough
+    # that it consumed the entire budget and left literally nothing for
+    # the answer (content came back empty, finish_reason "length" - found
+    # the hard way running this against a real Westminster D&AS). Capping
+    # reasoning effort is the right fix, not just raising max_tokens
+    # further - that would only buy a bit more headroom before the same
+    # thing happens on a harder proposal, and pushes back toward the 8000
+    # TPM ceiling. Isolated in _call_groq() so an older groq SDK that
+    # doesn't recognize the kwarg degrades to the old behavior instead of
+    # crashing outright.
+    def _call_groq():
+        kwargs = dict(
             model=model,
             messages=[
                 {"role": "system", "content": REVIEW_SYSTEM_PROMPT},
@@ -344,6 +445,13 @@ def review_proposal(document_texts, project_id=None, postcode=None, lat=None, lo
             temperature=0.1,
             max_tokens=MAX_COMPLETION_TOKENS,
         )
+        try:
+            return client.chat.completions.create(reasoning_effort="low", **kwargs)
+        except TypeError:
+            return client.chat.completions.create(**kwargs)
+
+    try:
+        completion = _call_groq()
     except APIStatusError as e:
         return {
             "error": (
@@ -360,17 +468,36 @@ def review_proposal(document_texts, project_id=None, postcode=None, lat=None, lo
             "proposal_truncated": truncated,
         }
     raw = completion.choices[0].message.content or ""
+    finish_reason = completion.choices[0].finish_reason
     json_text = _extract_first_json_object(raw)
-    parse_error = None
+    assessment_failed = False
     if json_text:
         try:
             assessment = json.loads(json_text)
         except Exception:
-            assessment = {"summary": raw.strip(), "issues": []}
-            parse_error = "Model response wasn't valid JSON - showing raw text as the summary."
+            assessment_failed = True
     else:
-        assessment = {"summary": raw.strip(), "issues": []}
-        parse_error = "Model response wasn't valid JSON - showing raw text as the summary."
+        assessment_failed = True
+
+    if assessment_failed:
+        # Deliberately NOT {"issues": [], "checklist": []} here - that
+        # would print/render as a clean "no issues found" result, which is
+        # exactly the kind of confident-looking-but-ungrounded output this
+        # tool is built to never produce (see the zero-evidence guard
+        # above). None is a distinct, unmissable "this didn't work" -
+        # every caller (CLI, report_render.py) checks assessment_failed
+        # before treating issues/checklist as real.
+        assessment = {"summary": None, "issues": None, "checklist": None}
+        parse_error = (
+            "The model did not return a parseable assessment - raw response was "
+            f"{'empty' if not raw.strip() else 'not valid JSON'} (finish_reason="
+            f"{finish_reason!r}). This is a real failure, not \"no issues found\" - most "
+            "likely the model used its whole token budget on internal reasoning before "
+            "writing an answer. Try again; if it keeps happening, this proposal/evidence "
+            "combination may need a larger MAX_COMPLETION_TOKENS."
+        )
+    else:
+        parse_error = None
 
     return {
         "geography": geography,
@@ -379,6 +506,8 @@ def review_proposal(document_texts, project_id=None, postcode=None, lat=None, lo
         "topics_failed": [t for t, _ in failed_topics],
         "evidence_citations": citations,
         "assessment": assessment,
+        "assessment_failed": assessment_failed,
         "parse_error": parse_error,
         "proposal_truncated": truncated,
+        "disclaimer": DISCLAIMER,
     }

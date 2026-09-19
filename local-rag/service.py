@@ -21,6 +21,7 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -81,6 +82,16 @@ app.add_middleware(
 # though nothing needs to be in it until the first map citation renders.
 MAP_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/map-images", StaticFiles(directory=str(MAP_IMAGES_DIR)), name="map_images")
+
+# Serves the Markdown/PDF reports /proposal-review writes to reports/ (see
+# that endpoint below) - same mount-a-static-dir pattern as /map-images
+# just above, added 2026-09-19 so a browser can actually preview/download
+# the generated PDF instead of it only existing as a path on this machine's
+# disk. Created up front for the same StaticFiles-refuses-a-missing-dir
+# reason as MAP_IMAGES_DIR.
+REPORTS_DIR = Path(__file__).parent / "reports"
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/reports", StaticFiles(directory=str(REPORTS_DIR)), name="reports")
 
 
 class QueryRequest(BaseModel):
@@ -467,19 +478,30 @@ async def proposal_review_endpoint(
       curl -s -X POST http://localhost:8010/proposal-review \
         -F "files=@/path/to/Design and Access Statement.pdf" \
         -F "postcode=SW1V 3LX"
+
+    Also writes a Markdown + PDF report (report_render.py - infographics,
+    status chips, a risk badge, an image gallery pulled from the proposal
+    itself) to local-rag/reports/ and returns their paths under
+    "report_files" - the same advisory write-up proposal_review_cli.py
+    saves next to the input PDF, added 2026-09-18 so an HTTP caller gets
+    a real downloadable document too, not just JSON.
     """
     import tempfile
     from pathlib import Path as _Path
 
     from proposal_review import extract_proposal_text, review_proposal
+    from report_render import build_reports, report_slug
 
     t0 = time.time()
     document_texts = []
     pages_not_assessed = {}
+    report_files = {}
     with tempfile.TemporaryDirectory() as tmp:
+        saved_paths = []
         for upload in files:
             dest = _Path(tmp) / upload.filename
             dest.write_bytes(await upload.read())
+            saved_paths.append(dest)
             text, _pages_with_text, pages_without_text, error = extract_proposal_text(dest)
             if error:
                 raise HTTPException(status_code=400, detail=f"{upload.filename}: {error}")
@@ -487,11 +509,33 @@ async def proposal_review_endpoint(
             if pages_without_text:
                 pages_not_assessed[upload.filename] = pages_without_text
 
-    result = review_proposal(
-        document_texts, project_id=project_id, postcode=postcode, lat=lat, lon=lon,
-    )
-    if result.get("error"):
-        raise HTTPException(status_code=400, detail=result["error"])
+        result = review_proposal(
+            document_texts, project_id=project_id, postcode=postcode, lat=lat, lon=lon,
+        )
+        if result.get("error"):
+            raise HTTPException(status_code=400, detail=result["error"])
+
+        # Extracting site photos (extract_report_images) and rendering the
+        # PDF both need the uploaded files on disk, so this runs while the
+        # temp dir is still alive - it's gone the moment the `with` exits.
+        document_names = [name for name, _ in document_texts]
+        reports = build_reports(result, document_names, pdf_paths=saved_paths)
+        reports_dir = _Path(__file__).parent / "reports"
+        reports_dir.mkdir(exist_ok=True)
+        slug = report_slug(result)
+        md_path = reports_dir / f"{slug}.md"
+        md_path.write_text(reports["markdown"], encoding="utf-8")
+        report_files["markdown"] = str(md_path)
+        report_files["markdown_url"] = f"/reports/{slug}.md"
+        report_files["markdown_filename"] = f"{slug}.md"
+        if reports["pdf_bytes"] is not None:
+            pdf_path = reports_dir / f"{slug}.pdf"
+            pdf_path.write_bytes(reports["pdf_bytes"])
+            report_files["pdf"] = str(pdf_path)
+            report_files["pdf_url"] = f"/reports/{slug}.pdf"
+            report_files["pdf_filename"] = f"{slug}.pdf"
+        else:
+            report_files["pdf_error"] = reports["pdf_error"]
 
     t1 = time.time()
     logger.info(
@@ -503,5 +547,6 @@ async def proposal_review_endpoint(
     return {
         **result,
         "pages_not_assessed": pages_not_assessed,
+        "report_files": report_files,
         "total_ms": round((t1 - t0) * 1000, 1),
     }
