@@ -864,15 +864,38 @@ export default function ChatInterface() {
 
   // Side panel previewing a generated document (PDF for now) next to the
   // chat - see components/chat/DocumentPanel.tsx. Added 2026-09-19,
-  // wired here to a temporary test trigger (see "Preview sample report"
-  // button below) against a real generated report
-  // (local-rag/reports/westminster-2026-09-19.pdf) so the panel's
-  // look/feel can be verified before the real upload-for-review flow is
-  // built and calls setDocumentPanel with a live report_files.pdf_url
-  // instead.
+  // originally verified against a hardcoded sample report via a
+  // temporary test button; now opened for real by runProposalReview
+  // below with a live report_files.pdf_url from local-rag's
+  // /proposal-review.
   const [documentPanel, setDocumentPanel] = useState<{
     url: string;
     filename: string;
+  } | null>(null);
+
+  // Proposal compliance review (local-rag/service.py's /proposal-review +
+  // /proposal-review-chat, proxied via app/api/local-rag-proposal-review*)
+  // - added 2026-09-19 to replace the "Preview sample report (dev)" test
+  // button with the real flow. pendingUploadFile holds a just-selected
+  // file while the user picks what to do with it (see handleFileSelected
+  // below, which replaced the old auto-upload handleFileUpload);
+  // activeReview holds the last completed review's context once one
+  // exists, and while it's set, handleSend routes every message through
+  // /proposal-review-chat (grounded follow-up Q&A) instead of the normal
+  // chat path - see proposal_review.build_review_context_text()'s
+  // docstring in local-rag for why that's still a full corpus search,
+  // not a narrower one.
+  const [pendingUploadFile, setPendingUploadFile] = useState<File | null>(null);
+  const [reviewPostcode, setReviewPostcode] = useState("");
+  const [isReviewing, setIsReviewing] = useState(false);
+  const [activeReview, setActiveReview] = useState<{
+    review: any;
+    reportFiles?: {
+      pdf_url?: string;
+      pdf_filename?: string;
+      markdown_url?: string;
+    };
+    label: string;
   } | null>(null);
 
   const endRef = useRef<HTMLDivElement>(null);
@@ -962,6 +985,11 @@ export default function ChatInterface() {
     setUploadedDocs([]);
     setDrawingFile(null);
     setIsLoading(false);
+    setPendingUploadFile(null);
+    setReviewPostcode("");
+    setIsReviewing(false);
+    setActiveReview(null);
+    setDocumentPanel(null);
     stopListening();
     stopSpeaking();
     setIsVoiceOverlayOpen(false);
@@ -1024,13 +1052,10 @@ export default function ChatInterface() {
     }
   }
 
-  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    // Reset the input so re-selecting the same filename later still fires
-    // a change event.
-    e.currentTarget.value = "";
-
+  // File-type/extension gate shared by both upload paths below - split
+  // out of the old single handleFileUpload so it can run once, before
+  // the user is asked what to do with the file (see handleFileSelected).
+  function validateUploadFile(file: File): string | null {
     const validTypes = [
       "application/pdf",
       "image/png",
@@ -1040,7 +1065,6 @@ export default function ChatInterface() {
       "application/vnd.ms-excel",
       "text/csv",
     ];
-
     const name = (file.name || "").toLowerCase();
     const extOk =
       name.endsWith(".pdf") ||
@@ -1051,12 +1075,42 @@ export default function ChatInterface() {
       name.endsWith(".xlsx") ||
       name.endsWith(".xls") ||
       name.endsWith(".csv");
-
     if (!validTypes.includes(file.type) && !extOk) {
-      alert("Only PDF, Word, image, and spreadsheet (xlsx/xls/csv) files are supported");
+      return "Only PDF, Word, image, and spreadsheet (xlsx/xls/csv) files are supported";
+    }
+    return null;
+  }
+
+  // Replaces the old auto-upload handleFileUpload - added 2026-09-19 so a
+  // selected file pauses on a choice (see the pendingUploadFile card
+  // rendered near the composer below) instead of immediately going into
+  // the cloud Q&A ingestion pipeline. "Ask questions about it" still
+  // calls that same pipeline (uploadForQA, below - unchanged logic, just
+  // extracted); "Run compliance review" calls runProposalReview instead,
+  // which never touches app/api/documents/upload at all - it's a
+  // completely separate backend (local-rag's /proposal-review).
+  function handleFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // Reset the input so re-selecting the same filename later still fires
+    // a change event.
+    e.currentTarget.value = "";
+
+    const validationError = validateUploadFile(file);
+    if (validationError) {
+      alert(validationError);
       return;
     }
 
+    setReviewPostcode("");
+    setPendingUploadFile(file);
+  }
+
+  // The original handleFileUpload body, unchanged, just taking `file`
+  // as a parameter instead of reading it off the change event - see
+  // handleFileSelected above for why it's no longer called directly
+  // on file selection.
+  async function uploadForQA(file: File) {
     // Ingested immediately (not on next send) so the document is fully
     // indexed and searchable by the time the user asks their question -
     // see app/api/documents/upload/route.ts + lib/userDocuments.ts.
@@ -1108,6 +1162,128 @@ export default function ChatInterface() {
       setError(err?.message || "Failed to upload document");
     } finally {
       setIsUploadingDoc(false);
+      setPendingUploadFile(null);
+    }
+  }
+
+  // Runs a real compliance review via local-rag's /proposal-review
+  // (proxied by app/api/local-rag-proposal-review) - replaces the
+  // temporary "Preview sample report (dev)" test button. On success,
+  // opens the generated PDF in DocumentPanel and sets activeReview so
+  // handleSend starts routing this conversation's messages through
+  // /proposal-review-chat (see that block in handleSend below).
+  async function runProposalReview(file: File, postcode: string) {
+    setIsReviewing(true);
+    setError(null);
+    try {
+      const formData = new FormData();
+      formData.append("files", file);
+      if (postcode.trim()) formData.append("postcode", postcode.trim());
+
+      const res = await fetch("/api/local-rag-proposal-review", {
+        method: "POST",
+        body: formData,
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Review failed (${res.status})`);
+      }
+
+      const review = data.review || {};
+      const reportFiles = data.reportFiles;
+      const assessment = review.assessment || {};
+      const issues = assessment.issues || [];
+      const checklist = assessment.checklist || [];
+      const missing = checklist.filter((c: any) => c.status === "missing").length;
+      const unclear = checklist.filter((c: any) => c.status === "unclear").length;
+      // Same transparent, disclosed heuristic as report_render.py's
+      // _compute_risk() - kept in sync deliberately (see that function's
+      // own comment) so the chat summary's risk word never disagrees
+      // with the badge on the report the user is looking at.
+      const level = review.assessment_failed
+        ? null
+        : missing >= 2 || issues.length >= 4
+        ? "High"
+        : missing >= 1 || unclear >= 2 || issues.length >= 1
+        ? "Medium"
+        : "Low";
+
+      setActiveReview({ review, reportFiles, label: file.name });
+
+      if (reportFiles?.pdf_url) {
+        setDocumentPanel({
+          url: reportFiles.pdf_url,
+          filename: reportFiles.pdf_filename || file.name,
+        });
+      }
+
+      chatSessionRef.current += 1;
+      // Site-detection provenance (site_lookup.detect_site(), only ever
+      // set when no postcode/project/lat-lon was supplied - added
+      // 2026-09-19, extended 2026-09-20 with the known_places directory
+      // tier) - surfaced here rather than silently used, since only
+      // "document text" is a fact read off the page; "known place
+      // directory" and "place name lookup" are both inferred from a
+      // NAME in the document, not a stated postcode, so the user should
+      // be able to tell all three apart and correct it by re-running
+      // with an explicit postcode if it's wrong. Only "place name
+      // lookup" (a live Nominatim guess, no directory match) gets the
+      // "double-check this" caveat - a known_places match is a curated,
+      // sourced entry, not a fresh guess - see report_render.py's
+      // _site_detection_note() for the same three-way split.
+      const siteDetection = review.site_detection as
+        | { postcode: string; source: string; detail: string }
+        | null
+        | undefined;
+      const siteNote = !postcode.trim() && siteDetection
+        ? siteDetection.source === "place name lookup"
+          ? `I couldn't find a postcode written in the document, so I looked up the nearest postcode to a name mentioned in it: ${siteDetection.postcode}. Worth double-checking that's the right site — re-run with an explicit postcode if not. `
+          : siteDetection.source === "known place directory"
+          ? `No postcode was written in the document, but a name in it matched our known-places directory: ${siteDetection.postcode}. `
+          : `I found postcode ${siteDetection.postcode} written in the document and used that as the site. `
+        : "";
+
+      const userMsg: ChatMessage = {
+        id: `${Date.now()}-user`,
+        type: "user",
+        content: `Review ${file.name}${
+          postcode.trim()
+            ? ` against ${postcode.trim()}`
+            : " (auto-detecting the site from the document)"
+        } for compliance.`,
+        timestamp: new Date(),
+      };
+      const summaryText = review.assessment_failed
+        ? `${siteNote}I couldn't generate a full assessment for this one — ${
+            review.parse_error || "the model didn't return a usable answer"
+          }. Retrieval itself worked, so you can still ask me what evidence was found, or try the review again.`
+        : `${siteNote}Review complete${
+            level ? ` — overall attention needed: ${level}` : ""
+          }. I found ${issues.length} issue${
+            issues.length === 1 ? "" : "s"
+          } and ${missing} required item${
+            missing === 1 ? "" : "s"
+          } missing from the checklist. I've opened the full report in the panel — ask me anything about it, or download it from there.`;
+      const assistantMsg: ChatMessage = {
+        id: `${Date.now()}-assistant`,
+        type: "assistant",
+        content: summaryText,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, userMsg, assistantMsg]);
+      // Only clear the choice card on success - added 2026-09-20, real
+      // bug found the hard way: this used to run in `finally`, so a
+      // FAILED review (e.g. "couldn't auto-detect a postcode") silently
+      // dropped the selected file and typed postcode too, leaving just
+      // the error toast with no visible way to retry short of
+      // re-picking the file from scratch. Now a failed attempt keeps
+      // the card up so the user can just type a postcode and retry.
+      setPendingUploadFile(null);
+      setReviewPostcode("");
+    } catch (err: any) {
+      setError(err?.message || "Failed to run compliance review");
+    } finally {
+      setIsReviewing(false);
     }
   }
 
@@ -1375,7 +1551,7 @@ export default function ChatInterface() {
 
   const handleSend = async (overridePrompt?: string) => {
     const prompt = (overridePrompt ?? inputValue).trim();
-    if ((!prompt && !drawingFile) || isLoading || isUploadingDoc) return;
+    if ((!prompt && !drawingFile) || isLoading || isUploadingDoc || isReviewing) return;
 
     const userMessage: ChatMessage = {
       id: `${Date.now()}-user`,
@@ -1396,6 +1572,7 @@ export default function ChatInterface() {
       const useLocalStreaming =
         FEATURES.localStreamingAnswers &&
         ragSource === "local" &&
+        !activeReview &&
         !(chatMode === "feasibility" && drawingFile);
 
       if (useLocalStreaming) {
@@ -1406,7 +1583,23 @@ export default function ChatInterface() {
 
       let res: Response;
 
-      if (chatMode === "feasibility" && drawingFile) {
+      if (activeReview) {
+        // Every message in this conversation is answered as a follow-up
+        // to the active review until the user clears it (see the
+        // "Exit review" control near the composer) - grounded in the
+        // review's own findings but still a full corpus search, not a
+        // narrower one. See app/api/local-rag-proposal-review-chat/
+        // route.ts and proposal_review.build_review_context_text()'s
+        // docstring in local-rag for the reasoning.
+        res = await fetch("/api/local-rag-proposal-review-chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            question: prompt,
+            review: activeReview.review,
+          }),
+        });
+      } else if (chatMode === "feasibility" && drawingFile) {
         const formData = new FormData();
         formData.append("query", prompt);
         formData.append("mode", chatMode);
@@ -1690,9 +1883,9 @@ export default function ChatInterface() {
               >
                 <input
                   type="file"
-                  onChange={handleFileUpload}
+                  onChange={handleFileSelected}
                   className="hidden"
-                  disabled={isLoading || isUploadingDoc}
+                  disabled={isLoading || isUploadingDoc || isReviewing || !!pendingUploadFile}
                 />
                 <DocumentIcon className="h-4 w-4" />
               </label>
@@ -1739,7 +1932,8 @@ export default function ChatInterface() {
                 disabled={
                   (!inputValue.trim() && !drawingFile) ||
                   isLoading ||
-                  isUploadingDoc
+                  isUploadingDoc ||
+                  isReviewing
                 }
                 className="press flex h-8 w-8 items-center justify-center rounded-full bg-neutral-950 shadow-paper-sm hover:bg-neutral-800 hover:shadow-paper-md disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
                 aria-label="Send"
@@ -1780,6 +1974,98 @@ export default function ChatInterface() {
                   </button>
                 </div>
               ))}
+            </div>
+          )}
+
+          {/* Choice card for a just-selected file - added 2026-09-19,
+              replacing the old auto-upload-into-Q&A behaviour. Lets the
+              user pick between the existing cloud Q&A ingestion
+              (uploadForQA, no site needed) and a real local-rag
+              compliance review (runProposalReview) - the review needs a
+              site (postcode/project/lat-lon) to check GIS constraints
+              against, but the postcode field is optional: leaving it
+              blank asks local-rag's proposal_review._resolve_site() to
+              auto-detect one from the uploaded document itself (a
+              postcode written in the text, or failing that a name/
+              address geocoded via site_lookup.detect_site() - added
+              2026-09-19, per explicit request: "find the postcode based
+              on the documents... or if postcode is not mentioned then...
+              look up the postcode based on the name"). Detection can
+              still fail (no postcode and no recognizable name/address in
+              the document) - that surfaces as the normal backend error
+              message asking the user to enter a postcode manually,
+              same as before this change. */}
+          {pendingUploadFile && (
+            <div className="mt-3 space-y-2 rounded-2xl border border-neutral-950/10 bg-neutral-950/5 px-3 py-3">
+              <p className="truncate text-xs text-neutral-700">
+                <span className="text-neutral-800">{pendingUploadFile.name}</span>
+                {" — what would you like to do with it?"}
+              </p>
+
+              <input
+                type="text"
+                value={reviewPostcode}
+                onChange={(e) => setReviewPostcode(e.target.value)}
+                placeholder="Postcode, e.g. SW1V 3LX — optional, I'll try to detect it from the document if left blank"
+                disabled={isReviewing}
+                className="block w-full rounded-xl border border-neutral-950/10 bg-white px-3 py-2 text-xs text-neutral-900 placeholder:text-neutral-400 focus:outline-none focus:border-neutral-950/25"
+              />
+
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  disabled={isReviewing}
+                  onClick={() => uploadForQA(pendingUploadFile)}
+                  className="rounded-xl border border-neutral-950/20 bg-white px-3 py-1.5 text-xs text-neutral-900 transition hover:bg-neutral-950/10 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Ask questions about it
+                </button>
+                <button
+                  type="button"
+                  disabled={isReviewing}
+                  onClick={() => runProposalReview(pendingUploadFile, reviewPostcode)}
+                  title={
+                    !reviewPostcode.trim()
+                      ? "No postcode entered - I'll try to detect the site from the document itself"
+                      : undefined
+                  }
+                  className="rounded-xl border border-neutral-950/20 bg-neutral-950 px-3 py-1.5 text-xs text-white transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isReviewing ? "Running compliance review…" : "Run compliance review"}
+                </button>
+                <button
+                  type="button"
+                  disabled={isReviewing}
+                  onClick={() => {
+                    setPendingUploadFile(null);
+                    setReviewPostcode("");
+                  }}
+                  className="rounded-xl px-3 py-1.5 text-xs text-neutral-500 transition hover:text-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Persistent indicator once a review exists for this
+              conversation - handleSend routes every message through
+              /proposal-review-chat while this is set (see that branch
+              above). Exiting just stops that routing; it doesn't close
+              the report panel or delete anything. */}
+          {activeReview && (
+            <div className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-neutral-950/10 bg-neutral-950/5 px-3 py-2">
+              <p className="truncate text-xs text-neutral-700">
+                Discussing the compliance review for{" "}
+                <span className="text-neutral-800">{activeReview.label}</span>
+              </p>
+              <button
+                type="button"
+                onClick={() => setActiveReview(null)}
+                className="shrink-0 rounded-xl border border-neutral-950/20 bg-neutral-950/[0.06] px-3 py-1.5 text-xs text-neutral-900 transition hover:bg-neutral-950/15 hover:text-neutral-950"
+              >
+                Exit review chat
+              </button>
             </div>
           )}
 
@@ -1913,28 +2199,6 @@ export default function ChatInterface() {
             </div>
           )}
 
-          {/* TEMPORARY test trigger for the DocumentPanel side panel (see
-              components/chat/DocumentPanel.tsx and the documentPanel state
-              above) - opens it against a real report already generated by
-              local-rag/service.py's /proposal-review
-              (local-rag/reports/westminster-2026-09-19.pdf), so the panel
-              itself can be verified before the real upload-for-review chat
-              flow calls setDocumentPanel with a live report_files.pdf_url.
-              Remove this button once that real flow lands. */}
-          <div className="mt-2 flex items-center justify-center">
-            <button
-              type="button"
-              onClick={() =>
-                setDocumentPanel({
-                  url: "http://localhost:8010/reports/westminster-2026-09-19.pdf",
-                  filename: "westminster-2026-09-19.pdf",
-                })
-              }
-              className="rounded-full border border-dashed border-neutral-950/20 px-3 py-1 text-[11px] text-neutral-500 transition hover:border-neutral-950/40 hover:text-neutral-800"
-            >
-              Preview sample report (dev)
-            </button>
-          </div>
 
           {sttSupported && ttsSupported && (
             <div className="mt-2 flex items-center justify-center gap-2">

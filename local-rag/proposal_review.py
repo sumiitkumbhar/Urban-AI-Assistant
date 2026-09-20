@@ -67,6 +67,7 @@ judgement rather than a starting point for a real review.
 
 import json
 import os
+import re
 from pathlib import Path
 
 from groq import Groq, APIStatusError
@@ -250,41 +251,61 @@ def _select_topics(site):
     return topics
 
 
-def _resolve_site(project_id=None, postcode=None, lat=None, lon=None):
+def _resolve_site(document_texts, project_id=None, postcode=None, lat=None, lon=None):
     """Returns (site_constraints_dict_or_None, geography_or_None,
-    error_or_None). Mirrors site_context.build_site_context()'s own
-    site-resolution logic so a project-scoped review and a fresh-
-    postcode review can never disagree about what "the site" means.
-    project_id takes priority when given, reusing the project's
-    already-matched, cached constraints_json rather than a second live
-    GIS lookup - the same reuse project_state.py's own
-    build_context_summary() already relies on. site_constraints_dict can
-    legitimately be None (no postcode/lat-lon on the project, or none
-    given at all) - the review still runs, just without a
-    constraint-specific topic list or a constraint_summary."""
+    error_or_None, site_detection_or_None). Mirrors
+    site_context.build_site_context()'s own site-resolution logic so a
+    project-scoped review and a fresh-postcode review can never
+    disagree about what "the site" means. project_id takes priority
+    when given, reusing the project's already-matched, cached
+    constraints_json rather than a second live GIS lookup - the same
+    reuse project_state.py's own build_context_summary() already relies
+    on. site_constraints_dict can legitimately be None (no postcode/
+    lat-lon on the project, or none given at all) - the review still
+    runs, just without a constraint-specific topic list or a
+    constraint_summary.
+
+    When none of project_id/postcode/lat/lon is given at all (added
+    2026-09-19, per explicit request: "find the postcode based on the
+    documents... or if postcode is not mentioned then... look up the
+    postcode based on the name"), falls back to site_lookup.detect_site()
+    on the proposal's own text before giving up - site_detection is
+    that function's result (None unless this fallback fired), returned
+    alongside the resolved site so the caller/report can be explicit
+    about a site that was guessed rather than given."""
     if project_id is not None:
         import project_state
 
         project = project_state.get_project(project_id)
         if project is None:
-            return None, None, f"No project with id {project_id}."
-        return project.get("constraints"), project.get("geography"), None
+            return None, None, f"No project with id {project_id}.", None
+        return project.get("constraints"), project.get("geography"), None, None
 
     from gis_lookup import geocode_postcode, site_constraints
 
+    site_detection = None
     if lat is not None and lon is not None:
         point = (lat, lon)
     elif postcode:
         point = geocode_postcode(postcode)
         if not point:
-            return None, None, f"Postcode {postcode!r} not found."
+            return None, None, f"Postcode {postcode!r} not found.", None
     else:
-        return None, None, "Provide project_id, or postcode, or lat/lon."
+        from site_lookup import detect_site
+
+        site_detection = detect_site(document_texts)
+        if not site_detection:
+            return None, None, (
+                "Provide project_id, or postcode, or lat/lon - couldn't auto-detect a "
+                "postcode or a site name from the uploaded document(s) either, so there's "
+                "no site to check GIS constraints against."
+            ), None
+        point = (site_detection["lat"], site_detection["lon"])
 
     site = site_constraints(*point)
     lpa = site["local_planning_authority"]
     geography = _lpa_reference_to_geography(lpa["reference"] if lpa else None)
-    return site, geography, None
+    return site, geography, None, site_detection
 
 
 def review_proposal(document_texts, project_id=None, postcode=None, lat=None, lon=None,
@@ -302,7 +323,9 @@ def review_proposal(document_texts, project_id=None, postcode=None, lat=None, lo
     per-call for, since local retrieval is fast but not free of wall-clock
     time, and the merged evidence set only needs to be big enough to
     support one synthesis call, not exhaustive."""
-    site, geography, error = _resolve_site(project_id, postcode, lat, lon)
+    site, geography, error, site_detection = _resolve_site(
+        document_texts, project_id, postcode, lat, lon
+    )
     if error:
         return {"error": error}
 
@@ -375,6 +398,7 @@ def review_proposal(document_texts, project_id=None, postcode=None, lat=None, lo
                 f"would just be a guess, however confident it reads. {hint}Detail: {detail}"
             ),
             "geography": geography,
+            "site_detection": site_detection,
             "constraint_summary": constraint_summary,
             "topics_checked": topics,
             "topics_failed": [t for t, _ in failed_topics],
@@ -402,6 +426,7 @@ def review_proposal(document_texts, project_id=None, postcode=None, lat=None, lo
             "error": "GROQ_API_KEY isn't set (checked the repo's .env.local) - "
                      "retrieval worked, but the assessment call needs it.",
             "geography": geography,
+            "site_detection": site_detection,
             "constraint_summary": constraint_summary,
             "topics_checked": topics,
             "topics_failed": [t for t, _ in failed_topics],
@@ -461,6 +486,7 @@ def review_proposal(document_texts, project_id=None, postcode=None, lat=None, lo
                 "or wait a minute and retry."
             ),
             "geography": geography,
+            "site_detection": site_detection,
             "constraint_summary": constraint_summary,
             "topics_checked": topics,
             "topics_failed": [t for t, _ in failed_topics],
@@ -501,6 +527,7 @@ def review_proposal(document_texts, project_id=None, postcode=None, lat=None, lo
 
     return {
         "geography": geography,
+        "site_detection": site_detection,
         "constraint_summary": constraint_summary,
         "topics_checked": topics,
         "topics_failed": [t for t, _ in failed_topics],
@@ -511,3 +538,81 @@ def review_proposal(document_texts, project_id=None, postcode=None, lat=None, lo
         "proposal_truncated": truncated,
         "disclaimer": DISCLAIMER,
     }
+
+
+# --------------------------------------------------------------------------
+# Follow-up chat grounding (service.py's /proposal-review-chat) - added
+# 2026-09-19, per explicit request: "after uploading the documents the
+# user can have the convo related to this... to and fro discussion can
+# happen." Builds a plain-text summary of an already-completed review
+# (the same shape report_render.py renders) for injection into a normal
+# /query-style call as `project_context` - see answer.py's
+# _build_user_content(), which already knows how to fold arbitrary extra
+# context in ahead of the retrieved evidence. This is deliberately NOT a
+# separate retrieval path: a follow-up question still runs a full
+# orchestrate() against the corpus (so it can answer things the original
+# review never touched), it just also carries the review's own findings
+# into the prompt so answers stay consistent with what's already on the
+# report, instead of contradicting it or re-deriving it from scratch.
+# --------------------------------------------------------------------------
+
+_REVIEW_CITE_RE = re.compile(r"\[(\d+)\]")
+
+
+def _strip_review_citation_markers(text):
+    """Drops a review's own [N] evidence markers before folding its text
+    into a follow-up prompt. Those numbers index the review's evidence
+    table (evidence_citations, sent back with the original /proposal-
+    review response) - they mean nothing to THIS call's own evidence,
+    which build_context() numbers fresh per request (see answer.py). If
+    a review's "[5]" leaked into the injected context unchanged, the
+    model could cite it as if it were one of this answer's own sources,
+    which would be wrong - so every marker is stripped, not renumbered."""
+    return re.sub(r"\s+", " ", _REVIEW_CITE_RE.sub("", text or "")).strip()
+
+
+def build_review_context_text(review):
+    """review is a plain dict shaped like the /proposal-review response's
+    own fields (geography, constraint_summary, and assessment.summary /
+    .issues / .checklist) - callers pass exactly what the frontend
+    already has in hand from that earlier response, no reshaping. Skips
+    empty sections rather than printing "Site: None" noise; returns ""
+    if the review is empty/missing entirely, so a caller with nothing to
+    inject doesn't have to special-case it."""
+    if not review:
+        return ""
+    lines = [
+        "The user already ran a compliance review on this site earlier in "
+        "the conversation. Treat the following as established context - "
+        "answer the follow-up question using it plus your own retrieval "
+        "below, and don't contradict a finding here without saying so."
+    ]
+    site_line = review.get("geography") or ""
+    if review.get("constraint_summary"):
+        site_line = f"{site_line} - {review['constraint_summary']}" if site_line else review["constraint_summary"]
+    if site_line:
+        lines.append(f"Site: {site_line}")
+    if review.get("document_names"):
+        lines.append(f"Document(s) reviewed: {', '.join(review['document_names'])}")
+
+    assessment = review.get("assessment") or {}
+    if assessment.get("summary"):
+        lines.append(f"Review summary: {_strip_review_citation_markers(assessment['summary'])}")
+
+    issues = assessment.get("issues") or []
+    if issues:
+        lines.append("Issues the review flagged:")
+        for issue in issues:
+            topic = issue.get("topic", "")
+            body = _strip_review_citation_markers(issue.get("issue", ""))
+            change = _strip_review_citation_markers(issue.get("suggested_change", ""))
+            lines.append(f"  - [{topic}] {body} (suggested change: {change})")
+
+    checklist = assessment.get("checklist") or []
+    if checklist:
+        lines.append("Required-content checklist:")
+        for item in checklist:
+            note = _strip_review_citation_markers(item.get("note", ""))
+            lines.append(f"  - {item.get('status', '')}: {item.get('item', '')} - {note}")
+
+    return "\n".join(lines)

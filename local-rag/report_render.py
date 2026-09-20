@@ -115,6 +115,37 @@ def _compute_risk(assessment):
     return level, basis, counts
 
 
+def _site_detection_note(result):
+    """One-line provenance note when the site was auto-detected rather
+    than given (site_lookup.detect_site(), wired in via
+    proposal_review._resolve_site() - added 2026-09-19, extended
+    2026-09-20 with the known_places directory tier). None when the
+    caller supplied a project/postcode/lat-lon directly, since then
+    there's nothing to disclose. Three possible sources, only one of
+    which gets the warning treatment:
+      - "document text": a postcode was literally written in the
+        proposal - as certain as a manually-entered postcode.
+      - "known place directory": no postcode in the text, but a name in
+        it (a council, a reviewed site) matched gis/known_places.py's
+        curated, sourced directory - not a live third-party guess, so
+        this is presented the same as "document text", no warning icon.
+      - "place name lookup": neither of the above - a name was geocoded
+        live via Nominatim. This is the one genuinely uncertain case
+        (see site_lookup.py's own docstring on inference vs geocoding
+        uncertainty), flagged with a warning icon rather than presented
+        the same as the other two - matches this report's existing rule
+        (see STATUS above) that a status/caveat is never color- or
+        prose-only, always icon + label."""
+    sd = result.get("site_detection")
+    if not sd:
+        return None
+    if sd.get("source") == "place name lookup":
+        return f"⚠ Site auto-detected (guessed from a name in the document, not a postcode on the page) - please verify: {sd.get('detail', '')}"
+    if sd.get("source") == "known place directory":
+        return f"Site auto-detected from a known-places directory match: {sd.get('detail', '')}"
+    return f"Site auto-detected from the document: {sd.get('detail', '')}"
+
+
 # --------------------------------------------------------------------------
 # Markdown renderer
 # --------------------------------------------------------------------------
@@ -130,6 +161,8 @@ def render_markdown(result, document_names):
     L.append(f"**Site:** {result.get('geography') or '(unscoped)'}")
     if result.get("constraint_summary"):
         L.append(f"**Site constraints:** {result['constraint_summary']}")
+    if _site_detection_note(result):
+        L.append(f"**Site detection:** {_site_detection_note(result)}")
     L.append(f"**Generated:** {_dt.date.today().isoformat()}")
     L.append("")
     if result.get("disclaimer"):
@@ -477,9 +510,12 @@ def _wrap_html(body_html, risk_icon, risk_color, risk_tint):
   th {{ text-align: left; font-size: 8pt; color: {COLOR_INK_MUTED}; border-bottom: 1px solid {COLOR_GRIDLINE}; padding: 6px 8px; }}
   td {{ border-bottom: 1px solid {COLOR_GRIDLINE}; padding: 7px 8px; vertical-align: top; }}
   .gallery {{ display: flex; flex-wrap: wrap; gap: 10px; }}
-  .gallery-tile {{ width: 140px; margin: 0; }}
+  .gallery-tile {{ width: 140px; margin: 0; overflow: hidden; }}
   .gallery-tile img {{ width: 140px; height: 100px; object-fit: cover; border: 1px solid {COLOR_BORDER}; border-radius: 3px; }}
-  .gallery-tile figcaption {{ font-size: 7.5pt; color: {COLOR_INK_MUTED}; margin-top: 2px; }}
+  .gallery-tile figcaption {{
+    font-size: 7.5pt; color: {COLOR_INK_MUTED}; margin-top: 4px;
+    overflow-wrap: break-word; word-break: break-word;
+  }}
 </style>
 </head>
 <body>
@@ -518,6 +554,7 @@ def render_html(result, document_names, images=None):
     <div class="meta">
       <div class="meta-line">{_esc(', '.join(document_names))}</div>
       <div class="meta-line">Site: {_esc(result.get('geography') or '(unscoped)')}</div>
+      {f'<div class="meta-line">{_esc(_site_detection_note(result))}</div>' if _site_detection_note(result) else ''}
       <div class="meta-line">Generated {_dt.date.today().isoformat()}</div>
     </div>
   </div>
@@ -611,16 +648,41 @@ def render_html(result, document_names, images=None):
 
     gallery = ""
     if images:
+        # Real uploaded filenames can be long and ugly (a browser-derived
+        # download name, a full URL with slashes swapped for colons, etc.)
+        # - repeating one verbatim under every single thumbnail (the
+        # common case: one proposal PDF, several extracted photos) both
+        # crowds each 140px tile (see the CSS's overflow-wrap fix for
+        # when it still happens) and is pure restated noise once the
+        # reader already knows which document this is. Caption with just
+        # the page number when every image comes from the same document
+        # (naming it once, in the section intro, instead) and fall back
+        # to a short per-tile document name only when the images actually
+        # come from more than one document, where the distinction is
+        # information rather than repetition.
+        distinct_docs = sorted({img["doc"] for img in images})
+        single_doc = distinct_docs[0] if len(distinct_docs) == 1 else None
+
+        def _caption(img):
+            if single_doc:
+                return f"Page {img['page']}"
+            name = img["doc"]
+            short = name if len(name) <= 40 else name[:38] + "…"
+            return f"{_esc(short)} — page {img['page']}"
+
         tiles = "".join(
             f'<figure class="gallery-tile">'
             f'<img src="data:image/{img["ext"]};base64,{img["b64"]}"/>'
-            f'<figcaption>{_esc(img["doc"])} — page {img["page"]}</figcaption>'
+            f'<figcaption>{_caption(img)}</figcaption>'
             f'</figure>'
             for img in images
         )
+        intro = "Shown for reference only - not analyzed by this tool."
+        if single_doc:
+            intro += f" From {_esc(single_doc)}."
         gallery = (
             '<h2 id="gallery">Images from the proposal</h2>'
-            '<p class="muted">Shown for reference only - not analyzed by this tool.</p>'
+            f'<p class="muted">{intro}</p>'
             f'<div class="gallery">{tiles}</div>'
         )
 
@@ -646,6 +708,7 @@ def render_html(result, document_names, images=None):
     <div class="meta">
       <div class="meta-line">{_esc(', '.join(document_names))}</div>
       <div class="meta-line">Site: {_esc(result.get('geography') or '(unscoped)')}{f' &middot; {_esc(result["constraint_summary"])}' if result.get('constraint_summary') else ''}</div>
+      {f'<div class="meta-line">{_esc(_site_detection_note(result))}</div>' if _site_detection_note(result) else ''}
       <div class="meta-line">Generated {_dt.date.today().isoformat()}</div>
     </div>
   </div>

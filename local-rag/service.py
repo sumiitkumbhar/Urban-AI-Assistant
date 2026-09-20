@@ -550,3 +550,63 @@ async def proposal_review_endpoint(
         "report_files": report_files,
         "total_ms": round((t1 - t0) * 1000, 1),
     }
+
+
+class ProposalReviewChatRequest(BaseModel):
+    """Follow-up Q&A after a /proposal-review call - added 2026-09-19,
+    per explicit request for "to and fro discussion" once a report is
+    generated. `review` is exactly what /proposal-review already handed
+    the frontend back (geography, constraint_summary, assessment) plus
+    the document names it already knows from the upload itself - no
+    server-side review storage, the caller just replays what it has.
+    See proposal_review.build_review_context_text()'s own docstring for
+    why this is a normal /query call with that folded in as context,
+    not a separate retrieval path."""
+    question: str
+    review: dict
+    project_id: int | None = None
+    top_k: int = 25
+    rerank_top_n: int = 8
+
+
+@app.post("/proposal-review-chat")
+def proposal_review_chat(req: ProposalReviewChatRequest):
+    from proposal_review import build_review_context_text
+
+    t0 = time.time()
+    project_context, geography, map_citations = _resolve_project_context(
+        req.project_id, req.review.get("geography")
+    )
+    review_text = build_review_context_text(req.review)
+    # Both contexts are plain prose blocks meant for the same slot
+    # (answer.py's _build_user_content() prepends whichever project_context
+    # it's given ahead of the retrieved evidence) - concatenate rather than
+    # pick one, so a project-scoped review-chat still gets project_state's
+    # own summary too.
+    combined_context = (
+        f"{project_context}\n\n---\n\n{review_text}" if project_context else review_text
+    )
+    chunks, coverage = orchestrate(
+        req.question, top_k=req.top_k, rerank_top_n=req.rerank_top_n,
+        geography_filter=geography,
+    )
+    t1 = time.time()
+    result = generate_answer(
+        req.question, chunks, coverage=coverage, project_context=combined_context or None
+    )
+    t2 = time.time()
+
+    _auto_log_query_event(req.project_id, req.question, result.get("answer"))
+
+    logger.info(
+        f"proposal-review-chat question={req.question!r} chunks={len(chunks)} "
+        f"confidence={coverage['confidence']} retrieval_ms={(t1-t0)*1000:.0f} "
+        f"generation_ms={(t2-t1)*1000:.0f}"
+    )
+    return {
+        **result,
+        "coverage": coverage,
+        "map_citations": map_citations,
+        "retrieval_ms": round((t1 - t0) * 1000, 1),
+        "generation_ms": round((t2 - t1) * 1000, 1),
+    }

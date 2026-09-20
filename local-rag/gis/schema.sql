@@ -255,3 +255,52 @@ CREATE TABLE IF NOT EXISTS memory_conflicts (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_conflicts_site
     ON memory_conflicts (site_id);
+-- Geocode directory (added 2026-09-20, per explicit request: "build a
+-- proper and precise Geocode directory for our AI to track so that it
+-- never makes any mistake"). Two tables, two different jobs -
+-- site_lookup.py's auto-detection (proposal_review.py, when a proposal
+-- has no project_id/postcode/lat-lon at all) uses both, in order:
+--
+--   1. known_places - a curated NAME -> point directory. Checked before
+--      ever calling Nominatim's live free-text geocoder, so a name
+--      already in here (a council, a named development) resolves to a
+--      known, audited point instead of a fresh third-party guess every
+--      time. Seeded from local_planning_authorities' own geometry
+--      (known_places.seed_from_lpas() - a government-sourced polygon
+--      centroid, not a geocoder's guess at the name) and grows from
+--      verified entries added as real reviews surface names worth
+--      remembering. This does NOT make a name-derived site infallible -
+--      see known_places.py's own docstring - it only removes the
+--      *geocoding* uncertainty, not the *inference* uncertainty of
+--      whether that name is really where the site is.
+--
+--   2. postcodes - a local POSTCODE -> point cache/directory, checked
+--      before calling the live postcodes.io API to validate a postcode
+--      actually found written in a proposal's text. Self-fills one row
+--      at a time as gis_lookup.geocode_postcode() is used (so it's
+--      useful from day one with zero setup), and can also be bulk-
+--      loaded in one go from the ONS Postcode Directory (free, no API
+--      key, the same underlying source postcodes.io's own service is
+--      built from - see postcode_ingest.py's docstring) via
+--      postcode_ingest.py for full national coverage up front.
+
+CREATE TABLE IF NOT EXISTS known_places (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    name_normalized TEXT NOT NULL UNIQUE,
+    postcode TEXT,
+    lat DOUBLE PRECISION NOT NULL,
+    lon DOUBLE PRECISION NOT NULL,
+    source TEXT NOT NULL,  -- e.g. 'lpa-centroid' | 'manual' | 'proposal-review'
+    verified_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_known_places_name_normalized
+    ON known_places (name_normalized);
+
+CREATE TABLE IF NOT EXISTS postcodes (
+    postcode TEXT PRIMARY KEY,  -- normalized 'OUTWARD INWARD', e.g. 'SW1V 3LX'
+    lat DOUBLE PRECISION NOT NULL,
+    lon DOUBLE PRECISION NOT NULL,
+    source TEXT NOT NULL DEFAULT 'postcodes.io',  -- 'postcodes.io' | 'postcodes.io-reverse' | 'onspd'
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
