@@ -1,4 +1,4 @@
-"""One-off cleanup for known_places rows seeded before the " LPA"-suffix
+r"""One-off cleanup for known_places rows seeded before the " LPA"-suffix
 fix (2026-09-20/21): seed_from_lpas() used to build every name variant
 from the source dataset's raw `name` field without stripping its
 trailing " LPA" (a planning.data.gov.uk entity-naming artifact, not part
