@@ -621,6 +621,27 @@ export default function ExpandableCitation({
   const [pagePreviewUrl, setPagePreviewUrl] = useState<string | null>(null);
   const [pagePreviewError, setPagePreviewError] = useState<string | null>(null);
 
+  // Local-rag-only: a citation carries its corpus-wide chunk_id (see
+  // local-rag/answer.py's build_context()) so its raw extract - one
+  // fixed-size retrieval window - can be expanded with the neighboring
+  // chunk(s) from the same document on demand. Cloud-path citations
+  // never have this field, so the control below simply doesn't render
+  // for them.
+  const chunkId: string | undefined = citation._raw?.chunk_id;
+  const [contextStatus, setContextStatus] = useState<
+    "idle" | "loading" | "loaded" | "error"
+  >("idle");
+  const [expandedContext, setExpandedContext] = useState<{
+    text: string;
+    docFilename: string;
+    pageStart: number;
+    pageEnd: number;
+    expandedBefore: boolean;
+    expandedAfter: boolean;
+  } | null>(null);
+  const [contextErrorMsg, setContextErrorMsg] = useState<string | null>(null);
+  const [showExpandedContext, setShowExpandedContext] = useState(false);
+
   const rawSourceText = useMemo(
     () => citation.fullText || citation.excerpt || "",
     [citation.fullText, citation.excerpt]
@@ -656,24 +677,88 @@ export default function ExpandableCitation({
     [rawDisplayText]
   );
 
+  // Whichever text is actually on screen right now - the original
+  // single-chunk extract, or the neighbor-stitched version once the
+  // user has asked for more context (see loadCitationContext() below
+  // and GET /citation-context/{chunk_id} on the local-rag service).
+  const activeCleanedText = useMemo(() => {
+    if (showExpandedContext && expandedContext) {
+      return cleanCitationText(stripChunkMetadata(expandedContext.text));
+    }
+    return cleanedFullText;
+  }, [showExpandedContext, expandedContext, cleanedFullText]);
+
+  const activeRawParagraphs = useMemo(
+    () => splitReadableParagraphs(activeCleanedText),
+    [activeCleanedText]
+  );
+
+  const activeRawLikelyTruncated = useMemo(
+    () => looksTruncated(activeCleanedText),
+    [activeCleanedText]
+  );
+
   // Chunks are fixed-size retrieval windows, not paragraph-aligned, so
   // the first/last line of a chunk's text routinely lands mid-sentence -
   // that's expected (see "Source text appears truncated upstream" above),
   // but a bare lowercase-starting fragment with no visual cue reads as
   // broken rather than as "this is a fragment of a larger passage". An
   // ellipsis marks the cut honestly without inventing any missing text.
+  // Re-checked against whichever text is active, so the markers clear on
+  // whichever side actually got real neighboring text stitched in.
   const rawParagraphsForDisplay = useMemo(() => {
-    if (rawParagraphs.length === 0) return rawParagraphs;
-    const out = [...rawParagraphs];
+    if (activeRawParagraphs.length === 0) return activeRawParagraphs;
+    const out = [...activeRawParagraphs];
     if (looksLikeMidSentenceStart(out[0])) {
       out[0] = `… ${out[0]}`;
     }
     const lastIdx = out.length - 1;
-    if (rawLikelyTruncated && !/[….!?]\s*$/.test(out[lastIdx])) {
+    if (activeRawLikelyTruncated && !/[….!?]\s*$/.test(out[lastIdx])) {
       out[lastIdx] = `${out[lastIdx]} …`;
     }
     return out;
-  }, [rawParagraphs, rawLikelyTruncated]);
+  }, [activeRawParagraphs, activeRawLikelyTruncated]);
+
+  const loadCitationContext = async () => {
+    if (!chunkId) return;
+
+    if (expandedContext) {
+      // Already fetched once this session - just toggle visibility
+      // rather than hitting the service again.
+      setShowExpandedContext((prev) => !prev);
+      return;
+    }
+
+    try {
+      setContextStatus("loading");
+      setContextErrorMsg(null);
+
+      const res = await fetch(
+        `/api/local-rag-citation-context?chunk_id=${encodeURIComponent(chunkId)}&window=1`
+      );
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok || !data?.text) {
+        throw new Error(data?.error || `Failed (${res.status})`);
+      }
+
+      setExpandedContext({
+        text: data.text,
+        docFilename: data.docFilename,
+        pageStart: data.pageStart,
+        pageEnd: data.pageEnd,
+        expandedBefore: data.expandedBefore,
+        expandedAfter: data.expandedAfter,
+      });
+      setShowExpandedContext(true);
+      setContextStatus("loaded");
+    } catch (err) {
+      setContextStatus("error");
+      setContextErrorMsg(
+        err instanceof Error ? err.message : "Could not load more context"
+      );
+    }
+  };
 
   const shouldUseRawFallback = useMemo(
     () =>
@@ -866,12 +951,53 @@ citation.directLink.startsWith("http") ? (
                   Copy text
                 </button>
 
+                {chunkId &&
+                (looksLikeMidSentenceStart(rawParagraphs[0] || "") ||
+                  rawLikelyTruncated) ? (
+                  <button
+                    type="button"
+                    onClick={loadCitationContext}
+                    disabled={contextStatus === "loading"}
+                    className="inline-flex items-center rounded-xl border border-neutral-950/10 bg-neutral-950/5 px-3 py-1.5 text-xs text-neutral-800 transition hover:bg-neutral-950/10 disabled:opacity-60"
+                  >
+                    {contextStatus === "loading"
+                      ? "Loading more context..."
+                      : showExpandedContext
+                      ? "Hide extra context"
+                      : "Show more context"}
+                  </button>
+                ) : null}
+
                 {rawLikelyTruncated ? (
                   <span className="inline-flex items-center rounded-xl border border-dashed border-neutral-950/20 bg-neutral-950/[0.05] px-3 py-1.5 text-xs text-neutral-800">
                     Source text appears truncated upstream
                   </span>
                 ) : null}
               </div>
+
+              {showExpandedContext && expandedContext ? (
+                <p className="mb-3 text-[11px] text-neutral-600">
+                  Showing{" "}
+                  {expandedContext.pageStart === expandedContext.pageEnd
+                    ? `page ${expandedContext.pageStart}`
+                    : `pages ${expandedContext.pageStart}\u2013${expandedContext.pageEnd}`}{" "}
+                  of {expandedContext.docFilename}
+                  {!expandedContext.expandedBefore && !expandedContext.expandedAfter
+                    ? " - no further neighboring text was available in this document"
+                    : !expandedContext.expandedBefore
+                    ? " - already at the start of this document"
+                    : !expandedContext.expandedAfter
+                    ? " - already at the end of this document"
+                    : ""}
+                  .
+                </p>
+              ) : null}
+
+              {contextErrorMsg ? (
+                <div className="mb-3 rounded-2xl border border-neutral-950/25 bg-neutral-950/10 px-3 py-2 text-xs text-neutral-950">
+                  {contextErrorMsg}
+                </div>
+              ) : null}
 
               {pagePreviewError ? (
                 <div className="mb-3 rounded-2xl border border-neutral-950/25 bg-neutral-950/10 px-3 py-2 text-xs text-neutral-950">

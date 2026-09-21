@@ -71,6 +71,12 @@ def build_context(chunks):
             # route.ts's transformCitations(), which used to hardcode
             # fullText/excerpt to undefined for exactly this reason.
             "text": c["text"],
+            # The chunk's own id in the corpus-wide chunks.jsonl/Qdrant
+            # index - lets the frontend ask GET /citation-context/{id}
+            # for the neighboring chunk(s) when a citation's raw extract
+            # is cut off mid-sentence. See retrieve.py's
+            # get_citation_context() for how that's resolved.
+            "chunk_id": c.get("chunk_id"),
         })
     return "\n\n---\n\n".join(blocks), citations
 

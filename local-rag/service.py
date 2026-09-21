@@ -36,7 +36,7 @@ from site_context import build_site_context, _describe_constraints, _find_map_ci
 from map_images import MAP_IMAGES_DIR
 import project_state as project_state_module
 import memory as memory_module
-from retrieve import _load_embedder, _load_reranker, _load_qdrant, _load_bm25, _load_chunk_texts
+from retrieve import _load_embedder, _load_reranker, _load_qdrant, _load_bm25, _load_chunk_texts, get_citation_context
 
 LOG_FILE = DATA_DIR / "service.log"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -168,6 +168,21 @@ def _auto_log_query_event(project_id, question, answer_text):
 def health():
     ready = CHUNKS_PATH.exists() and QDRANT_PATH.exists() and BM25_PATH.exists()
     return {"status": "ok" if ready else "not_ingested"}
+
+
+@app.get("/citation-context/{chunk_id}")
+def citation_context(chunk_id: str, window: int = 1):
+    """Neighboring-chunk context for one citation, used by the chat UI's
+    "show more context" control on a RAW EXTRACT panel that's cut off
+    mid-sentence (see retrieve.py's get_citation_context() docstring for
+    how chunks are stitched). window is clamped to a small range - this
+    is meant to recover a sentence or two, not fetch half the document
+    into a citation card."""
+    window = max(1, min(window, 3))
+    ctx = get_citation_context(chunk_id, window=window)
+    if ctx is None:
+        raise HTTPException(status_code=404, detail=f"No chunk with id {chunk_id}.")
+    return ctx
 
 
 @app.post("/query")

@@ -27,7 +27,7 @@ from common import (
     EMBEDDING_MODEL_NAME, EMBEDDING_QUERY_PREFIX, RERANKER_MODEL_NAME,
     STATUS_BOOST, CONFIDENCE_TOP_SCORE_HIGH, CONFIDENCE_TOP_SCORE_LOW,
     MIN_SOURCE_DIVERSITY_FOR_HIGH, EXACT_REFERENCE_PATTERNS,
-    GRAPH_MAX_RELATED, GRAPH_EXPANSION_BOOST,
+    GRAPH_MAX_RELATED, GRAPH_EXPANSION_BOOST, CHUNK_OVERLAP_CHARS,
 )
 from graph_build import load_graph
 
@@ -46,6 +46,84 @@ def _load_chunk_texts():
             c = json.loads(line)
             chunks[c["chunk_id"]] = c
     return chunks
+
+
+# A citation's raw extract is one fixed-size retrieval chunk, so it can
+# legitimately start or end mid-sentence at whichever character the
+# sliding window happened to land on (see chunk_page_text() in
+# ingest.py) - real, not a bug, but unhelpful to read in isolation.
+# get_citation_context() recovers the surrounding sentence(s) by walking
+# to the neighboring chunk_id(s) on each side (chunks for one document
+# are appended in reading order during ingestion, so chunk_id-1/+1 is
+# "the previous/next piece of text", as long as it's still the same
+# document - checked via sha256, the same "same file" signal already
+# used elsewhere in this project rather than trusting doc_filename,
+# which can collide across council/curated corpus rows) and stitching
+# them into one continuous passage.
+
+def _merge_overlap(a, b, max_overlap=CHUNK_OVERLAP_CHARS):
+    """Join two adjacent chunks' text, removing the duplicated overlap
+    chunk_page_text() deliberately carries a tail of the previous chunk
+    into the next one for embedding continuity (up to CHUNK_OVERLAP_CHARS
+    characters) - naively concatenating would repeat that tail verbatim
+    in the stitched passage. Finds the longest suffix of `a` that's also
+    a prefix of `b`, within the known overlap budget, and drops it from
+    `b` before joining. Falls back to a plain join if no overlap is
+    found (e.g. the two chunks aren't actually adjacent in the source
+    text, just adjacent in chunk_id - harmless, just means no text is
+    trimmed)."""
+    cap = min(max_overlap, len(a), len(b))
+    for overlap_len in range(cap, 0, -1):
+        if a[-overlap_len:] == b[:overlap_len]:
+            return a + b[overlap_len:]
+    return a + "\n\n" + b
+
+
+def get_citation_context(chunk_id, window=1):
+    """Returns the target chunk plus up to `window` neighboring chunks on
+    each side from the same source document, stitched into one
+    continuous passage. Returns None if chunk_id isn't a known chunk."""
+    chunks = _load_chunk_texts()
+    chunk_id = str(chunk_id)
+    target = chunks.get(chunk_id)
+    if target is None:
+        return None
+
+    try:
+        target_idx = int(chunk_id)
+    except ValueError:
+        return None
+
+    sha = target.get("sha256")
+
+    def collect(step):
+        collected = []
+        idx = target_idx
+        for _ in range(max(0, window)):
+            idx += step
+            neighbor = chunks.get(f"{idx:08d}")
+            if neighbor is None or neighbor.get("sha256") != sha:
+                break
+            collected.append(neighbor)
+        return collected
+
+    before = list(reversed(collect(-1)))
+    after = collect(1)
+    ordered = before + [target] + after
+
+    stitched = ordered[0]["text"]
+    for c in ordered[1:]:
+        stitched = _merge_overlap(stitched, c["text"])
+
+    return {
+        "chunk_id": chunk_id,
+        "doc_filename": target["doc_filename"],
+        "page_start": ordered[0]["page"],
+        "page_end": ordered[-1]["page"],
+        "expanded_before": len(before) > 0,
+        "expanded_after": len(after) > 0,
+        "text": stitched,
+    }
 
 
 @functools.lru_cache(maxsize=1)
