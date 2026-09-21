@@ -260,9 +260,10 @@ def ingest_constraint_dataset(dataset, table_cfg, lpa_entity, lpa_name):
         print(f"  {len(rows)} {dataset} features loaded.")
         if not rows:
             print(
-                f"  (0 is plausible for some dataset/LPA pairs - e.g. "
-                f"inner-London authorities genuinely have no Green Belt. "
-                f"gis_coverage still records that this was checked.)"
+                f"  (0 is plausible for some dataset/LPA pairs - e.g. an "
+                f"inner-London authority genuinely has no Green Belt, or "
+                f"no {dataset} designation at all. gis_coverage still "
+                f"records that this was checked.)"
             )
     finally:
         conn.close()
