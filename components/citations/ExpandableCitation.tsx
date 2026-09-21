@@ -762,10 +762,24 @@ export default function ExpandableCitation({
 
   const shouldUseRawFallback = useMemo(
     () =>
+      // Once the user has fetched neighboring-chunk context, always show the
+      // raw-fallback box: it's the only view that reflects the stitched text
+      // (rawParagraphsForDisplay). The compliance-bucket view below is built
+      // solely from the original, un-expanded chunk and never reacts to
+      // showExpandedContext/expandedContext, so leaving it selected here
+      // would make "Show more context" silently do nothing for citations
+      // that happen to render via that branch.
+      (showExpandedContext && !!expandedContext) ||
       looksDirtyForStructuredView(rawSourceText) ||
       rawLikelyTruncated ||
       complianceBuckets.length === 0,
-    [rawSourceText, rawLikelyTruncated, complianceBuckets.length]
+    [
+      showExpandedContext,
+      expandedContext,
+      rawSourceText,
+      rawLikelyTruncated,
+      complianceBuckets.length,
+    ]
   );
 
   const previewText = useMemo(() => {
@@ -1035,7 +1049,7 @@ citation.directLink.startsWith("http") ? (
                   <div className="mb-3 flex items-center gap-2">
                     <span className="h-2 w-2 rounded-full bg-neutral-600" />
                     <h5 className="text-xs font-semibold uppercase tracking-[0.14em] text-neutral-700">
-                      Raw extract
+                      {showExpandedContext && expandedContext ? "Expanded extract" : "Raw extract"}
                     </h5>
                   </div>
 
