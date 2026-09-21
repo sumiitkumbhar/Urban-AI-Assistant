@@ -9,6 +9,7 @@ folder needs to change for that.
 """
 
 import os
+import re
 
 from groq import Groq
 
@@ -111,6 +112,46 @@ def build_context(chunks):
             "complete_after": complete_after,
         })
     return "\n\n---\n\n".join(blocks), citations
+
+
+# Matches a bare inline citation marker like "[3]" - what the model
+# actually writes, per SYSTEM_PROMPT's "e.g. [1]" instruction below, and
+# what build_context()'s own evidence-block labels above use ("[3]
+# filename.pdf (page 7):..."). Deliberately NOT the format ChatInterface.tsx
+# expects to see in the CHAT-DISPLAYED answer text ([D1], [D2] - the
+# format app/api/rag-chat/route.ts's cloud-path prompts use, and what
+# transformCitations() in both local-rag-chat/route.ts and
+# local-rag-proposal-review-chat/route.ts already prefix every citation's
+# id with, in anticipation of exactly this). See _prefix_citation_markers()
+# below for why the rewrite happens there instead of here.
+_CITATION_MARKER_RE = re.compile(r'\[(\d+)\]')
+
+
+def _prefix_citation_markers(text):
+    """Rewrites this module's own "[N]" citation markers into the "[DN]"
+    format the chat frontend's InlineCitation matcher actually looks for
+    (components/chat/ChatInterface.tsx's regex is /\[(?:D|W)\d+\]/ - a
+    bare "[1]" never matches it, so it renders as plain dead text with no
+    click-to-source-card interactivity). This is a real, previously-silent
+    bug: local-rag citations have never been clickable inline, only in the
+    separate Sources list below the answer.
+
+    Deliberately done here, as a deterministic string rewrite of the
+    model's OWN output, rather than by asking the model to write "[D1]"
+    directly (asking Groq to change its output format is less reliable
+    than just rewriting whatever number it already wrote) or by changing
+    build_context()'s shared evidence-block numbering above (proposal_
+    review.py also calls build_context() for the compliance-review PDF
+    report, which has its own separate system prompt and its own plain-
+    "[N]" linkifier - report_render.py's _CITE_RE - so changing the
+    shared numbering would risk breaking that pipeline's citation links
+    too). Only ever applied to the final chat-facing answer text in
+    generate_answer()/stream_answer(), never to build_context()'s
+    evidence blocks, the citations list, or anything the verify/
+    groundedness LLM passes see - they're calibrated against the
+    evidence blocks' own "[N]" labels, so this stays purely a display-
+    layer rewrite applied last."""
+    return _CITATION_MARKER_RE.sub(lambda m: f"[D{m.group(1)}]", text)
 
 
 def _verify_and_repair(query, answer_text, context, client, model):
@@ -336,6 +377,12 @@ def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, proj
         query, answer_text, context, client, model
     )
 
+    # Rewritten last, after every LLM pass above has already read/graded
+    # the model's own "[N]" markers - see _prefix_citation_markers()'s
+    # docstring for why this is a pure display-layer rewrite, not a
+    # prompt change.
+    answer_text = _prefix_citation_markers(answer_text)
+
     return {
         "answer": answer_text,
         "citations": citations,
@@ -433,6 +480,16 @@ def stream_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, projec
     groundedness, unsupported_claims = _check_groundedness(
         query, answer_text, context, client, model
     )
+
+    # Same last-step rewrite as generate_answer() above - the streamed
+    # "delta" events above still carry the model's raw "[N]" markers
+    # (there's no way to rewrite mid-stream without the marker's digits
+    # possibly splitting across two deltas), but result["answer"] in this
+    # "done" event is already documented as authoritative and allowed to
+    # differ slightly from the concatenated deltas (see this function's
+    # own docstring on the repair pass) - this is the same kind of
+    # trailing correction, not a new precedent.
+    answer_text = _prefix_citation_markers(answer_text)
 
     yield "done", {
         "answer": answer_text,
