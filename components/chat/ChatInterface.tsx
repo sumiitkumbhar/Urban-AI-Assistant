@@ -146,6 +146,17 @@ export interface ChatMessage {
     // the map(s) so it's clear which site they're for.
     mapCitations?: MapCitation[];
     sitePostcode?: string;
+    // Compliance-review checklist summary (see runProposalReview) - fed
+    // to ReviewSummaryChart for the animated donut + checklist rows.
+    // Deliberately a distinct field from complianceResult above: that
+    // one is the older /api compliance-check flow's percentage-score
+    // shape, this is proposal_review.py's item/status checklist shape -
+    // different data, different renderer.
+    reviewChart?: {
+      checklist: Array<{ item: string; status: string; note?: string }>;
+      issuesCount: number;
+      level: "Low" | "Medium" | "High" | null;
+    };
   };
   diagramData?: DiagramData;
 }
@@ -826,6 +837,166 @@ function ComplianceResultDisplay({ result }: { result: any }) {
   );
 }
 
+// Status palette mirrors report_render.py's STATUS constant exactly (same
+// hex values) so the chat summary and the downloadable report never read
+// as two different visual languages for the same three states.
+const REVIEW_STATUS_COLORS: Record<string, string> = {
+  present: "#0ca30c",
+  missing: "#d03b3b",
+  unclear: "#fab219",
+};
+const REVIEW_STATUS_ICON: Record<string, string> = {
+  present: "✓",
+  missing: "✗",
+  unclear: "!",
+};
+
+// Animated counterpart to report_render.py's _status_donut_svg() + the
+// required-content checklist section - same segment order
+// (missing/unclear/present, most-attention-first) and the same fixed
+// status palette, rendered live in chat instead of only in the
+// downloadable PDF. Added 2026-09-21 per "animated report visuals" -
+// framer-motion's pathLength/pathOffset (normalized 0-1 progress along an
+// SVG path) does the per-segment ring math instead of hand-rolled
+// stroke-dasharray strings, since those two motion values already encode
+// exactly "how much of this arc is drawn" and "where along the circle it
+// starts."
+function ReviewSummaryChart({
+  data,
+}: {
+  data: {
+    checklist: Array<{ item: string; status: string; note?: string }>;
+    issuesCount: number;
+    level: "Low" | "Medium" | "High" | null;
+  };
+}) {
+  const { checklist, issuesCount, level } = data;
+  const size = 92;
+  const stroke = 14;
+  const r = (size - stroke) / 2;
+  const cx = size / 2;
+  const cy = size / 2;
+  const total = checklist.length;
+
+  const counts = { missing: 0, unclear: 0, present: 0 } as Record<string, number>;
+  for (const c of checklist) {
+    if (counts[c.status] !== undefined) counts[c.status] += 1;
+  }
+  const pctPresent = total > 0 ? Math.round((counts.present / total) * 100) : 0;
+
+  // Same gap convention as the backend (a small visual break between
+  // segments) - expressed here as a fraction of the circle rather than a
+  // fixed px length, since pathLength/pathOffset are both normalized 0-1.
+  const gapFraction = total > 0 ? 1.2 / (2 * Math.PI * r) : 0;
+
+  let offsetFraction = 0;
+  const segments: Array<{ status: string; offset: number; length: number }> = [];
+  for (const status of ["missing", "unclear", "present"]) {
+    const n = counts[status] || 0;
+    if (n <= 0) continue;
+    const lengthFraction = Math.max(0, n / total - gapFraction);
+    segments.push({ status, offset: offsetFraction, length: lengthFraction });
+    offsetFraction += n / total;
+  }
+
+  const levelColor =
+    level === "High" ? "#d03b3b" : level === "Medium" ? "#fab219" : "#0ca30c";
+
+  if (total === 0) return null;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.3 }}
+      className="mt-4 rounded-2xl border border-neutral-950/10 bg-neutral-950/[0.03] p-4"
+    >
+      <div className="flex items-start gap-4">
+        <div className="relative shrink-0" style={{ width: size, height: size }}>
+          <svg
+            viewBox={`0 0 ${size} ${size}`}
+            width={size}
+            height={size}
+            className="-rotate-90"
+          >
+            <circle
+              cx={cx}
+              cy={cy}
+              r={r}
+              fill="none"
+              stroke="#e1e0d9"
+              strokeWidth={stroke}
+            />
+            {segments.map((seg, i) => (
+              <motion.circle
+                key={seg.status}
+                cx={cx}
+                cy={cy}
+                r={r}
+                fill="none"
+                stroke={REVIEW_STATUS_COLORS[seg.status]}
+                strokeWidth={stroke}
+                style={{ pathOffset: seg.offset }}
+                initial={{ pathLength: 0 }}
+                animate={{ pathLength: seg.length }}
+                transition={{ duration: 0.7, delay: 0.15 + i * 0.15, ease: "easeOut" }}
+              />
+            ))}
+          </svg>
+          <div className="absolute inset-0 flex flex-col items-center justify-center">
+            <span className="text-base font-semibold text-neutral-900">
+              {pctPresent}%
+            </span>
+            <span className="text-[9px] text-neutral-500">present</span>
+          </div>
+        </div>
+
+        <div className="min-w-0 flex-1">
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+            {level && (
+              <span
+                className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-medium"
+                style={{ color: levelColor, backgroundColor: `${levelColor}1a` }}
+              >
+                {level} attention
+              </span>
+            )}
+            <span className="text-neutral-500">
+              {issuesCount} issue{issuesCount === 1 ? "" : "s"} · {total} item
+              {total === 1 ? "" : "s"} checked
+            </span>
+          </div>
+
+          <div className="space-y-1">
+            {checklist.slice(0, 6).map((c, i) => (
+              <motion.div
+                key={`${c.item}-${i}`}
+                initial={{ opacity: 0, x: -6 }}
+                animate={{ opacity: 1, x: 0 }}
+                transition={{ duration: 0.25, delay: 0.25 + i * 0.06 }}
+                className="flex items-center gap-2 text-xs text-neutral-700"
+              >
+                <span
+                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white"
+                  style={{ backgroundColor: REVIEW_STATUS_COLORS[c.status] || "#898781" }}
+                >
+                  {REVIEW_STATUS_ICON[c.status] || "?"}
+                </span>
+                <span className="truncate">{c.item}</span>
+              </motion.div>
+            ))}
+            {checklist.length > 6 && (
+              <p className="pl-6 text-[11px] text-neutral-500">
+                +{checklist.length - 6} more in the full report
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 /* ---------------- main ---------------- */
 
 export default function ChatInterface() {
@@ -1269,6 +1440,10 @@ export default function ChatInterface() {
         type: "assistant",
         content: summaryText,
         timestamp: new Date(),
+        metadata:
+          !review.assessment_failed && checklist.length > 0
+            ? { reviewChart: { checklist, issuesCount: issues.length, level } }
+            : undefined,
       };
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
       // Only clear the choice card on success - added 2026-09-20, real
@@ -2724,6 +2899,10 @@ function MessageBubble({
                     <ComplianceResultDisplay
                       result={message.metadata.complianceResult}
                     />
+                  )}
+
+                  {message.metadata?.reviewChart && (
+                    <ReviewSummaryChart data={message.metadata.reviewChart} />
                   )}
 
                   <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-neutral-950/10 pt-3 text-xs text-neutral-600">
