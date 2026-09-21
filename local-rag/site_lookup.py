@@ -129,6 +129,24 @@ def geocode_place_name(name):
         return None
 
 
+def find_postcode_in_text(text):
+    """First candidate postcode in `text` that's actually a real,
+    geocodable UK postcode (validated against gis_lookup.geocode_postcode()
+    - the local postcodes cache first, postcodes.io on a miss), or None.
+    Reuses _candidate_postcodes()'s frequency-ranked extraction (see its
+    own docstring) rather than a fresh regex, so a plain chat question
+    naming a postcode ("what constraints apply to SW1V 3LX") resolves it
+    the exact same way a typed --postcode argument would. Added
+    2026-09-21 for service.py's plain-chat site-constraint detection -
+    see that module's _detect_site_postcode()."""
+    from gis_lookup import geocode_postcode
+
+    for candidate in _candidate_postcodes(text or ""):
+        if geocode_postcode(candidate):
+            return candidate
+    return None
+
+
 def resolve_address(address):
     """Free-text UK address/place-name -> {"postcode", "lat", "lon",
     "source", "detail"} or None, for a caller that already has ONE

@@ -19,6 +19,7 @@ Next.js app's 3000, so all three can run side by side.
 import json
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -33,6 +34,7 @@ from common import DATA_DIR, CHUNKS_PATH, QDRANT_PATH, BM25_PATH
 from answer import generate_answer, stream_answer
 from orchestrate import orchestrate
 from site_context import build_site_context, _describe_constraints, _find_map_citations
+from site_lookup import find_postcode_in_text
 from map_images import MAP_IMAGES_DIR
 import project_state as project_state_module
 import memory as memory_module
@@ -143,6 +145,95 @@ def _resolve_project_context(project_id, geography):
     return project_context, geography, map_citations
 
 
+# A plain chat question is routed through the GIS site-constraints path
+# (see _resolve_retrieval() below) only when it both names a real,
+# geocodable UK postcode AND reads like it's actually asking about site
+# constraints - not just any planning question that happens to mention a
+# postcode ("what's the housing target for SW1V 3LX" should stay a plain
+# geography-scoped question, not silently get re-scoped into a
+# constraint-check question the user didn't ask). Deliberately
+# conservative in a second way too: free-text addresses/place names
+# ("is 10 Downing Street in a conservation area") are NOT resolved here,
+# only exact postcodes - reliably pulling an address out of an arbitrary
+# sentence needs real NER, not a regex, and a wrong guess here would
+# silently mis-scope what would otherwise be a normal chat answer.
+# site_lookup.resolve_address() (used by /site-answer and project
+# creation, where the caller supplies the address on its own rather than
+# embedded in a longer question) remains the place for that.
+_SITE_CONSTRAINT_KEYWORDS_RE = re.compile(
+    r"\b("
+    r"conservation area|listed build|article\s*4|green belt|"
+    r"flood (risk|zone)|sssi|site of special scientific interest|"
+    r"aonb|area of outstanding natural beauty|ancient woodland|"
+    r"tree preservation|\btpo\b|"
+    r"site constraint|planning constraint|what constraints|which constraints"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _detect_site_postcode(question):
+    if not _SITE_CONSTRAINT_KEYWORDS_RE.search(question or ""):
+        return None
+    return find_postcode_in_text(question)
+
+
+def _resolve_retrieval(req):
+    """Shared by /query and /query/stream: decides what actually gets
+    retrieved and what question gets asked of the LLM. Three paths, in
+    order:
+
+      1. project_id set - orchestrate() scoped to the project's stored
+         geography (existing behavior, unchanged from before today).
+      2. No project_id, but the question looks like a site-constraint
+         check (see _detect_site_postcode() above) - routed through
+         site_context.build_site_context(), the same "context/policy
+         engine" /site-answer already uses, so "what constraints apply
+         to SW1V 3LX" gets a real GIS lookup folded into the question
+         instead of just hoping the text corpus happens to mention that
+         postcode. Falls back to plain orchestrate() on ANY problem from
+         the GIS path (bad postcode match, GIS Postgres unreachable,
+         etc., caught broadly and logged) - this must never break what
+         would otherwise be a normal chat query.
+      3. Neither - plain orchestrate(), unchanged from before today.
+
+    Returns (chunks, coverage, question_for_llm, project_context,
+    site_constraints_result, map_citations). question_for_llm is
+    req.question unless path 2 actually produced a constraint-augmented
+    question; site_constraints_result is the resolved site_constraints()
+    result for path 2, or None otherwise - attached to the response so a
+    future UI can show it without changing what the LLM is asked."""
+    project_context, geography, map_citations = _resolve_project_context(
+        req.project_id, req.geography
+    )
+
+    if req.project_id is None:
+        postcode = _detect_site_postcode(req.question)
+        if postcode:
+            try:
+                ctx = build_site_context(
+                    postcode=postcode, extra_question=req.question,
+                    top_k=req.top_k, rerank_top_n=req.rerank_top_n,
+                )
+            except Exception:
+                logger.exception(
+                    f"Site-context lookup failed for postcode {postcode!r} "
+                    f"detected in a chat question - falling back to plain retrieval"
+                )
+                ctx = {"error": "lookup failed"}
+            if "error" not in ctx:
+                return (
+                    ctx["chunks"], ctx["coverage"], ctx["policy_question"],
+                    project_context, ctx["site_constraints"], ctx["map_citations"],
+                )
+
+    chunks, coverage = orchestrate(
+        req.question, top_k=req.top_k, rerank_top_n=req.rerank_top_n,
+        geography_filter=geography,
+    )
+    return chunks, coverage, req.question, project_context, None, map_citations
+
+
 def _auto_log_query_event(project_id, question, answer_text):
     """Auto-logs a "query" episodic-memory event whenever a project-
     scoped /query or /query/stream call finishes - this is what makes a
@@ -188,15 +279,12 @@ def citation_context(chunk_id: str, window: int = 1):
 @app.post("/query")
 def query(req: QueryRequest):
     t0 = time.time()
-    project_context, geography, map_citations = _resolve_project_context(
-        req.project_id, req.geography
-    )
-    chunks, coverage = orchestrate(
-        req.question, top_k=req.top_k, rerank_top_n=req.rerank_top_n,
-        geography_filter=geography,
-    )
+    (
+        chunks, coverage, question_for_llm, project_context,
+        site_constraints_result, map_citations,
+    ) = _resolve_retrieval(req)
     t1 = time.time()
-    result = generate_answer(req.question, chunks, coverage=coverage, project_context=project_context)
+    result = generate_answer(question_for_llm, chunks, coverage=coverage, project_context=project_context)
     t2 = time.time()
 
     _auto_log_query_event(req.project_id, req.question, result.get("answer"))
@@ -204,11 +292,13 @@ def query(req: QueryRequest):
     logger.info(
         f"query={req.question!r} chunks={len(chunks)} confidence={coverage['confidence']} "
         f"retrieval_ms={(t1-t0)*1000:.0f} generation_ms={(t2-t1)*1000:.0f}"
+        + (f" site_constraint_postcode_detected=True" if site_constraints_result else "")
     )
     return {
         **result,
         "coverage": coverage,
         "map_citations": map_citations,
+        "site_constraints": site_constraints_result,
         "retrieval_ms": round((t1 - t0) * 1000, 1),
         "generation_ms": round((t2 - t1) * 1000, 1),
     }
@@ -237,19 +327,16 @@ def query_stream(req: QueryRequest):
                           the concatenation of every delta.
     """
     t0 = time.time()
-    project_context, geography, map_citations = _resolve_project_context(
-        req.project_id, req.geography
-    )
-    chunks, coverage = orchestrate(
-        req.question, top_k=req.top_k, rerank_top_n=req.rerank_top_n,
-        geography_filter=geography,
-    )
+    (
+        chunks, coverage, question_for_llm, project_context,
+        site_constraints_result, map_citations,
+    ) = _resolve_retrieval(req)
     t1 = time.time()
 
     def event_stream():
         yield f"event: coverage\ndata: {json.dumps(coverage)}\n\n"
         for kind, payload in stream_answer(
-            req.question, chunks, coverage=coverage, project_context=project_context
+            question_for_llm, chunks, coverage=coverage, project_context=project_context
         ):
             if kind == "delta":
                 yield f"event: delta\ndata: {json.dumps({'text': payload})}\n\n"
@@ -259,6 +346,7 @@ def query_stream(req: QueryRequest):
                     **payload,
                     "coverage": coverage,
                     "map_citations": map_citations,
+                    "site_constraints": site_constraints_result,
                     "retrieval_ms": round((t1 - t0) * 1000, 1),
                     "generation_ms": round((t2 - t1) * 1000, 1),
                 }
