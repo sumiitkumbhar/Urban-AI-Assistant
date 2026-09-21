@@ -43,13 +43,16 @@ different OS underneath, so any Python packages installed *there*
 script:
 
 1. Creates a venv in this folder (`local-rag/venv`) if one doesn't exist.
-2. Installs `requirements.txt` into it (first run downloads two small
-   local models too - a ~130MB embedder and a ~90MB reranker - both
-   cached after that).
-3. Runs `ingest.py`, which reads every eligible PDF, chunks it, embeds
-   it, and builds the local Qdrant + BM25 indexes under `data/`. Takes a
-   few minutes on 76 files; progress is printed and also logged to
-   `data/ingest.log`.
+2. Installs `requirements.txt` into it (first run downloads a ~130MB
+   embedder and a ~100MB sentence-boundary model - wtpsplit's SaT,
+   used to trim citation text to real sentence boundaries, see
+   `retrieve.py`'s `get_complete_citation_text()` - both cached after
+   that; the ~90MB reranker downloads separately on the first real
+   query instead).
+3. Runs `ingest.py`, which warms the sentence-boundary model, then
+   reads every eligible PDF, chunks it, embeds it, and builds the local
+   Qdrant + BM25 indexes under `data/`. Takes a few minutes on 76
+   files; progress is printed and also logged to `data/ingest.log`.
 
 Re-run it any time the corpus or the triage manifest changes - it
 rebuilds `data/` from scratch rather than trying to update it in place.

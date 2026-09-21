@@ -514,6 +514,37 @@ def build_bm25_index(chunks):
     log(f"BM25 index built and saved to {BM25_PATH}")
 
 
+def _warm_sentence_segmenter():
+    """One-time download/cache of wtpsplit's SaT sentence-boundary model
+    (retrieve.py's get_complete_citation_text() uses it to trim a
+    citation to real sentence boundaries instead of a fixed chunk
+    window - see that function's docstring). Done here, during the
+    predictable one-time setup run, for the same reason
+    build_qdrant_index() below warms the embedding model here rather
+    than lazily: so the download happens once, with progress visible in
+    this log, instead of silently adding latency to whichever live
+    citation first needs boundary-trimming after the service starts.
+
+    wtpsplit is an optional dependency (see requirements.txt's comment
+    on it) with a regex fallback if it's missing - so a failure here is
+    logged and ingestion carries on rather than aborting over an
+    optional citation-quality upgrade that still works, just less
+    precisely, without it."""
+    from retrieve import _load_sentence_segmenter
+    log("loading sentence-boundary model (wtpsplit's sat-3l-sm, first run downloads it - small, ~100MB)")
+    try:
+        segmenter = _load_sentence_segmenter()
+    except Exception:
+        segmenter = None
+    if segmenter is None:
+        log("  wtpsplit isn't installed (or its model failed to load) - citation "
+            "boundary trimming will use the regex fallback instead. Still "
+            "correct, just less precise on messy PDF text. `pip install "
+            "wtpsplit` and re-run this to enable it.")
+    else:
+        log("  sentence-boundary model ready and cached")
+
+
 def main():
     log("=== Urban AI local RAG ingestion starting ===")
     log(f"corpus dir: {CORPUS_DIR}")
@@ -521,6 +552,8 @@ def main():
         log(f"ERROR: corpus dir does not exist: {CORPUS_DIR} "
             f"(set CORPUS_DIR env var if it's somewhere else)")
         sys.exit(1)
+
+    _warm_sentence_segmenter()
 
     active_files = load_manifest()
     council_files = load_council_manifest()
