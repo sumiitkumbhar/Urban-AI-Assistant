@@ -201,6 +201,62 @@ CREATE INDEX IF NOT EXISTS idx_flood_risk_zones_geom
 ALTER TABLE flood_risk_zones ADD COLUMN IF NOT EXISTS flood_risk_level TEXT;
 ALTER TABLE flood_risk_zones ADD COLUMN IF NOT EXISTS flood_risk_type TEXT;
 
+-- Environmental/tree designations (2026-09-21) - same generic
+-- CONSTRAINT_DATASETS-driven pattern as every table above; see
+-- gis_common.py's comment for the real Planning Data entity pages each
+-- field shape was confirmed against.
+
+CREATE TABLE IF NOT EXISTS sssi_sites (
+    entity BIGINT PRIMARY KEY,
+    reference TEXT,
+    name TEXT,
+    organisation_entity BIGINT,
+    geom GEOMETRY(MultiPolygon, 4326) NOT NULL,
+    source_url TEXT,
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_sssi_sites_geom
+    ON sssi_sites USING GIST (geom);
+
+CREATE TABLE IF NOT EXISTS aonb_areas (
+    entity BIGINT PRIMARY KEY,
+    reference TEXT,
+    name TEXT,
+    organisation_entity BIGINT,
+    geom GEOMETRY(MultiPolygon, 4326) NOT NULL,
+    source_url TEXT,
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_aonb_areas_geom
+    ON aonb_areas USING GIST (geom);
+
+CREATE TABLE IF NOT EXISTS ancient_woodland (
+    entity BIGINT PRIMARY KEY,
+    reference TEXT,
+    name TEXT,
+    ancient_woodland_status TEXT,
+    organisation_entity BIGINT,
+    geom GEOMETRY(MultiPolygon, 4326) NOT NULL,
+    source_url TEXT,
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_ancient_woodland_geom
+    ON ancient_woodland USING GIST (geom);
+
+CREATE TABLE IF NOT EXISTS tree_preservation_zones (
+    entity BIGINT PRIMARY KEY,
+    reference TEXT,
+    name TEXT,
+    tree_preservation_order TEXT,
+    tree_preservation_zone_type TEXT,
+    organisation_entity BIGINT,
+    geom GEOMETRY(MultiPolygon, 4326) NOT NULL,
+    source_url TEXT,
+    synced_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_tree_preservation_zones_geom
+    ON tree_preservation_zones USING GIST (geom);
+
 -- Episodic + semantic memory + conflict detection (2026-09-18) -
 -- architecture-plan section 23's remaining Phase 7 tiers, picked up
 -- after structured project state (the "canonical current state" tier,

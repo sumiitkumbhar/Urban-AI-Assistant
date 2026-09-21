@@ -305,6 +305,22 @@ def site_constraints(lat, lon):
                 listed_buildings = _lookup_nearby_listed_buildings(
                     cur, lat, lon, LISTED_BUILDING_NEARBY_RADIUS_M
                 )
+                sssi = _lookup_containing(cur, "sssi_sites", lat, lon)
+                aonb = _lookup_containing(cur, "aonb_areas", lat, lon)
+                ancient_woodland = _lookup_containing(
+                    cur,
+                    "ancient_woodland",
+                    lat,
+                    lon,
+                    extra_cols=("ancient_woodland_status",),
+                )
+                tree_preservation_zones = _lookup_containing(
+                    cur,
+                    "tree_preservation_zones",
+                    lat,
+                    lon,
+                    extra_cols=("tree_preservation_order", "tree_preservation_zone_type"),
+                )
     finally:
         conn.close()
 
@@ -334,6 +350,22 @@ def site_constraints(lat, lon):
         "flood_risk_zones": {
             "checked": _checked("flood-risk-zone"),
             "matches": flood_risk_zones,
+        },
+        "sssi": {
+            "checked": _checked("site-of-special-scientific-interest"),
+            "matches": sssi,
+        },
+        "aonb": {
+            "checked": _checked("area-of-outstanding-natural-beauty"),
+            "matches": aonb,
+        },
+        "ancient_woodland": {
+            "checked": _checked("ancient-woodland"),
+            "matches": ancient_woodland,
+        },
+        "tree_preservation_zones": {
+            "checked": _checked("tree-preservation-zone"),
+            "matches": tree_preservation_zones,
         },
         "coverage": coverage,
     }

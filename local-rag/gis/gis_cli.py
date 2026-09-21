@@ -28,6 +28,11 @@ def _print_matches(label, block):
         if "flood_risk_level" in m and m["flood_risk_level"]:
             type_suffix = f", {m['flood_risk_type']}" if m.get("flood_risk_type") else ""
             extra = f" [Flood Zone {m['flood_risk_level']}{type_suffix}]"
+        if "ancient_woodland_status" in m and m["ancient_woodland_status"]:
+            extra = f" [{m['ancient_woodland_status']}]"
+        if "tree_preservation_zone_type" in m and m["tree_preservation_zone_type"]:
+            order_suffix = f", {m['tree_preservation_order']}" if m.get("tree_preservation_order") else ""
+            extra = f" [Type {m['tree_preservation_zone_type']}{order_suffix}]"
         if "distance_m" in m:
             tag = "ON SITE" if m.get("on_site") else f"{m['distance_m']:.0f}m away"
             extra += f" ({tag})"
@@ -64,6 +69,10 @@ def main():
     _print_matches("Article 4 directions", result["article_4_directions"])
     _print_matches("Green Belt", result["green_belt"])
     _print_matches("Flood risk zones", result["flood_risk_zones"])
+    _print_matches("Sites of Special Scientific Interest", result["sssi"])
+    _print_matches("Areas of Outstanding Natural Beauty", result["aonb"])
+    _print_matches("Ancient woodland", result["ancient_woodland"])
+    _print_matches("Tree Preservation Order zones", result["tree_preservation_zones"])
 
 
 if __name__ == "__main__":

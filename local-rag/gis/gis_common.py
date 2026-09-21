@@ -92,6 +92,55 @@ CONSTRAINT_DATASETS = {
             "flood_risk_type": "flood-risk-type",
         },
     },
+    # Added 2026-09-21 - environmental/tree designations, picked as the
+    # highest-value/lowest-effort next batch (same generic
+    # CONSTRAINT_DATASETS-driven pattern, zero changes needed to
+    # gis_ingest.py itself). Slugs and field shapes confirmed against
+    # real Planning Data entity pages before writing this (this
+    # session's own network can't reach the live entity API either -
+    # same restriction noted on flood-risk-zone above - so each was
+    # checked via a real entity page fetch rather than guessed):
+    # https://www.planning.data.gov.uk/entity/1001036 (SSSI - Ufton
+    # Fields), /entity/1000027 (AONB - North Wessex Downs),
+    # /entity/110001623 (ancient woodland), /entity/19211702 (tree
+    # preservation zone). All four are MultiPolygon, matching every
+    # other layer here.
+    "site-of-special-scientific-interest": {
+        "table": "sssi_sites",
+        "name_field": "name",
+        "extra_fields": {},
+    },
+    "area-of-outstanding-natural-beauty": {
+        "table": "aonb_areas",
+        "name_field": "name",
+        "extra_fields": {},
+    },
+    # Real entities carry a blank `name` far more often than not (see
+    # the entity page cited above) - `ancient-woodland-status` (e.g.
+    # "ASNW" = Ancient Semi-Natural Woodland, "PAWS" = Plantation on
+    # Ancient Woodland Site) is the one field worth surfacing.
+    "ancient-woodland": {
+        "table": "ancient_woodland",
+        "name_field": "name",
+        "extra_fields": {"ancient_woodland_status": "ancient-woodland-status"},
+    },
+    # Note: planning.data.gov.uk has both a "tree-preservation-order"
+    # dataset (the legal instrument) and this "tree-preservation-zone"
+    # dataset (the actual mapped polygon) - the same order/area split
+    # this file already uses for article-4-direction vs
+    # article-4-direction-area. The zone is what a point-in-polygon
+    # check needs; `tree-preservation-order` here is the order's own
+    # free-text reference (often an address), carried as an extra field
+    # rather than a second table, exactly like article_4_direction is
+    # today.
+    "tree-preservation-zone": {
+        "table": "tree_preservation_zones",
+        "name_field": "name",
+        "extra_fields": {
+            "tree_preservation_order": "tree-preservation-order",
+            "tree_preservation_zone_type": "tree-preservation-zone-type",
+        },
+    },
 }
 
 

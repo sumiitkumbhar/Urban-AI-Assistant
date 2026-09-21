@@ -17,15 +17,21 @@ def main():
     parser.add_argument("--postcode")
     parser.add_argument("--lat", type=float)
     parser.add_argument("--lon", type=float)
+    parser.add_argument("--address", help="Free-text address/place name, tried when --postcode/--lat/--lon are all omitted")
     parser.add_argument("--question", help="Extra question to fold in alongside the constraint-derived one")
     args = parser.parse_args()
 
     ctx = build_site_context(
-        postcode=args.postcode, lat=args.lat, lon=args.lon, extra_question=args.question
+        postcode=args.postcode, lat=args.lat, lon=args.lon, address=args.address,
+        extra_question=args.question,
     )
     if "error" in ctx:
         print(ctx["error"])
         return
+
+    if ctx.get("geocode_detail"):
+        gd = ctx["geocode_detail"]
+        print(f"Resolved via {gd['source']}: {gd['detail']}")
 
     site = ctx["site_constraints"]
     lpa = site["local_planning_authority"]
@@ -36,6 +42,11 @@ def main():
         ("Listed buildings nearby", site["listed_buildings"]),
         ("Article 4 directions", site["article_4_directions"]),
         ("Green Belt", site["green_belt"]),
+        ("Flood risk zones", site["flood_risk_zones"]),
+        ("Sites of Special Scientific Interest", site["sssi"]),
+        ("Areas of Outstanding Natural Beauty", site["aonb"]),
+        ("Ancient woodland", site["ancient_woodland"]),
+        ("Tree Preservation Order zones", site["tree_preservation_zones"]),
     ]:
         status = "checked" if block["checked"] else "NOT INGESTED for this area"
         names = [m.get("name") or m.get("reference") for m in block["matches"]] or ["none"]

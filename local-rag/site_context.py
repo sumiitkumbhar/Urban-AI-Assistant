@@ -130,6 +130,50 @@ def _describe_constraints(site):
         else:
             phrases.append("in a mapped flood risk zone")
 
+    # Added 2026-09-21 alongside the SSSI/AONB/ancient-woodland/TPO GIS
+    # layers - see gis_lookup.py/gis_common.py. Same .get()-everywhere
+    # rule as flood_risk_zones above: this function also runs on
+    # project_state.py's STORED constraints_json, and a project row
+    # created before today predates all four of these keys entirely.
+    sssi = site.get("sssi") or {}
+    if sssi.get("matches"):
+        names = [m["name"] or m["reference"] for m in sssi["matches"] if m.get("name") or m.get("reference")]
+        if names:
+            area_names.extend(names)
+            phrases.append(
+                f"within the {', '.join(names)} Site of Special Scientific Interest (SSSI)"
+            )
+        else:
+            phrases.append("within a Site of Special Scientific Interest (SSSI)")
+
+    aonb = site.get("aonb") or {}
+    if aonb.get("matches"):
+        names = [m["name"] or m["reference"] for m in aonb["matches"] if m.get("name") or m.get("reference")]
+        if names:
+            area_names.extend(names)
+            phrases.append(
+                f"within the {', '.join(names)} Area of Outstanding Natural Beauty (AONB)"
+            )
+        else:
+            phrases.append("within an Area of Outstanding Natural Beauty (AONB)")
+
+    # Real ancient-woodland entities carry a blank `name` far more often
+    # than not (confirmed against a live entity page - see
+    # gis_common.py's comment), so this never tries a named phrase the
+    # way conservation areas/SSSI/AONB do above - just the designation
+    # itself, plus its status code when known (ASNW/PAWS/etc.).
+    aw = site.get("ancient_woodland") or {}
+    if aw.get("matches"):
+        statuses = sorted(
+            {m["ancient_woodland_status"] for m in aw["matches"] if m.get("ancient_woodland_status")}
+        )
+        suffix = f" ({'/'.join(statuses)})" if statuses else ""
+        phrases.append(f"on or adjacent to land mapped as ancient woodland{suffix}")
+
+    tpo = site.get("tree_preservation_zones") or {}
+    if tpo.get("matches"):
+        phrases.append("within a Tree Preservation Order (TPO) zone")
+
     return phrases, area_names
 
 
@@ -183,8 +227,8 @@ def _find_map_citations(area_names, geography):
     return enriched
 
 
-def build_site_context(postcode=None, lat=None, lon=None, extra_question=None,
-                        top_k=25, rerank_top_n=8):
+def build_site_context(postcode=None, lat=None, lon=None, address=None,
+                        extra_question=None, top_k=25, rerank_top_n=8):
     """Top-level entry point: GIS lookup -> constraint description ->
     orchestrated retrieval (chunks/coverage, not yet an answer - callers
     pass these straight into answer.py's generate_answer(), same as
@@ -195,17 +239,36 @@ def build_site_context(postcode=None, lat=None, lon=None, extra_question=None,
     question ("Is an 8-storey extension feasible, given the site is in
     the Bayswater conservation area?") rather than replacing it - the
     constraint context is what makes this endpoint different from just
-    calling orchestrate() directly."""
+    calling orchestrate() directly.
+
+    address, if given (and postcode/lat/lon are not), is resolved via
+    site_lookup.resolve_address() - added 2026-09-21 so a caller can
+    type a free-text address/place name ("10 Downing Street") instead
+    of needing an exact postcode, reusing the same known-places/
+    Nominatim fallback chain proposal-review's document auto-detection
+    already relies on. The resolution result (which stage matched, and
+    how confident it is) is returned as geocode_detail so callers can
+    surface that honestly rather than presenting a Nominatim guess as
+    exact as a typed postcode."""
     from gis_lookup import geocode_postcode, site_constraints
 
+    geocode_detail = None
     if lat is not None and lon is not None:
         point = (lat, lon)
     elif postcode:
         point = geocode_postcode(postcode)
         if not point:
             return {"error": f"Postcode {postcode!r} not found."}
+    elif address:
+        from site_lookup import resolve_address
+
+        resolved = resolve_address(address)
+        if not resolved:
+            return {"error": f"Could not resolve {address!r} to a UK location."}
+        point = (resolved["lat"], resolved["lon"])
+        geocode_detail = resolved
     else:
-        return {"error": "Provide either postcode or lat/lon."}
+        return {"error": "Provide a postcode, an address, or lat/lon."}
 
     site = site_constraints(*point)
     lpa = site["local_planning_authority"]
@@ -235,4 +298,5 @@ def build_site_context(postcode=None, lat=None, lon=None, extra_question=None,
         "chunks": chunks,
         "coverage": coverage,
         "map_citations": map_citations,
+        "geocode_detail": geocode_detail,
     }

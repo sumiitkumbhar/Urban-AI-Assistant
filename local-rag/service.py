@@ -284,6 +284,12 @@ class SiteAnswerRequest(BaseModel):
     postcode: str | None = None
     lat: float | None = None
     lon: float | None = None
+    # Free-text address/place name fallback (added 2026-09-21) - tried
+    # only when postcode and lat/lon are both absent, via
+    # site_lookup.resolve_address(). Less certain than an exact
+    # postcode, so the response's geocode_detail names which stage
+    # actually resolved it.
+    address: str | None = None
     question: str | None = None
     top_k: int = 25
     rerank_top_n: int = 8
@@ -293,8 +299,8 @@ class SiteAnswerRequest(BaseModel):
 def site_answer(req: SiteAnswerRequest):
     t0 = time.time()
     ctx = build_site_context(
-        postcode=req.postcode, lat=req.lat, lon=req.lon, extra_question=req.question,
-        top_k=req.top_k, rerank_top_n=req.rerank_top_n,
+        postcode=req.postcode, lat=req.lat, lon=req.lon, address=req.address,
+        extra_question=req.question, top_k=req.top_k, rerank_top_n=req.rerank_top_n,
     )
     if "error" in ctx:
         return ctx
@@ -304,7 +310,8 @@ def site_answer(req: SiteAnswerRequest):
 
     logger.info(
         f"site-answer postcode={req.postcode!r} lat={req.lat} lon={req.lon} "
-        f"geography={ctx['geography']} question={ctx['policy_question']!r} "
+        f"address={req.address!r} geography={ctx['geography']} "
+        f"question={ctx['policy_question']!r} "
         f"confidence={ctx['coverage']['confidence']} "
         f"retrieval_ms={(t1-t0)*1000:.0f} generation_ms={(t2-t1)*1000:.0f}"
     )
@@ -315,6 +322,7 @@ def site_answer(req: SiteAnswerRequest):
         "policy_question": ctx["policy_question"],
         "map_citations": ctx["map_citations"],
         "coverage": ctx["coverage"],
+        "geocode_detail": ctx["geocode_detail"],
         "retrieval_ms": round((t1 - t0) * 1000, 1),
         "generation_ms": round((t2 - t1) * 1000, 1),
     }

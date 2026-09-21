@@ -129,6 +129,71 @@ def geocode_place_name(name):
         return None
 
 
+def resolve_address(address):
+    """Free-text UK address/place-name -> {"postcode", "lat", "lon",
+    "source", "detail"} or None, for a caller that already has ONE
+    specific string to resolve (e.g. a person typing an address directly
+    into a chat/API request) rather than a set of uploaded documents to
+    scan for candidates - see site_context.py's build_site_context(),
+    added 2026-09-21 so /site-answer accepts an address the same way
+    detect_site() already lets a proposal review auto-detect one.
+
+    Same precedence as detect_site()'s per-candidate stages, reused
+    rather than duplicated so a name resolves identically whether it's
+    typed directly here or found written in an uploaded proposal:
+    1. the string itself, if it's already a valid UK postcode;
+    2. an exact match in the known-places directory (gis/known_places.py);
+    3. a live Nominatim free-text geocode, snapped to its nearest real
+       postcode via gis_lookup.nearest_postcode() - least certain of the
+       three, so `source` always says which stage actually matched.
+    """
+    from gis_lookup import geocode_postcode, nearest_postcode
+    from known_places import lookup_known_place
+
+    address = (address or "").strip()
+    if not address:
+        return None
+
+    for candidate in _candidate_postcodes(address):
+        point = geocode_postcode(candidate)
+        if point:
+            return {
+                "postcode": candidate,
+                "lat": point[0],
+                "lon": point[1],
+                "source": "postcode",
+                "detail": f"{candidate!r} is a valid UK postcode.",
+            }
+
+    known = lookup_known_place(address)
+    if known:
+        return {
+            "postcode": known["postcode"],
+            "lat": known["lat"],
+            "lon": known["lon"],
+            "source": "known place directory",
+            "detail": (
+                f"{address!r} matched the known-places directory "
+                f"({known['postcode']}, source: {known['source']})."
+            ),
+        }
+
+    point = geocode_place_name(address)
+    if not point:
+        return None
+    postcode = nearest_postcode(*point)
+    return {
+        "postcode": postcode,
+        "lat": point[0],
+        "lon": point[1],
+        "source": "place name lookup",
+        "detail": (
+            f"{postcode or 'No nearby postcode found'} is the nearest postcode "
+            f"to {address!r} (resolved via Nominatim - please verify)."
+        ),
+    }
+
+
 def detect_site(document_texts):
     """document_texts: list of (filename, extracted_text) pairs, as
     proposal_review.review_proposal() already receives them. Returns
