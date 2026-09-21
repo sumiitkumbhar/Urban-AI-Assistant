@@ -531,7 +531,7 @@ def _warm_sentence_segmenter():
     optional citation-quality upgrade that still works, just less
     precisely, without it."""
     from retrieve import _load_sentence_segmenter
-    log("loading sentence-boundary model (wtpsplit's sat-3l-sm, first run downloads it - small, ~100MB)")
+    log("loading sentence-boundary model (wtpsplit's sat-3l-sm, first run downloads it - ~850MB)")
     try:
         segmenter = _load_sentence_segmenter()
     except Exception:

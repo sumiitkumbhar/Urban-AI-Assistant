@@ -44,7 +44,7 @@ script:
 
 1. Creates a venv in this folder (`local-rag/venv`) if one doesn't exist.
 2. Installs `requirements.txt` into it (first run downloads a ~130MB
-   embedder and a ~100MB sentence-boundary model - wtpsplit's SaT,
+   embedder and a ~850MB sentence-boundary model - wtpsplit's SaT,
    used to trim citation text to real sentence boundaries, see
    `retrieve.py`'s `get_complete_citation_text()` - both cached after
    that; the ~90MB reranker downloads separately on the first real
