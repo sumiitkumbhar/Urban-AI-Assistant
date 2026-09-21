@@ -785,8 +785,18 @@ export default function ExpandableCitation({
   const previewText = useMemo(() => {
     if (!rawDisplayText) return "";
 
-    const mergedLines = splitReadableParagraphs(cleanCitationText(rawDisplayText));
-    const firstReadable = mergedLines[0] || rawDisplayText;
+    // Reuse the already-cleaned/word-repaired paragraphs (rawParagraphs)
+    // instead of recomputing cleanCitationText/splitReadableParagraphs
+    // here - this card's preview and the expanded raw-extract box below
+    // must agree on what the chunk's text actually says. Chunks are
+    // fixed-size retrieval windows, so the first line routinely starts
+    // mid-sentence (or mid-word); mark that honestly with a leading
+    // ellipsis instead of presenting a lowercase word-fragment as if it
+    // were the real start of the passage, matching the treatment already
+    // applied to rawParagraphsForDisplay.
+    const firstReadable = rawParagraphs[0] || rawDisplayText;
+    const prefix = looksLikeMidSentenceStart(firstReadable) ? "… " : "";
+
     const sentenceMatch = firstReadable.match(/.*?[.!?](\s|$)/);
     const firstSentence = sentenceMatch?.[0]?.trim();
 
@@ -795,13 +805,16 @@ export default function ExpandableCitation({
       firstSentence.length >= 50 &&
       firstSentence.length <= 170
     ) {
-      return firstSentence;
+      return `${prefix}${firstSentence}`;
     }
 
-    return firstReadable.length > 170
-      ? `${firstReadable.slice(0, 170).trim()}…`
-      : firstReadable;
-  }, [rawDisplayText]);
+    const truncated =
+      firstReadable.length > 170
+        ? `${firstReadable.slice(0, 170).trim()}…`
+        : firstReadable;
+
+    return `${prefix}${truncated}`;
+  }, [rawDisplayText, rawParagraphs]);
 
   const tone = getConfidenceTone(Number(citation.confidence || 0));
 
