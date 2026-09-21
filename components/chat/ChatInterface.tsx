@@ -1616,28 +1616,48 @@ export default function ChatInterface() {
 
   // Streams local mode's answer via /api/local-rag-chat/stream (SSE) -
   // see FEATURES.localStreamingAnswers and app/api/local-rag-chat/
-  // stream/route.ts's own comments for the full design. Inserts an
-  // empty assistant message immediately (skipTypewriter: true - this is
-  // real incremental text, not useTypedText's fake reveal) and appends
-  // each "delta" event's text to it as it arrives; the "done" event
-  // then sets the authoritative final answer text/metadata (citations,
-  // confidence, groundedness) - see stream_answer()'s docstring in
-  // local-rag/answer.py for why the final text can differ slightly from
-  // the concatenation of every delta (the post-stream repair/
-  // groundedness passes).
+  // stream/route.ts's own comments for the full design. Mirrors cloud
+  // mode's own timing: no assistant bubble appears at all until there's
+  // real text to show it (ThinkingIndicator is the only thing visible
+  // until then) - the message is inserted lazily on the first non-empty
+  // "delta", not eagerly when the request starts. (The previous version
+  // inserted an empty bubble immediately, so local mode showed a blank
+  // message card sitting above the "Reranking..." status the whole time
+  // it was thinking - cloud mode never does that, since it isn't
+  // streaming and only ever renders the finished answer in one shot.)
+  // Later "delta" events just append to that same bubble once it
+  // exists; "done" sets the authoritative final answer text/metadata
+  // (citations, confidence, groundedness) - see stream_answer()'s
+  // docstring in local-rag/answer.py for why the final text can differ
+  // slightly from the concatenation of every delta (the post-stream
+  // repair/groundedness passes) - and also creates the bubble itself if
+  // somehow no delta ever arrived, so a real answer is never lost.
   const sendLocalStreaming = async (prompt: string, sessionToken: number) => {
     const assistantId = `${Date.now()}-assistant`;
+    const startTimestamp = new Date();
 
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: assistantId,
-        type: "assistant",
-        content: "",
-        timestamp: new Date(),
-        skipTypewriter: true,
-      },
-    ]);
+    const upsertAssistantMessage = (
+      content: string,
+      extra: Partial<ChatMessage> = {}
+    ) => {
+      setMessages((prev) =>
+        prev.some((m) => m.id === assistantId)
+          ? prev.map((m) =>
+              m.id === assistantId ? { ...m, content, ...extra } : m
+            )
+          : [
+              ...prev,
+              {
+                id: assistantId,
+                type: "assistant",
+                content,
+                timestamp: startTimestamp,
+                skipTypewriter: true,
+                ...extra,
+              },
+            ]
+      );
+    };
 
     const res = await fetch("/api/local-rag-chat/stream", {
       method: "POST",
@@ -1684,11 +1704,10 @@ export default function ChatInterface() {
         if (eventName === "delta") {
           accumulated += payload.text || "";
           if (chatSessionRef.current !== sessionToken) continue;
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantId ? { ...m, content: accumulated } : m
-            )
-          );
+          // Nothing to show yet - stay on the thinking indicator alone
+          // rather than popping an empty card in above it.
+          if (!accumulated) continue;
+          upsertAssistantMessage(accumulated);
         } else if (eventName === "done") {
           if (chatSessionRef.current !== sessionToken) return;
 
@@ -1697,28 +1716,20 @@ export default function ChatInterface() {
             extractRawCitations({ citations: payload.citations })
           );
 
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantId
-                ? {
-                    ...m,
-                    content: finalAnswer,
-                    metadata: {
-                      processingtime:
-                        (payload.retrieval_ms || 0) + (payload.generation_ms || 0),
-                      confidence: payload.confidence,
-                      groundedness: payload.groundedness,
-                      unsupportedClaims: payload.unsupportedClaims || [],
-                      citations: mappedCitations,
-                      mapCitations: Array.isArray(payload.mapCitations)
-                        ? payload.mapCitations
-                        : [],
-                      sitePostcode: payload.postcode,
-                    },
-                  }
-                : m
-            )
-          );
+          upsertAssistantMessage(finalAnswer, {
+            metadata: {
+              processingtime:
+                (payload.retrieval_ms || 0) + (payload.generation_ms || 0),
+              confidence: payload.confidence,
+              groundedness: payload.groundedness,
+              unsupportedClaims: payload.unsupportedClaims || [],
+              citations: mappedCitations,
+              mapCitations: Array.isArray(payload.mapCitations)
+                ? payload.mapCitations
+                : [],
+              sitePostcode: payload.postcode,
+            },
+          });
 
           if (voiceModeEnabled && ttsSupported) {
             const speechText = sanitizeForSpeech(finalAnswer);
