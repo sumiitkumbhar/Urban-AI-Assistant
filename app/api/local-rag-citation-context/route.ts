@@ -2,9 +2,14 @@
 //
 // Proxies to local-rag's GET /citation-context/{chunk_id} - see
 // local-rag/retrieve.py's get_citation_context() for what it does and
-// why (stitches in the neighboring chunk(s) from the same document so a
-// citation's RAW EXTRACT panel isn't stuck showing a chunk that starts
-// or ends mid-sentence). Called on demand from
+// why (stitches in further neighboring chunk(s) from the same document,
+// trimmed to a genuine sentence boundary on each edge). Every citation
+// already comes back sentence-complete by default from the main /query
+// response (local-rag/answer.py's build_context() calls
+// get_complete_citation_text() for every citation up front - fixing a
+// mid-sentence cut is no longer something a user has to click for).
+// This endpoint is for going beyond that one sentence to more
+// surrounding paragraphs, called on demand from
 // components/citations/ExpandableCitation.tsx's "Show more context"
 // control - not part of the main /query response, since most citations
 // are never expanded and there's no reason to pay for this on every
@@ -27,6 +32,14 @@ interface LocalRagCitationContext {
   page_end: number;
   expanded_before: boolean;
   expanded_after: boolean;
+  // Whether retrieve.py's get_citation_context() found a genuine
+  // sentence boundary at each edge of the stitched passage, rather
+  // than just running out of the requested window - see that
+  // function's docstring. Optional because older cached responses
+  // (or a local-rag service that hasn't picked up this change yet)
+  // may not send them.
+  complete_before?: boolean;
+  complete_after?: boolean;
   text: string;
 }
 
@@ -72,6 +85,8 @@ export async function GET(req: NextRequest) {
       pageEnd: data.page_end,
       expandedBefore: data.expanded_before,
       expandedAfter: data.expanded_after,
+      completeBefore: data.complete_before,
+      completeAfter: data.complete_after,
       text: data.text,
     });
   } catch (err) {

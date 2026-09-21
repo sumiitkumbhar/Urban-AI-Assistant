@@ -82,7 +82,20 @@ def _merge_overlap(a, b, max_overlap=CHUNK_OVERLAP_CHARS):
 def get_citation_context(chunk_id, window=1):
     """Returns the target chunk plus up to `window` neighboring chunks on
     each side from the same source document, stitched into one
-    continuous passage. Returns None if chunk_id isn't a known chunk."""
+    continuous passage - the "show me more surrounding paragraphs"
+    control, for going beyond the single sentence-complete passage
+    get_complete_citation_text() already returns by default (see that
+    function; build_context() in answer.py uses it for every citation
+    up front, not just this one on manual request). Returns None if
+    chunk_id isn't a known chunk.
+
+    The outer edges of the stitched passage are trimmed to a genuine
+    sentence boundary when one is found within the grabbed window, using
+    the same helpers get_complete_citation_text() uses, so a bigger
+    manual window doesn't just relocate the mid-sentence cut further
+    out - complete_before/complete_after report whether that trim found
+    a real boundary (False means the window itself was too small to
+    reach one; the caller can ask again with a larger window)."""
     chunks = _load_chunk_texts()
     chunk_id = str(chunk_id)
     target = chunks.get(chunk_id)
@@ -115,6 +128,9 @@ def get_citation_context(chunk_id, window=1):
     for c in ordered[1:]:
         stitched = _merge_overlap(stitched, c["text"])
 
+    stitched, complete_before = _trim_to_sentence_start(stitched)
+    stitched, complete_after = _trim_to_sentence_end(stitched)
+
     return {
         "chunk_id": chunk_id,
         "doc_filename": target["doc_filename"],
@@ -122,7 +138,192 @@ def get_citation_context(chunk_id, window=1):
         "page_end": ordered[-1]["page"],
         "expanded_before": len(before) > 0,
         "expanded_after": len(after) > 0,
+        "complete_before": complete_before,
+        "complete_after": complete_after,
         "text": stitched,
+    }
+
+
+# --- Boundary-aware, always-on citation completion -------------------
+#
+# get_citation_context() above is the *manual* "Show more context" path:
+# a fixed, small window, fetched only when the user clicks. It doesn't
+# solve the actual problem - a citation's raw extract can start or end
+# mid-sentence (or, worse, mid-clause of a single long sentence, e.g.
+# "...permitted development rights do not apply unless" cut right before
+# the exception that reverses the sentence's meaning) - because most
+# citations are *never* expanded, so most cut-off text is simply never
+# fixed. A legal/policy clause read incomplete can read as saying the
+# opposite of what it actually says, so this can't be opt-in.
+#
+# get_complete_citation_text() is the fix: called for every citation
+# by default (see answer.py's build_context()), not behind a click. It
+# walks as many neighboring same-document chunks as it takes (bounded,
+# so one malformed document can't pull in the whole file) to reach a
+# genuine sentence boundary on each side, then trims the stitched
+# passage to exactly that boundary - so what's shown is always whole
+# sentences, never a fragment. When a boundary genuinely can't be found
+# within the cap (extremely long unbroken sentence, or a run of
+# malformed/OCR'd text with no punctuation), it says so honestly via
+# complete_before/complete_after rather than silently presenting a still
+# -incomplete passage as whole.
+
+# A capital letter, a digit (numbered clause, e.g. "12.3(a)"), an
+# opening quote/bracket, or a bullet/dash marker - what a genuine
+# sentence or clause is expected to start with. Anything else (a
+# lowercase letter, mid-word) means the text in hand continues a
+# sentence that started earlier, off the front of what's shown.
+_SENTENCE_START_RE = re.compile(r'^[A-Z0-9"‘’“(\[•–—\-]')
+
+# A boundary between one sentence and the next: terminal punctuation,
+# an optional closing quote/bracket, then whitespace (or end of text).
+_SENTENCE_BOUNDARY_RE = re.compile(r'[.!?][\'")’”\]]*(?:\s+|$)')
+
+# Mirrors ExpandableCitation.tsx's looksTruncated() tail heuristic
+# (dangling conjunction, open paren, trailing colon/comma, a bare list-
+# item number) so the server and the client agree on what "ends cleanly"
+# means - kept in sync deliberately rather than factored out, since one
+# lives in Python and the other in TypeScript.
+_DANGLING_TAIL_RE = re.compile(
+    r'\b(and|or|to|of|for|with|including|which|that|where|when|if|than|'
+    r'see|paragraph|paragraphs)$',
+    re.IGNORECASE,
+)
+_LIST_STUB_RE = re.compile(r'^(\d+\.|[a-z]\.)$', re.IGNORECASE)
+
+# Safety caps on how far get_complete_citation_text() will walk/grow -
+# generous enough to recover a genuinely long sentence, small enough
+# that a document with no punctuation for pages can't balloon a single
+# citation into half the file.
+MAX_EXPANSION_CHUNKS = 6
+MAX_EXPANSION_CHARS = 6000
+
+
+def _starts_cleanly(text):
+    t = text.lstrip()
+    return not t or bool(_SENTENCE_START_RE.match(t))
+
+
+def _ends_cleanly(text):
+    t = text.rstrip()
+    if not t:
+        return True
+    last_line = t.splitlines()[-1].strip()
+    if _DANGLING_TAIL_RE.search(last_line):
+        return False
+    if re.search(r'[:;,(-]$', last_line):
+        return False
+    if _LIST_STUB_RE.match(last_line):
+        return False
+    return bool(re.search(r'[.!?"’”)\]]$', last_line))
+
+
+def _trim_to_sentence_start(text):
+    """Drops any leading sentence fragment, keeping only whole sentences
+    from the first sentence boundary onward. Returns (trimmed_text,
+    found_boundary) - found_boundary is False if there was nothing to
+    trim to, meaning the caller should not claim completeness."""
+    if _starts_cleanly(text):
+        return text, True
+    match = _SENTENCE_BOUNDARY_RE.search(text)
+    if not match:
+        return text, False
+    return text[match.end():], True
+
+
+def _trim_to_sentence_end(text):
+    """Drops any trailing sentence fragment, keeping only whole sentences
+    up to the last sentence boundary. Returns (trimmed_text,
+    found_boundary) with the same honesty contract as above."""
+    if _ends_cleanly(text):
+        return text, True
+    matches = list(_SENTENCE_BOUNDARY_RE.finditer(text))
+    if not matches:
+        return text, False
+    return text[:matches[-1].end()].rstrip(), True
+
+
+def get_complete_citation_text(
+    chunk_id, max_expansion_chunks=MAX_EXPANSION_CHUNKS, max_expansion_chars=MAX_EXPANSION_CHARS
+):
+    """Sentence-complete evidence text for one citation: the target
+    chunk, expanded with as many neighboring same-document chunks as it
+    takes (within the caps above) to reach a genuine sentence boundary
+    on each side, then trimmed to exactly those boundaries. Returns None
+    if chunk_id isn't a known chunk - same contract as
+    get_citation_context()."""
+    chunks = _load_chunk_texts()
+    chunk_id = str(chunk_id)
+    target = chunks.get(chunk_id)
+    if target is None:
+        return None
+    try:
+        target_idx = int(chunk_id)
+    except ValueError:
+        return None
+
+    sha = target.get("sha256")
+
+    def walk(step):
+        collected = []
+        idx = target_idx
+        for _ in range(max(0, max_expansion_chunks)):
+            idx += step
+            neighbor = chunks.get(f"{idx:08d}")
+            if neighbor is None or neighbor.get("sha256") != sha:
+                break
+            collected.append(neighbor)
+        return collected
+
+    text = target["text"]
+    before_chunks = []
+    after_chunks = []
+    complete_before = _starts_cleanly(text)
+    complete_after = _ends_cleanly(text)
+
+    if not complete_before:
+        before_chunks = list(reversed(walk(-1)))
+        stitched_before = None
+        for c in before_chunks:
+            stitched_before = (
+                c["text"] if stitched_before is None else _merge_overlap(stitched_before, c["text"])
+            )
+        combined = _merge_overlap(stitched_before, text) if stitched_before else text
+        trimmed, found = _trim_to_sentence_start(combined)
+        if len(trimmed) - len(text) > max_expansion_chars:
+            # Hit the cap before a real boundary showed up - keep the
+            # capped amount of extra context, but don't claim it's whole.
+            trimmed = trimmed[-(max_expansion_chars + len(text)):]
+            found = False
+        text = trimmed
+        complete_before = found
+
+    if not complete_after:
+        after_chunks = walk(1)
+        stitched_after = None
+        for c in after_chunks:
+            stitched_after = (
+                c["text"] if stitched_after is None else _merge_overlap(stitched_after, c["text"])
+            )
+        combined = _merge_overlap(text, stitched_after) if stitched_after else text
+        trimmed, found = _trim_to_sentence_end(combined)
+        if len(trimmed) - len(text) > max_expansion_chars:
+            trimmed = trimmed[: len(text) + max_expansion_chars]
+            found = False
+        text = trimmed
+        complete_after = found
+
+    ordered = before_chunks + [target] + after_chunks
+    return {
+        "chunk_id": chunk_id,
+        "doc_filename": target["doc_filename"],
+        "page_start": ordered[0]["page"],
+        "page_end": ordered[-1]["page"],
+        "expanded_before": len(before_chunks) > 0,
+        "expanded_after": len(after_chunks) > 0,
+        "complete_before": complete_before,
+        "complete_after": complete_after,
+        "text": text,
     }
 
 

@@ -197,11 +197,43 @@ def extract_pages(pdf_path):
             yield i, text
 
 
+def _split_long_paragraph(para, target):
+    """Splits a single paragraph too long to fit in one chunk of its own,
+    breaking on whitespace so a chunk never starts or ends mid-word -
+    the raw `para[i:i+target]` character slice this replaced could (and
+    on the live corpus, did) land inside a word, e.g. a chunk beginning
+    "utside of the settlement boundary" (see the sibling JS pipeline's
+    scripts/chunk-boundary.test.ts, which asserts exactly this for its
+    own chunker - this is the same fix applied here). A word-boundary
+    split is necessary but not sufficient for get_complete_citation_text()
+    in retrieve.py to have less work to do at query time - it can still
+    land mid-sentence, just never mid-word - so that function still owns
+    presenting a genuinely sentence-complete passage; this just gives it
+    a cleaner starting point. Falls back to a hard split only for a
+    single "word" longer than target on its own (an unbroken URL or
+    run-on token with no spaces at all)."""
+    pieces = []
+    start = 0
+    n = len(para)
+    while start < n:
+        end = min(start + target, n)
+        if end < n:
+            boundary = para.rfind(" ", start, end)
+            if boundary > start:
+                end = boundary
+        piece = para[start:end].strip()
+        if piece:
+            pieces.append(piece)
+        start = end
+    return pieces
+
+
 def chunk_page_text(text, target=CHUNK_TARGET_CHARS, overlap=CHUNK_OVERLAP_CHARS):
     """Paragraph-aware sliding window: builds chunks out of whole
     paragraphs so a chunk boundary doesn't land mid-sentence when
-    avoidable, falling back to a hard character split for a single
-    paragraph longer than the target on its own."""
+    avoidable, falling back to a whitespace-respecting split (see
+    _split_long_paragraph() above) for a single paragraph longer than
+    the target on its own."""
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     if not paragraphs:
         paragraphs = [text]
@@ -213,8 +245,7 @@ def chunk_page_text(text, target=CHUNK_TARGET_CHARS, overlap=CHUNK_OVERLAP_CHARS
             if current:
                 chunks.append(current)
                 current = ""
-            for i in range(0, len(para), target):
-                chunks.append(para[i:i + target])
+            chunks.extend(_split_long_paragraph(para, target))
             continue
         candidate = (current + "\n\n" + para) if current else para
         if len(candidate) > target and current:

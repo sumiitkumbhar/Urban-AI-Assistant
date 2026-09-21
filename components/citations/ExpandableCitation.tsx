@@ -628,6 +628,21 @@ export default function ExpandableCitation({
   // never have this field, so the control below simply doesn't render
   // for them.
   const chunkId: string | undefined = citation._raw?.chunk_id;
+
+  // Sentence-completeness as the local-rag backend actually determined
+  // it (see local-rag/retrieve.py's get_complete_citation_text()) -
+  // authoritative where present, since it's based on the real
+  // neighboring source text, not a guess from the fragment already on
+  // screen. undefined/null means no chunk_id was available to check
+  // (e.g. a non-local-rag citation) - callers should fall back to the
+  // looksTruncated()/looksLikeMidSentenceStart() heuristics only then.
+  const chunkCompleteBefore: boolean | undefined | null =
+    citation._raw?.complete_before;
+  const chunkCompleteAfter: boolean | undefined | null =
+    citation._raw?.complete_after;
+  const hasBackendCompleteness =
+    chunkCompleteBefore !== undefined && chunkCompleteBefore !== null;
+
   const [contextStatus, setContextStatus] = useState<
     "idle" | "loading" | "loaded" | "error"
   >("idle");
@@ -638,6 +653,8 @@ export default function ExpandableCitation({
     pageEnd: number;
     expandedBefore: boolean;
     expandedAfter: boolean;
+    completeBefore?: boolean;
+    completeAfter?: boolean;
   } | null>(null);
   const [contextErrorMsg, setContextErrorMsg] = useState<string | null>(null);
   const [showExpandedContext, setShowExpandedContext] = useState(false);
@@ -672,9 +689,18 @@ export default function ExpandableCitation({
     [cleanedParagraphs]
   );
 
+  // Prefer the backend's authoritative sentence-completeness check
+  // (see chunkCompleteBefore/chunkCompleteAfter above) over the
+  // heuristic below - since answer.py now expands every citation to a
+  // sentence-complete passage by default, this should almost always
+  // read as "complete" once a real fix has landed; the heuristic stays
+  // as the fallback for citations with no chunk_id to check server-side.
   const rawLikelyTruncated = useMemo(
-    () => looksTruncated(rawDisplayText),
-    [rawDisplayText]
+    () =>
+      hasBackendCompleteness
+        ? chunkCompleteBefore === false || chunkCompleteAfter === false
+        : looksTruncated(rawDisplayText),
+    [hasBackendCompleteness, chunkCompleteBefore, chunkCompleteAfter, rawDisplayText]
   );
 
   // Whichever text is actually on screen right now - the original
@@ -693,10 +719,31 @@ export default function ExpandableCitation({
     [activeCleanedText]
   );
 
-  const activeRawLikelyTruncated = useMemo(
-    () => looksTruncated(activeCleanedText),
-    [activeCleanedText]
-  );
+  // Same authoritative-first preference as rawLikelyTruncated above,
+  // but for whichever text is actually active right now - once the user
+  // has fetched more surrounding paragraphs via loadCitationContext(),
+  // that response carries its own completeBefore/completeAfter from the
+  // same server-side check (see GET /citation-context/{chunk_id}).
+  const activeRawLikelyTruncated = useMemo(() => {
+    if (showExpandedContext && expandedContext) {
+      if (
+        expandedContext.completeBefore !== undefined &&
+        expandedContext.completeAfter !== undefined
+      ) {
+        return (
+          expandedContext.completeBefore === false ||
+          expandedContext.completeAfter === false
+        );
+      }
+      return looksTruncated(activeCleanedText);
+    }
+    return rawLikelyTruncated;
+  }, [
+    showExpandedContext,
+    expandedContext,
+    activeCleanedText,
+    rawLikelyTruncated,
+  ]);
 
   // Chunks are fixed-size retrieval windows, not paragraph-aligned, so
   // the first/last line of a chunk's text routinely lands mid-sentence -
@@ -706,10 +753,34 @@ export default function ExpandableCitation({
   // ellipsis marks the cut honestly without inventing any missing text.
   // Re-checked against whichever text is active, so the markers clear on
   // whichever side actually got real neighboring text stitched in.
+  // Same authoritative-first preference as activeRawLikelyTruncated,
+  // but for the *start* of the passage specifically - the backend's
+  // complete_before/complete_after are two independent signals (a
+  // citation can be cut on one side only), so they're checked
+  // separately rather than collapsed into one truncated/not flag.
+  const activeStartLooksCut = useMemo(() => {
+    if (showExpandedContext && expandedContext) {
+      if (expandedContext.completeBefore !== undefined) {
+        return expandedContext.completeBefore === false;
+      }
+      return looksLikeMidSentenceStart(activeRawParagraphs[0] || "");
+    }
+    if (hasBackendCompleteness) {
+      return chunkCompleteBefore === false;
+    }
+    return looksLikeMidSentenceStart(activeRawParagraphs[0] || "");
+  }, [
+    showExpandedContext,
+    expandedContext,
+    hasBackendCompleteness,
+    chunkCompleteBefore,
+    activeRawParagraphs,
+  ]);
+
   const rawParagraphsForDisplay = useMemo(() => {
     if (activeRawParagraphs.length === 0) return activeRawParagraphs;
     const out = [...activeRawParagraphs];
-    if (looksLikeMidSentenceStart(out[0])) {
+    if (activeStartLooksCut) {
       out[0] = `… ${out[0]}`;
     }
     const lastIdx = out.length - 1;
@@ -717,7 +788,7 @@ export default function ExpandableCitation({
       out[lastIdx] = `${out[lastIdx]} …`;
     }
     return out;
-  }, [activeRawParagraphs, activeRawLikelyTruncated]);
+  }, [activeRawParagraphs, activeRawLikelyTruncated, activeStartLooksCut]);
 
   const loadCitationContext = async () => {
     if (!chunkId) return;
@@ -749,6 +820,8 @@ export default function ExpandableCitation({
         pageEnd: data.pageEnd,
         expandedBefore: data.expandedBefore,
         expandedAfter: data.expandedAfter,
+        completeBefore: data.completeBefore,
+        completeAfter: data.completeAfter,
       });
       setShowExpandedContext(true);
       setContextStatus("loaded");
@@ -979,8 +1052,13 @@ citation.directLink.startsWith("http") ? (
                 </button>
 
                 {chunkId &&
-                (looksLikeMidSentenceStart(rawParagraphs[0] || "") ||
-                  rawLikelyTruncated) ? (
+                // rawLikelyTruncated already covers both edges when the
+                // backend's complete_before/complete_after are known;
+                // the extra heuristic OR only matters as a fallback for
+                // citations with no authoritative signal at all.
+                (rawLikelyTruncated ||
+                  (!hasBackendCompleteness &&
+                    looksLikeMidSentenceStart(rawParagraphs[0] || ""))) ? (
                   <button
                     type="button"
                     onClick={loadCitationContext}

@@ -264,11 +264,16 @@ def health():
 @app.get("/citation-context/{chunk_id}")
 def citation_context(chunk_id: str, window: int = 1):
     """Neighboring-chunk context for one citation, used by the chat UI's
-    "show more context" control on a RAW EXTRACT panel that's cut off
-    mid-sentence (see retrieve.py's get_citation_context() docstring for
-    how chunks are stitched). window is clamped to a small range - this
-    is meant to recover a sentence or two, not fetch half the document
-    into a citation card."""
+    "show more context" control to pull in additional surrounding
+    paragraphs beyond the sentence-complete text every citation already
+    carries by default (see answer.py's build_context(), which calls
+    retrieve.py's get_complete_citation_text() for every citation up
+    front - this endpoint is for "more than one sentence", not for
+    fixing a mid-sentence cut, since that's no longer something a user
+    has to click to fix). window is clamped to a small range - this is
+    meant to recover a paragraph or two, not fetch half the document
+    into a citation card. See retrieve.py's get_citation_context()
+    docstring for how chunks are stitched and boundary-trimmed."""
     window = max(1, min(window, 3))
     ctx = get_citation_context(chunk_id, window=window)
     if ctx is None:

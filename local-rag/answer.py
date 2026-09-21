@@ -13,6 +13,7 @@ import os
 from groq import Groq
 
 from common import load_dotenv_from_repo, DEFAULT_GROQ_MODEL
+from retrieve import get_complete_citation_text
 
 SYSTEM_PROMPT = """You are a UK planning and building-regulations assistant. \
 Answer ONLY using the numbered evidence extracts provided below - never from \
@@ -49,12 +50,37 @@ def build_context(chunks):
     """Numbered evidence blocks the model can cite by index, and the
     parallel citation list the caller returns alongside the answer -
     same shape as the old app's [D1]/[D2] citation markers, just plain
-    numbers since there's no separate web-source track here."""
+    numbers since there's no separate web-source track here.
+
+    Each citation's text is expanded to sentence-complete evidence by
+    default via get_complete_citation_text() - not the raw single-chunk
+    c["text"], and not gated behind a "Show more context" click. A
+    citation is what both the model and the user read as ground truth
+    for a claim; a chunk boundary that happens to land mid-clause (e.g.
+    cutting "...unless the local planning authority has confirmed..."
+    right before "unless") can flip what the source text actually says,
+    and that risk doesn't go away just because most citations are never
+    manually expanded. Falls back to the raw chunk text only if
+    chunk_id is missing or the lookup fails for some reason - never
+    silently drops a citation over this."""
     blocks = []
     citations = []
     for i, c in enumerate(chunks, start=1):
+        chunk_id = c.get("chunk_id")
+        complete_before = complete_after = None
+        text = c["text"]
+        if chunk_id is not None:
+            try:
+                complete = get_complete_citation_text(chunk_id)
+            except Exception:
+                complete = None
+            if complete is not None:
+                text = complete["text"]
+                complete_before = complete["complete_before"]
+                complete_after = complete["complete_after"]
+
         blocks.append(
-            f"[{i}] {c['doc_filename']} (page {c['page']}):\n{c['text']}"
+            f"[{i}] {c['doc_filename']} (page {c['page']}):\n{text}"
         )
         citations.append({
             "id": i,
@@ -63,20 +89,26 @@ def build_context(chunks):
             "domain": c["domain"],
             "geography": c["geography"],
             "rerank_score": round(c.get("rerank_score", 0.0), 4),
-            # The raw retrieved chunk text - already sitting right here as
-            # c["text"] (it's what the evidence block above is built from),
-            # just never threaded into the citation dict before. Without
-            # this, the frontend's "RAW EXTRACT" panel has nothing to show
-            # for a local-mode citation - see app/api/local-rag-chat/
-            # route.ts's transformCitations(), which used to hardcode
-            # fullText/excerpt to undefined for exactly this reason.
-            "text": c["text"],
+            # Sentence-complete by default (see the function docstring
+            # above) - not the raw single fixed-size retrieval chunk.
+            "text": text,
             # The chunk's own id in the corpus-wide chunks.jsonl/Qdrant
-            # index - lets the frontend ask GET /citation-context/{id}
-            # for the neighboring chunk(s) when a citation's raw extract
-            # is cut off mid-sentence. See retrieve.py's
-            # get_citation_context() for how that's resolved.
-            "chunk_id": c.get("chunk_id"),
+            # index - still threaded through so the frontend's "Show
+            # more context" control can pull in additional surrounding
+            # paragraphs beyond the sentence-complete text above, via
+            # GET /citation-context/{id}. See retrieve.py's
+            # get_citation_context() for that manual-expansion path.
+            "chunk_id": chunk_id,
+            # True once get_complete_citation_text() found a genuine
+            # sentence boundary on that side; False means it hit its
+            # expansion cap without one (pathological/unpunctuated
+            # source text) and the text may still be cut - None means
+            # no chunk_id was available to check at all (e.g. a
+            # non-local-rag citation source). The frontend should only
+            # show a "still might be cut off" indicator when this is
+            # explicitly False, not whenever it's merely absent.
+            "complete_before": complete_before,
+            "complete_after": complete_after,
         })
     return "\n\n---\n\n".join(blocks), citations
 
