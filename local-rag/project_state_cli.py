@@ -53,6 +53,7 @@ def main():
     p_create.add_argument("--postcode")
     p_create.add_argument("--lat", type=float)
     p_create.add_argument("--lon", type=float)
+    p_create.add_argument("--address", help="Free-text address/place name, tried when --postcode/--lat/--lon are all omitted")
 
     sub.add_parser("list")
 
@@ -86,7 +87,10 @@ def main():
 
     if args.command == "create":
         try:
-            project = ps.create_project(args.name, postcode=args.postcode, lat=args.lat, lon=args.lon)
+            project = ps.create_project(
+                args.name, postcode=args.postcode, lat=args.lat, lon=args.lon,
+                address=args.address,
+            )
         except ValueError as e:
             print(str(e))
             sys.exit(1)

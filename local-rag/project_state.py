@@ -99,26 +99,49 @@ def _fetch_open_questions(cur, project_id):
     ]
 
 
-def create_project(name, postcode=None, lat=None, lon=None):
-    """Geocodes (if given a postcode) or uses lat/lon directly, runs the
-    same site_constraints() GIS lookup site_context.py uses for a
-    one-off query, maps the matched LPA to local-rag's own geography
-    slug via site_context.py's own helper (so a project's geography
-    always agrees with however local-rag's text corpus is tagged), and
-    inserts one row. Raises ValueError for a postcode that doesn't
-    geocode or if neither postcode nor lat/lon is given - callers
-    (CLI/API) turn that into a user-facing error."""
+def create_project(name, postcode=None, lat=None, lon=None, address=None):
+    """Geocodes (if given a postcode or free-text address) or uses
+    lat/lon directly, runs the same site_constraints() GIS lookup
+    site_context.py uses for a one-off query, maps the matched LPA to
+    local-rag's own geography slug via site_context.py's own helper (so
+    a project's geography always agrees with however local-rag's text
+    corpus is tagged), and inserts one row. Raises ValueError for a
+    postcode/address that doesn't resolve, or if none of
+    postcode/address/lat+lon is given - callers (CLI/API) turn that
+    into a user-facing error.
+
+    address (added 2026-09-21, alongside site_context.build_site_context()
+    gaining the same parameter) is resolved via site_lookup.resolve_address()
+    - the same known-places/Nominatim fallback chain every other free-text
+    entry point in this project now shares - and, on a match, its
+    resolved postcode is stored in the project's own `postcode` field so
+    it displays like any project created directly from a postcode. This
+    is a convenience for typing "10 Downing Street" instead of needing
+    an exact postcode up front; it does not store which resolution stage
+    matched (site_lookup.resolve_address()'s `source`/`detail`) the way
+    /site-answer's geocode_detail does - a project is expected to be
+    corrected/refined by the user afterward regardless of how it started,
+    unlike a one-off lookup where that provenance is the only record."""
     from gis_common import get_conn
     from gis_lookup import geocode_postcode, site_constraints
     from site_context import _lpa_reference_to_geography
 
     if lat is None or lon is None:
-        if not postcode:
-            raise ValueError("Provide either postcode or lat/lon.")
-        point = geocode_postcode(postcode)
-        if not point:
-            raise ValueError(f"Postcode {postcode!r} not found.")
-        lat, lon = point
+        if postcode:
+            point = geocode_postcode(postcode)
+            if not point:
+                raise ValueError(f"Postcode {postcode!r} not found.")
+            lat, lon = point
+        elif address:
+            from site_lookup import resolve_address
+
+            resolved = resolve_address(address)
+            if not resolved:
+                raise ValueError(f"Could not resolve {address!r} to a UK location.")
+            postcode = resolved["postcode"]
+            lat, lon = resolved["lat"], resolved["lon"]
+        else:
+            raise ValueError("Provide a postcode, an address, or lat/lon.")
 
     site = site_constraints(lat, lon)
     lpa = site["local_planning_authority"]

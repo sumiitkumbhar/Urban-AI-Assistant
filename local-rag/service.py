@@ -339,6 +339,10 @@ class ProjectCreateRequest(BaseModel):
     postcode: str | None = None
     lat: float | None = None
     lon: float | None = None
+    # Free-text address/place name fallback (added 2026-09-21), tried
+    # only when postcode and lat/lon are both absent - see
+    # project_state.create_project()'s docstring.
+    address: str | None = None
 
 
 class ProjectUpdateRequest(BaseModel):
@@ -362,7 +366,8 @@ class QuestionCreateRequest(BaseModel):
 def create_project(req: ProjectCreateRequest):
     try:
         return project_state_module.create_project(
-            req.name, postcode=req.postcode, lat=req.lat, lon=req.lon
+            req.name, postcode=req.postcode, lat=req.lat, lon=req.lon,
+            address=req.address,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
