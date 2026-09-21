@@ -536,6 +536,19 @@ async def proposal_review_endpoint(
             report_files["pdf_filename"] = f"{slug}.pdf"
         else:
             report_files["pdf_error"] = reports["pdf_error"]
+        # Live animated HTML view (2026-09-21, "animated report visuals") -
+        # same /reports StaticFiles mount already serving the .md/.pdf,
+        # just a third extension. Independent of the PDF above (see
+        # build_reports' own docstring) so a WeasyPrint failure still
+        # leaves this available, and vice versa.
+        if reports.get("live_html") is not None:
+            html_path = reports_dir / f"{slug}.html"
+            html_path.write_text(reports["live_html"], encoding="utf-8")
+            report_files["html"] = str(html_path)
+            report_files["html_url"] = f"/reports/{slug}.html"
+            report_files["html_filename"] = f"{slug}.html"
+        else:
+            report_files["html_error"] = reports.get("live_html_error")
 
     t1 = time.time()
     logger.info(

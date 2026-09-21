@@ -107,6 +107,12 @@ export async function POST(req: Request) {
         markdown_url: data.report_files.markdown_url
           ? `${LOCAL_RAG_URL}${data.report_files.markdown_url}`
           : undefined,
+        // Live animated report view (report_render.py's render_html(...,
+        // animate=True), see build_reports()) - same origin-absolutizing
+        // as pdf_url/markdown_url above, same reason.
+        html_url: data.report_files.html_url
+          ? `${LOCAL_RAG_URL}${data.report_files.html_url}`
+          : undefined,
       }
     : undefined;
 

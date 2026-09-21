@@ -325,7 +325,7 @@ def _topic_icon_svg(topic_text, size=12, color=None):
     return f'<svg {attrs}>{body}</svg>'
 
 
-def _status_donut_svg(counts, size=110, stroke=16):
+def _status_donut_svg(counts, size=110, stroke=16, animate=False):
     """Checklist status as a ring chart (missing/unclear/present) - a
     second infographic alongside the issues-by-topic bar, added 2026-09-18
     per "more visuals". Status colors are the fixed palette; the legend
@@ -348,12 +348,25 @@ def _status_donut_svg(counts, size=110, stroke=16):
             continue
         _, color, _ = STATUS[key]
         length = (n / total) * circumference
-        dasharray = f"{max(0, length - gap)} {circumference - max(0, length - gap)}"
-        segments.append(
-            f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{color}" '
-            f'stroke-width="{stroke}" stroke-dasharray="{dasharray}" '
-            f'stroke-dashoffset="{-offset}" transform="rotate(-90 {cx} {cy})"/>'
-        )
+        dash = max(0, length - gap)
+        gap_len = circumference - dash
+        dasharray = f"{dash} {gap_len}"
+        if animate:
+            i = len(segments)
+            segments.append(
+                f'<circle class="donut-seg" cx="{cx}" cy="{cy}" r="{r}" fill="none" '
+                f'stroke="{color}" stroke-width="{stroke}" '
+                f'stroke-dasharray="0 {circumference}" '
+                f'stroke-dashoffset="{-offset}" transform="rotate(-90 {cx} {cy})" '
+                f'data-dash="{dash}" data-gap="{gap_len}" '
+                f'style="transition: stroke-dasharray 0.8s ease-out {0.15 * i}s;"/>'
+            )
+        else:
+            segments.append(
+                f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{color}" '
+                f'stroke-width="{stroke}" stroke-dasharray="{dasharray}" '
+                f'stroke-dashoffset="{-offset}" transform="rotate(-90 {cx} {cy})"/>'
+            )
         offset += length
     pct_present = round(counts.get("present", 0) / total * 100)
     return (
@@ -377,7 +390,7 @@ def _status_chip(status, label_prefix=""):
     )
 
 
-def _bar_chart_svg(topic_counts, width=460):
+def _bar_chart_svg(topic_counts, width=460, animate=False):
     """A single-series horizontal bar chart (issue count by topic) - one
     accent hue, no legend needed (one series - the section title already
     says what's plotted, per the palette's own labeling rule). Skipped
@@ -396,11 +409,21 @@ def _bar_chart_svg(topic_counts, width=460):
         y = i * row_h
         w = max(6, round((count / max_count) * chart_w))
         label = topic if len(topic) <= 30 else topic[:28] + "…"
+        if animate:
+            rect = (
+                f'<rect class="bar-fill" x="{label_w}" y="{y}" width="0" height="{bar_h}" '
+                f'rx="4" ry="4" fill="{COLOR_ACCENT}" data-final-width="{w}" '
+                f'style="transition: width 0.7s ease-out {0.08 * i}s;"/>'
+            )
+        else:
+            rect = (
+                f'<rect x="{label_w}" y="{y}" width="{w}" height="{bar_h}" rx="4" ry="4" '
+                f'fill="{COLOR_ACCENT}"/>'
+            )
         rows.append(
             f'<text x="0" y="{y + bar_h - 5}" font-size="9" fill="{COLOR_INK_SECONDARY}">'
             f'{_esc(label)}</text>'
-            f'<rect x="{label_w}" y="{y}" width="{w}" height="{bar_h}" rx="4" ry="4" '
-            f'fill="{COLOR_ACCENT}"/>'
+            f'{rect}'
             f'<text x="{label_w + w + 6}" y="{y + bar_h - 5}" font-size="9" '
             f'fill="{COLOR_INK_SECONDARY}">{count}</text>'
         )
@@ -410,7 +433,29 @@ def _bar_chart_svg(topic_counts, width=460):
     )
 
 
-def _wrap_html(body_html, risk_icon, risk_color, risk_tint):
+def _animation_trigger_script():
+    """Flips every animate=True donut segment / bar fill from its zero
+    state to its real, already-correct final dasharray/width - see the
+    "animate" branches in _status_donut_svg/_bar_chart_svg above for the
+    values this reads. Vanilla JS, no framework: this HTML is served
+    standalone (embedded via an <iframe>, see DocumentPanel.tsx's
+    "report" view), it isn't part of the Next.js React tree."""
+    return """<script>
+(function () {
+  function draw() {
+    document.querySelectorAll(".donut-seg").forEach(function (el) {
+      el.setAttribute("stroke-dasharray", el.dataset.dash + " " + el.dataset.gap);
+    });
+    document.querySelectorAll(".bar-fill").forEach(function (el) {
+      el.setAttribute("width", el.dataset.finalWidth);
+    });
+  }
+  requestAnimationFrame(function () { requestAnimationFrame(draw); });
+})();
+</script>"""
+
+
+def _wrap_html(body_html, risk_icon, risk_color, risk_tint, animate=False):
     """The shared page shell (CSS + @page rules) for both the normal
     report and the assessment-failed report - factored out so the two
     bodies (render_html's two branches) don't have to duplicate the whole
@@ -520,11 +565,12 @@ def _wrap_html(body_html, risk_icon, risk_color, risk_tint):
 </head>
 <body>
 {body_html}
+{_animation_trigger_script() if animate else ""}
 </body>
 </html>"""
 
 
-def render_html(result, document_names, images=None):
+def render_html(result, document_names, images=None, animate=False):
     assessment = result.get("assessment") or {}
     failed = bool(result.get("assessment_failed"))
     citations = result.get("evidence_citations", [])
@@ -577,14 +623,14 @@ def render_html(result, document_names, images=None):
     <tbody>{citation_rows}</tbody>
   </table>
 """
-        return _wrap_html(body_html, risk_icon, risk_color, risk_tint)
+        return _wrap_html(body_html, risk_icon, risk_color, risk_tint, animate=animate)
 
     issues = assessment.get("issues") or []
     checklist = assessment.get("checklist") or []
     level, basis, counts = _compute_risk(assessment)
     risk_icon, risk_color, risk_tint = RISK_LEVELS[level]
     topic_counts = Counter(i.get("topic") or "Other" for i in issues)
-    chart_svg = _bar_chart_svg(topic_counts)
+    chart_svg = _bar_chart_svg(topic_counts, animate=animate)
 
     # Each tile borrows its color from the same fixed STATUS palette already used
     # by the donut and the checklist chips, so the overview panel reads as one
@@ -632,7 +678,7 @@ def render_html(result, document_names, images=None):
         for item in checklist
     )
 
-    donut_svg = _status_donut_svg(counts)
+    donut_svg = _status_donut_svg(counts, animate=animate)
     donut_section = ""
     if donut_svg:
         legend = "".join(
@@ -762,7 +808,7 @@ def render_html(result, document_names, images=None):
     <tbody>{citation_rows}</tbody>
   </table>
 """
-    return _wrap_html(body_html, risk_icon, risk_color, risk_tint)
+    return _wrap_html(body_html, risk_icon, risk_color, risk_tint, animate=animate)
 
 
 def render_pdf_bytes(html_str):
@@ -832,16 +878,35 @@ def extract_report_images(pdf_paths, max_images=6, min_dim=180):
 # --------------------------------------------------------------------------
 
 def build_reports(result, document_names, pdf_paths=None):
-    """Runs both renderers for a successful review_proposal() result.
-    Returns {"markdown": str, "pdf_bytes": bytes, "pdf_error": str|None}.
+    """Runs all renderers for a successful review_proposal() result.
+    Returns {"markdown": str, "pdf_bytes": bytes, "pdf_error": str|None,
+    "live_html": str|None, "live_html_error": str|None}.
     A PDF failure (e.g. WeasyPrint not installed) never blocks the
-    Markdown report - the caller still gets that back with pdf_error set."""
+    Markdown report - the caller still gets that back with pdf_error set.
+    Same independence for live_html (added 2026-09-21, "animated report
+    visuals"): it's rendered from its own render_html(animate=True) call,
+    wrapped in its own try/except, so neither can take the other down -
+    a WeasyPrint failure doesn't lose the live view and vice versa."""
     markdown = render_markdown(result, document_names)
     images = extract_report_images(pdf_paths) if pdf_paths else []
+
     pdf_bytes, pdf_error = None, None
     try:
-        html_str = render_html(result, document_names, images)
-        pdf_bytes = render_pdf_bytes(html_str)
+        pdf_html_str = render_html(result, document_names, images, animate=False)
+        pdf_bytes = render_pdf_bytes(pdf_html_str)
     except Exception as e:
         pdf_error = f"PDF rendering failed ({e}); the Markdown report is still available."
-    return {"markdown": markdown, "pdf_bytes": pdf_bytes, "pdf_error": pdf_error}
+
+    live_html, live_html_error = None, None
+    try:
+        live_html = render_html(result, document_names, images, animate=True)
+    except Exception as e:
+        live_html_error = f"Live report view rendering failed ({e})."
+
+    return {
+        "markdown": markdown,
+        "pdf_bytes": pdf_bytes,
+        "pdf_error": pdf_error,
+        "live_html": live_html,
+        "live_html_error": live_html_error,
+    }

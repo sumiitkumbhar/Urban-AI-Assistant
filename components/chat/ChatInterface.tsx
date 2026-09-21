@@ -1042,6 +1042,12 @@ export default function ChatInterface() {
   const [documentPanel, setDocumentPanel] = useState<{
     url: string;
     filename: string;
+    // Live animated report view URL (report_files.html_url) - see
+    // DocumentPanel's new "report" view, added alongside the PDF one
+    // 2026-09-21 for "animated report visuals". Optional: only set when
+    // the backend's live-HTML render succeeded (see build_reports'
+    // live_html_error for why it might not have).
+    htmlUrl?: string;
   } | null>(null);
 
   // Proposal compliance review (local-rag/service.py's /proposal-review +
@@ -1385,6 +1391,7 @@ export default function ChatInterface() {
         setDocumentPanel({
           url: reportFiles.pdf_url,
           filename: reportFiles.pdf_filename || file.name,
+          htmlUrl: reportFiles.html_url,
         });
       }
 
@@ -2433,6 +2440,7 @@ export default function ChatInterface() {
         <DocumentPanel
           url={documentPanel.url}
           filename={documentPanel.filename}
+          htmlUrl={documentPanel.htmlUrl}
           onClose={() => setDocumentPanel(null)}
         />
       )}

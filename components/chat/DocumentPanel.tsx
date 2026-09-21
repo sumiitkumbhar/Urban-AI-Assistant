@@ -97,6 +97,18 @@ export interface DocumentPanelProps {
   url: string;
   /** Display name, e.g. "westminster-2026-09-19.pdf". */
   filename: string;
+  /**
+   * Absolute URL of the live animated HTML report view (report_render.py's
+   * render_html(..., animate=True), see build_reports()/service.py's
+   * report_files.html_url) - the SAME report as `url`'s PDF, just a
+   * second, animatable rendering. Optional: only set when the backend's
+   * live-HTML render succeeded. When present, a "Report view" toggle
+   * appears next to "PDF"; `url`/download always stays the PDF either
+   * way - the animated view isn't a replacement for the downloadable
+   * document, just an additional way to look at it. Added 2026-09-21,
+   * "animated report visuals" (donut/checklist bars drawing in on load).
+   */
+  htmlUrl?: string;
   onClose: () => void;
 }
 
@@ -111,7 +123,7 @@ function humanizeTitle(filename: string): string {
     .join(" ");
 }
 
-export default function DocumentPanel({ url, filename, onClose }: DocumentPanelProps) {
+export default function DocumentPanel({ url, filename, htmlUrl, onClose }: DocumentPanelProps) {
   const [mounted, setMounted] = useState(false);
   const [numPages, setNumPages] = useState<number | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
@@ -119,6 +131,10 @@ export default function DocumentPanel({ url, filename, onClose }: DocumentPanelP
   const [isExpanded, setIsExpanded] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Which rendering of the report is showing - "pdf" (react-pdf, the
+  // existing default/download target) or "report" (the live animated
+  // HTML view, in an iframe). Only relevant/shown when htmlUrl exists.
+  const [view, setView] = useState<"pdf" | "report">("pdf");
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const measureRef = useRef<HTMLDivElement>(null);
@@ -212,13 +228,41 @@ export default function DocumentPanel({ url, filename, onClose }: DocumentPanelP
               {humanizeTitle(filename)}
             </p>
             <p className="text-[11px] text-neutral-500">
-              {filename.split(".").pop()?.toUpperCase() || "FILE"}
-              {numPages ? ` · ${numPages} page${numPages === 1 ? "" : "s"}` : ""}
+              {view === "report" ? "HTML" : filename.split(".").pop()?.toUpperCase() || "FILE"}
+              {view === "pdf" && numPages ? ` · ${numPages} page${numPages === 1 ? "" : "s"}` : ""}
             </p>
           </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-1.5">
+          {htmlUrl && (
+            <div className="mr-1 flex items-center gap-0.5 rounded-full border border-neutral-950/10 bg-neutral-950/5 p-0.5">
+              <button
+                type="button"
+                onClick={() => setView("pdf")}
+                className={
+                  "rounded-full px-2.5 py-1 text-[11px] font-medium transition " +
+                  (view === "pdf"
+                    ? "bg-white text-neutral-900 shadow-sm"
+                    : "text-neutral-500 hover:text-neutral-800")
+                }
+              >
+                PDF
+              </button>
+              <button
+                type="button"
+                onClick={() => setView("report")}
+                className={
+                  "rounded-full px-2.5 py-1 text-[11px] font-medium transition " +
+                  (view === "report"
+                    ? "bg-white text-neutral-900 shadow-sm"
+                    : "text-neutral-500 hover:text-neutral-800")
+                }
+              >
+                Report view
+              </button>
+            </div>
+          )}
           <button
             type="button"
             onClick={handleDownload}
@@ -249,6 +293,13 @@ export default function DocumentPanel({ url, filename, onClose }: DocumentPanelP
 
       {/* Body */}
       <div ref={measureRef} className="relative flex-1 overflow-hidden bg-neutral-100">
+        {view === "report" && htmlUrl ? (
+          <iframe
+            src={htmlUrl}
+            title={`${humanizeTitle(filename)} - animated report view`}
+            className="h-full w-full border-0 bg-white"
+          />
+        ) : (
         <div ref={scrollRef} className="h-full overflow-y-auto px-6 py-6">
           {!mounted ? (
             <div className="flex h-40 items-center justify-center text-xs text-neutral-500">
@@ -300,10 +351,13 @@ export default function DocumentPanel({ url, filename, onClose }: DocumentPanelP
             </Document>
           )}
         </div>
+        )}
 
         {/* Page indicator + prev/next, floating bottom-right like the
-            reference layout - only shown once we actually know the page count. */}
-        {numPages ? (
+            reference layout - only shown once we actually know the page count,
+            and only in the PDF view (meaningless for the single-scroll
+            animated report view). */}
+        {view === "pdf" && numPages ? (
           <div className="pointer-events-none absolute bottom-4 right-4 flex items-center gap-1 rounded-full border border-neutral-950/10 bg-white/95 px-1 py-1 text-xs text-neutral-700 shadow-md backdrop-blur">
             <button
               type="button"
