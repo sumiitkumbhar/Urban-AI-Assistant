@@ -1995,8 +1995,16 @@ export default function ChatInterface() {
               the document) - that surfaces as the normal backend error
               message asking the user to enter a postcode manually,
               same as before this change. */}
+          <AnimatePresence>
           {pendingUploadFile && (
-            <div className="mt-3 space-y-2 rounded-2xl border border-neutral-950/10 bg-neutral-950/5 px-3 py-3">
+            <motion.div
+              key="pending-upload-choice-card"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.18, ease: "easeOut" }}
+              className="mt-3 space-y-2 rounded-2xl border border-neutral-950/10 bg-neutral-950/5 px-3 py-3"
+            >
               <p className="truncate text-xs text-neutral-700">
                 <span className="text-neutral-800">{pendingUploadFile.name}</span>
                 {" — what would you like to do with it?"}
@@ -2031,7 +2039,7 @@ export default function ChatInterface() {
                   }
                   className="rounded-xl border border-neutral-950/20 bg-neutral-950 px-3 py-1.5 text-xs text-white transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  {isReviewing ? "Running compliance review…" : "Run compliance review"}
+                  {isReviewing ? <ReviewingLabel /> : "Run compliance review"}
                 </button>
                 <button
                   type="button"
@@ -2045,16 +2053,25 @@ export default function ChatInterface() {
                   Cancel
                 </button>
               </div>
-            </div>
+            </motion.div>
           )}
+          </AnimatePresence>
 
           {/* Persistent indicator once a review exists for this
               conversation - handleSend routes every message through
               /proposal-review-chat while this is set (see that branch
               above). Exiting just stops that routing; it doesn't close
               the report panel or delete anything. */}
+          <AnimatePresence>
           {activeReview && (
-            <div className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-neutral-950/10 bg-neutral-950/5 px-3 py-2">
+            <motion.div
+              key="active-review-banner"
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.18, ease: "easeOut" }}
+              className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-neutral-950/10 bg-neutral-950/5 px-3 py-2"
+            >
               <p className="truncate text-xs text-neutral-700">
                 Discussing the compliance review for{" "}
                 <span className="text-neutral-800">{activeReview.label}</span>
@@ -2066,8 +2083,9 @@ export default function ChatInterface() {
               >
                 Exit review chat
               </button>
-            </div>
+            </motion.div>
           )}
+          </AnimatePresence>
 
           {FEATURES.drawingAnalysis && chatMode === "feasibility" && (
             <div className="mt-3 space-y-2">
@@ -2811,16 +2829,77 @@ const THINKING_STAGES = [
 // the same technique Claude/ChatGPT-style "thinking" indicators use instead
 // of bouncing dots or progress bars - it reads as "working" without
 // implying a measurable, and often wrong, percentage of completion.
-function ShimmerText({ children }: { children: React.ReactNode }) {
+function ShimmerText({
+  children,
+  tone = "dark",
+}: {
+  children: React.ReactNode;
+  // "dark" is the original variant, for muted-dark text on a light
+  // background (thinking indicator). "light" inverts it for white text on
+  // a dark background (the compliance-review button, see ReviewingLabel).
+  tone?: "dark" | "light";
+}) {
+  const backgroundImage =
+    tone === "light"
+      ? "linear-gradient(90deg, rgba(255,255,255,0.45) 0%, rgba(255,255,255,0.45) 38%, rgba(255,255,255,1) 50%, rgba(255,255,255,0.45) 62%, rgba(255,255,255,0.45) 100%)"
+      : "linear-gradient(90deg, rgba(10,10,10,0.32) 0%, rgba(10,10,10,0.32) 38%, rgba(10,10,10,0.92) 50%, rgba(10,10,10,0.32) 62%, rgba(10,10,10,0.32) 100%)";
   return (
     <span
       className="animate-shimmer bg-clip-text text-transparent [background-size:200%_100%]"
-      style={{
-        backgroundImage:
-          "linear-gradient(90deg, rgba(10,10,10,0.32) 0%, rgba(10,10,10,0.32) 38%, rgba(10,10,10,0.92) 50%, rgba(10,10,10,0.32) 62%, rgba(10,10,10,0.32) 100%)",
-      }}
+      style={{ backgroundImage }}
     >
       {children}
+    </span>
+  );
+}
+
+// Mirrors the real proposal-review pipeline (_resolve_site's postcode/
+// name-geocode detection -> GIS constraint lookup -> per-topic retrieval
+// & AI rerank -> assessment synthesis - see review_proposal() in
+// local-rag/proposal_review.py), same honesty rule as THINKING_STAGES:
+// this cycles on a timer, not real progress events, since the review
+// route isn't streaming stage updates yet.
+const REVIEW_STAGES = [
+  "Reading document & detecting the site…",
+  "Checking GIS constraints…",
+  "Retrieving & ranking planning policy…",
+  "Drafting the compliance assessment…",
+];
+
+// Compact counterpart to ThinkingIndicator, sized to sit inside a button
+// rather than a full message row - a small rotating ring plus the same
+// cycling-shimmer-text technique, using ShimmerText's "light" tone since
+// this renders on the dark "Run compliance review" button background.
+function ReviewingLabel() {
+  const [stageIndex, setStageIndex] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      setStageIndex((i) => Math.min(i + 1, REVIEW_STAGES.length - 1));
+    }, 1800);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <motion.span
+        className="h-3 w-3 shrink-0 rounded-full border-2 border-white/30 border-t-white"
+        animate={{ rotate: 360 }}
+        transition={{ repeat: Infinity, duration: 0.8, ease: "linear" }}
+        aria-hidden="true"
+      />
+      <AnimatePresence mode="wait">
+        <motion.span
+          key={stageIndex}
+          initial={{ opacity: 0, y: 3 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -3 }}
+          transition={{ duration: 0.25 }}
+          className="inline-block"
+        >
+          <ShimmerText tone="light">{REVIEW_STAGES[stageIndex]}</ShimmerText>
+        </motion.span>
+      </AnimatePresence>
     </span>
   );
 }
