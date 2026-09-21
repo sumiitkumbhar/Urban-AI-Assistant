@@ -12,6 +12,10 @@ import path from "path";
 import { getSupabase } from "@/lib/supabase";
 import { generateEmbedding } from "@/lib/embeddings";
 import {
+  getCompleteCitationText,
+  type ChunkRow as CitationChunkRow,
+} from "@/lib/citationCompletion";
+import {
   type CacheKey,
   normalizeForCache,
   getMemoryCachedAnswer,
@@ -510,44 +514,150 @@ function stitchAdjacentChunks(
   return assembled.slice(0, maxChars).trim();
 }
 
-function transformChunksForFrontend(
-  chunks: EnhancedChunk[]
-): TransformedCitation[] {
-  return chunks.map((chunk, index) => {
-    const stitchedFullText = stitchAdjacentChunks(chunks, index);
-    const cleanedFullText = sanitizeEvidenceText(
-      stitchedFullText || chunk.content
-    );
+// Fetches the real (document_id, chunk_index) for a batch of chunk rows
+// in one round trip - the search RPCs (match_rag_chunks /
+// match_rag_chunks_fulltext) don't return those columns (see
+// lib/citationCompletion.ts's header comment), so this is a second,
+// small lookup by primary key against the same `chunks` table
+// lib/chromaIngest.ts writes chunk_index into at ingestion time. Never
+// throws - a lookup failure just means those chunks fall back to
+// stitchAdjacentChunks()'s older, retrieved-pool-only behavior below.
+async function fetchChunkOrdinals(
+  ids: number[]
+): Promise<Map<number, { document_id: number; chunk_index: number }>> {
+  const map = new Map<number, { document_id: number; chunk_index: number }>();
+  if (ids.length === 0) return map;
+  try {
+    const { data, error } = await getSupabase()
+      .from("chunks")
+      .select("id, document_id, chunk_index")
+      .in("id", ids);
+    if (error || !Array.isArray(data)) return map;
+    for (const row of data) {
+      if (row?.id != null && row.document_id != null && row.chunk_index != null) {
+        map.set(row.id, { document_id: row.document_id, chunk_index: row.chunk_index });
+      }
+    }
+  } catch {
+    // Fail open - callers treat a missing entry as "can't expand this one".
+  }
+  return map;
+}
 
-    return {
-      id: `D${index + 1}`,
-      title: chunk.doc_title,
-      type: mapDocKindToCitationKind(chunk.doc_kind),
-      sourceType: "document",
-      pageNumber: chunk.page_from ?? undefined,
-      clauseNumber:
-        chunk.citation_value && String(chunk.citation_value).trim()
-          ? String(chunk.citation_value).trim()
+// Returns every `chunks` row for one document within [fromIndex, toIndex]
+// - the fetchRange callback getCompleteCitationText() needs to walk real
+// neighboring chunks. A single ranged select, not an RPC, since this is
+// a plain indexed lookup on columns already used elsewhere in this file
+// (document_id, chunk_index - see fetchChunkOrdinals above).
+async function fetchChunkRange(
+  documentId: number,
+  fromIndex: number,
+  toIndex: number
+): Promise<CitationChunkRow[]> {
+  if (toIndex < 0 || toIndex < fromIndex) return [];
+  try {
+    const { data, error } = await getSupabase()
+      .from("chunks")
+      .select("chunk_index, content, page")
+      .eq("document_id", documentId)
+      .gte("chunk_index", Math.max(0, fromIndex))
+      .lte("chunk_index", toIndex);
+    if (error || !Array.isArray(data)) return [];
+    return data as CitationChunkRow[];
+  } catch {
+    return [];
+  }
+}
+
+async function transformChunksForFrontend(
+  chunks: EnhancedChunk[]
+): Promise<TransformedCitation[]> {
+  const ordinals = await fetchChunkOrdinals(chunks.map((c) => c.id));
+
+  return Promise.all(
+    chunks.map(async (chunk, index) => {
+      const ordinal = ordinals.get(chunk.id);
+
+      let cleanedFullText: string;
+      let completeBefore: boolean | undefined;
+      let completeAfter: boolean | undefined;
+      let expandedBefore = false;
+      let expandedAfter = false;
+      let pageFrom = chunk.page_from;
+      let pageTo = chunk.page_to;
+
+      if (ordinal) {
+        // The real fix: expand to the document's actual neighboring
+        // chunks and trim to genuine sentence boundaries, exactly like
+        // local-rag's get_complete_citation_text() does for Local mode.
+        const sanitizedContent = sanitizeEvidenceText(chunk.content);
+        const result = await getCompleteCitationText(
+          ordinal.document_id,
+          ordinal.chunk_index,
+          sanitizedContent,
+          chunk.page_from != null ? String(chunk.page_from) : null,
+          fetchChunkRange
+        );
+        cleanedFullText = sanitizeEvidenceText(result.text);
+        completeBefore = result.completeBefore;
+        completeAfter = result.completeAfter;
+        expandedBefore = result.expandedBefore;
+        expandedAfter = result.expandedAfter;
+        const parsedStart = result.pageStart != null ? Number(result.pageStart) : NaN;
+        const parsedEnd = result.pageEnd != null ? Number(result.pageEnd) : NaN;
+        if (!Number.isNaN(parsedStart)) pageFrom = parsedStart;
+        if (!Number.isNaN(parsedEnd)) pageTo = parsedEnd;
+      } else {
+        // No document_id/chunk_index for this chunk (lookup failed, or
+        // it isn't a `chunks`-table row at all) - fall back to the
+        // older, retrieved-pool-only stitching rather than losing text
+        // completion entirely.
+        const stitchedFullText = stitchAdjacentChunks(chunks, index);
+        cleanedFullText = sanitizeEvidenceText(stitchedFullText || chunk.content);
+      }
+
+      return {
+        id: `D${index + 1}`,
+        title: chunk.doc_title,
+        type: mapDocKindToCitationKind(chunk.doc_kind),
+        sourceType: "document",
+        pageNumber: pageFrom ?? undefined,
+        clauseNumber:
+          chunk.citation_value && String(chunk.citation_value).trim()
+            ? String(chunk.citation_value).trim()
+            : undefined,
+        section: chunk.section_heading ?? chunk.section_hierarchy ?? undefined,
+        fullText: cleanedFullText,
+        excerpt: buildExcerpt(cleanedFullText, 220),
+        confidence: Math.round(
+          Math.max(0, Math.min(100, (1 - chunk.distance) * 100))
+        ),
+        lastUpdated: chunk.indexed_at,
+        directLink: chunk.doc_path?.startsWith("http")
+          ? chunk.doc_path
           : undefined,
-      section: chunk.section_heading ?? chunk.section_hierarchy ?? undefined,
-      fullText: cleanedFullText,
-      excerpt: buildExcerpt(cleanedFullText, 220),
-      confidence: Math.round(
-        Math.max(0, Math.min(100, (1 - chunk.distance) * 100))
-      ),
-      lastUpdated: chunk.indexed_at,
-      directLink: chunk.doc_path?.startsWith("http")
-        ? chunk.doc_path
-        : undefined,
-      sourceLabel: buildDocSourceLabel(chunk, index),
-      _raw: {
-        ...chunk,
-        originalContent: chunk.content,
-        backendSanitized: true,
-        stillLooksIncomplete: looksIncompleteEvidence(cleanedFullText),
-      },
-    };
-  });
+        sourceLabel: buildDocSourceLabel(chunk, index),
+        _raw: {
+          ...chunk,
+          page_from: pageFrom,
+          page_to: pageTo,
+          originalContent: chunk.content,
+          backendSanitized: true,
+          // Field names match exactly what ExpandableCitation.tsx reads
+          // (citation._raw?.complete_before / complete_after) - when
+          // these are undefined (the ordinal lookup failed), the
+          // frontend's hasBackendCompleteness check is false and it
+          // falls back to its own looksTruncated() heuristic, same as
+          // it always did before this fix.
+          complete_before: completeBefore,
+          complete_after: completeAfter,
+          expanded_before: expandedBefore,
+          expanded_after: expandedAfter,
+          stillLooksIncomplete: looksIncompleteEvidence(cleanedFullText),
+        },
+      };
+    })
+  );
 }
 
 function dedupeCitations(
@@ -3890,7 +4000,7 @@ export async function POST(req: Request) {
       );
 
       const thresholdCitations = dedupeCitations(
-        transformChunksForFrontend(finalThresholdChunks)
+        await transformChunksForFrontend(finalThresholdChunks)
       ).slice(0, 4);
 
       const primaryCitation =
@@ -3983,7 +4093,7 @@ Additional firefighting shaft provisions apply to certain basement conditions an
 
       if (uniqueDistances.length > 0) {
         const tableCitations = dedupeCitations(
-          transformChunksForFrontend(relevantTableChunks)
+          await transformChunksForFrontend(relevantTableChunks)
         ).slice(0, 5);
 
         let answer = `### Direct Answer
@@ -4030,7 +4140,7 @@ These values were extracted directly from fragmented table-related chunks. They 
     }
 
     console.log("⏱️ STEP 4: building citations");
-    let documentCitations = dedupeCitations(transformChunksForFrontend(chunks));
+    let documentCitations = dedupeCitations(await transformChunksForFrontend(chunks));
     console.log(
       "⏱️ STEP 4 DONE: document citations =",
       documentCitations.length
