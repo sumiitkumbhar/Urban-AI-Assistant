@@ -66,6 +66,10 @@ interface LocalRagCitation {
   domain: string;
   geography?: string;
   rerank_score: number;
+  // Raw retrieved chunk text, added server-side in local-rag/answer.py's
+  // build_context() - see that file's comment on the citations.append()
+  // call for why this was missing before.
+  text?: string;
 }
 
 // Shape of an entry in the upstream response's `map_citations` array -
@@ -80,6 +84,18 @@ interface LocalRagMapCitation {
   image_url?: string | null;
 }
 
+// A short preview for the citation card before it's expanded. The full
+// cleanup (stripping [TOPIC]/[SECTION] chunk markers, repairing smashed
+// words, etc.) already happens client-side in ExpandableCitation.tsx for
+// every citation regardless of source, so this only needs to produce a
+// reasonable plain-text slice, not duplicate that whole pipeline here.
+function buildLocalExcerpt(text: string | undefined, max = 220): string | undefined {
+  if (!text) return undefined;
+  const cleaned = text.replace(/\s{2,}/g, " ").trim();
+  if (!cleaned) return undefined;
+  return cleaned.length > max ? `${cleaned.slice(0, max).trim()}...` : cleaned;
+}
+
 function transformCitations(citations: LocalRagCitation[] | undefined) {
   return (citations || []).map((c) => ({
     id: `D${c.id}`,
@@ -89,8 +105,8 @@ function transformCitations(citations: LocalRagCitation[] | undefined) {
     pageNumber: c.page,
     clauseNumber: undefined,
     section: c.domain,
-    fullText: undefined,
-    excerpt: undefined,
+    fullText: c.text || undefined,
+    excerpt: buildLocalExcerpt(c.text),
     // rerank_score isn't a 0-1 probability, but it's the only per-citation
     // strength signal local-rag returns - scaled into the same 0-100
     // display range the cloud path's per-citation confidence uses.

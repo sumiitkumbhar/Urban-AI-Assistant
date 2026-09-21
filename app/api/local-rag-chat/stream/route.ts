@@ -63,6 +63,9 @@ interface LocalRagCitation {
   domain: string;
   geography?: string;
   rerank_score: number;
+  // See ../route.ts's identical field - raw chunk text, added server-side
+  // in local-rag/answer.py's build_context().
+  text?: string;
 }
 
 interface LocalRagMapCitation {
@@ -74,6 +77,16 @@ interface LocalRagMapCitation {
   image_url?: string | null;
 }
 
+// Mirrors ../route.ts's buildLocalExcerpt() exactly - see that file's
+// comment for why this doesn't need to duplicate the full client-side
+// cleanup pipeline.
+function buildLocalExcerpt(text: string | undefined, max = 220): string | undefined {
+  if (!text) return undefined;
+  const cleaned = text.replace(/\s{2,}/g, " ").trim();
+  if (!cleaned) return undefined;
+  return cleaned.length > max ? `${cleaned.slice(0, max).trim()}...` : cleaned;
+}
+
 function transformCitations(citations: LocalRagCitation[] | undefined) {
   return (citations || []).map((c) => ({
     id: `D${c.id}`,
@@ -83,8 +96,8 @@ function transformCitations(citations: LocalRagCitation[] | undefined) {
     pageNumber: c.page,
     clauseNumber: undefined,
     section: c.domain,
-    fullText: undefined,
-    excerpt: undefined,
+    fullText: c.text || undefined,
+    excerpt: buildLocalExcerpt(c.text),
     confidence: Math.round(Math.max(0, Math.min(1, c.rerank_score ?? 0)) * 100),
     lastUpdated: undefined,
     directLink: undefined,

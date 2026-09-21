@@ -63,6 +63,14 @@ def build_context(chunks):
             "domain": c["domain"],
             "geography": c["geography"],
             "rerank_score": round(c.get("rerank_score", 0.0), 4),
+            # The raw retrieved chunk text - already sitting right here as
+            # c["text"] (it's what the evidence block above is built from),
+            # just never threaded into the citation dict before. Without
+            # this, the frontend's "RAW EXTRACT" panel has nothing to show
+            # for a local-mode citation - see app/api/local-rag-chat/
+            # route.ts's transformCitations(), which used to hardcode
+            # fullText/excerpt to undefined for exactly this reason.
+            "text": c["text"],
         })
     return "\n\n---\n\n".join(blocks), citations
 
