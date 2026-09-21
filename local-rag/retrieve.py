@@ -15,6 +15,7 @@ exactly as before.
 """
 
 import functools
+import logging
 import pickle
 import re
 from collections import Counter
@@ -30,6 +31,8 @@ from common import (
     GRAPH_MAX_RELATED, GRAPH_EXPANSION_BOOST, CHUNK_OVERLAP_CHARS,
 )
 from graph_build import load_graph
+
+logger = logging.getLogger("local-rag")
 
 RRF_K = 60  # standard constant for reciprocal rank fusion
 
@@ -218,29 +221,126 @@ def _ends_cleanly(text):
     return bool(re.search(r'[.!?"’”)\]]$', last_line))
 
 
+# --- Sentence-span detection: SaT model when available, regex fallback ---
+#
+# _trim_to_sentence_start()/_trim_to_sentence_end() below need to find
+# real sentence boundaries inside an already-expanded passage, not just
+# decide whether the target chunk's own edge looks clean (that's still
+# _starts_cleanly()/_ends_cleanly() above - a separate, cheaper check).
+# A plain terminal-punctuation regex misreads plenty of real UK planning
+# text: "Section 12.3(a)" and "Policy DM1." both contain periods that
+# aren't sentence ends, and OCR/PDF-extracted text drops punctuation
+# entirely often enough to matter. wtpsplit's SaT models segment text
+# with a small transformer instead of punctuation rules and are
+# noticeably more robust on exactly this kind of messy source text -
+# see https://github.com/segment-any-text/wtpsplit. It's an optional
+# dependency (pip install wtpsplit): _load_sentence_segmenter() returns
+# None if it isn't installed or fails to load, and _sentence_spans()
+# falls back to the regex splitter in that case, so nothing here
+# breaks if the package is absent - this is a purely additive upgrade.
+
+@functools.lru_cache(maxsize=1)
+def _load_sentence_segmenter():
+    """Lazily loads wtpsplit's SaT sentence-boundary model, once per
+    process, mirroring _load_embedder()/_load_reranker() below. Returns
+    None (cached, so this is only attempted once) if the optional
+    wtpsplit package isn't installed, or if the model fails to load for
+    any reason - callers must treat None as "use the regex fallback",
+    never raise on it."""
+    try:
+        from wtpsplit import SaT
+    except ImportError:
+        return None
+    try:
+        # sat-3l-sm: the small 3-layer SaT checkpoint - accurate enough
+        # for this job and light enough to run on CPU per-request
+        # without a noticeable latency hit, same "small model, CPU,
+        # negligible per-query cost" reasoning as _load_embedder()'s
+        # device="cpu" choice below.
+        return SaT("sat-3l-sm")
+    except Exception:
+        logger.warning(
+            "wtpsplit is installed but its SaT model failed to load - "
+            "falling back to the regex sentence splitter for citation "
+            "boundary trimming.", exc_info=True,
+        )
+        return None
+
+
+def _regex_sentence_spans(text):
+    """Splits `text` into (start, end) character spans using the plain
+    terminal-punctuation regex - the fallback used when wtpsplit isn't
+    installed or its model didn't load. Covers the whole string with no
+    gaps, same contract _sentence_spans() promises its callers."""
+    spans = []
+    start = 0
+    for m in _SENTENCE_BOUNDARY_RE.finditer(text):
+        spans.append((start, m.end()))
+        start = m.end()
+    if start < len(text):
+        spans.append((start, len(text)))
+    return spans
+
+
+def _sentence_spans(text):
+    """Returns a list of (start, end) character offsets, one per
+    detected sentence, covering the whole of `text` with no gaps. Uses
+    the SaT model via _load_sentence_segmenter() when available for
+    real sentence-boundary detection on messy source text; falls back
+    to _regex_sentence_spans() otherwise (or if segmentation itself
+    raises - a segmenter hiccup on one citation shouldn't break the
+    citation, just make it fall back to the coarser splitter)."""
+    if not text:
+        return []
+    segmenter = _load_sentence_segmenter()
+    if segmenter is not None:
+        try:
+            sentences = [s for s in segmenter.split(text) if s.strip()]
+            spans = []
+            pos = 0
+            for s in sentences:
+                idx = text.index(s.strip(), pos)
+                spans.append((idx, idx + len(s.strip())))
+                pos = idx + len(s.strip())
+            if spans:
+                return spans
+        except Exception:
+            logger.warning(
+                "SaT sentence segmentation failed on a citation passage - "
+                "falling back to the regex splitter for this call.",
+                exc_info=True,
+            )
+    return _regex_sentence_spans(text)
+
+
 def _trim_to_sentence_start(text):
     """Drops any leading sentence fragment, keeping only whole sentences
-    from the first sentence boundary onward. Returns (trimmed_text,
-    found_boundary) - found_boundary is False if there was nothing to
-    trim to, meaning the caller should not claim completeness."""
+    from the second detected sentence span onward (the first span is
+    treated as the fragment, since _starts_cleanly() already ruled out
+    the case where it's a genuine whole sentence). Returns
+    (trimmed_text, found_boundary) - found_boundary is False if there
+    was only one sentence span to find (no real boundary to trim to),
+    meaning the caller should not claim completeness."""
     if _starts_cleanly(text):
         return text, True
-    match = _SENTENCE_BOUNDARY_RE.search(text)
-    if not match:
+    spans = _sentence_spans(text)
+    if len(spans) < 2:
         return text, False
-    return text[match.end():], True
+    return text[spans[1][0]:], True
 
 
 def _trim_to_sentence_end(text):
     """Drops any trailing sentence fragment, keeping only whole sentences
-    up to the last sentence boundary. Returns (trimmed_text,
-    found_boundary) with the same honesty contract as above."""
+    up to the second-to-last detected sentence span (the last span is
+    treated as the fragment, mirroring _trim_to_sentence_start() above).
+    Returns (trimmed_text, found_boundary) with the same honesty
+    contract."""
     if _ends_cleanly(text):
         return text, True
-    matches = list(_SENTENCE_BOUNDARY_RE.finditer(text))
-    if not matches:
+    spans = _sentence_spans(text)
+    if len(spans) < 2:
         return text, False
-    return text[:matches[-1].end()].rstrip(), True
+    return text[:spans[-2][1]].rstrip(), True
 
 
 def get_complete_citation_text(
