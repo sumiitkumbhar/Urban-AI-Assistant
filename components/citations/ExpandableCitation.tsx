@@ -120,6 +120,17 @@ function repairSmashedWords(text: string) {
     .replace(/B\s*Volume/gi, "Volume")
     .replace(/Building\s*dR?I?B?u/gi, "")
     .replace(/\b([A-Za-z])\s(?=[A-Za-z]\s){2,}/g, (m) => m.replace(/\s/g, ""))
+    // A single stray space splitting an otherwise-ordinary word right
+    // before a common suffix - "develop ment", "require ment" - a PDF
+    // glyph-spacing artifact from these government-PDF extractions, the
+    // same underlying class of bug as the letter-by-letter case just
+    // above, just one space instead of many. Suffix list is deliberately
+    // closed to fragments that are never real standalone English words,
+    // to avoid wrongly joining two genuine adjacent words.
+    .replace(
+      /\b([a-z]{3,})\s(ment|tion|sion|ance|ence|ness|ology|ical|ible|able|ised|ized)\b/g,
+      "$1$2"
+    )
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .replace(/([A-Za-z])(\d)/g, "$1 $2")
     .replace(/(\d)([A-Za-z])/g, "$1 $2")
@@ -573,6 +584,17 @@ function looksTruncated(text: string) {
   return false;
 }
 
+function looksLikeMidSentenceStart(text: string) {
+  if (!text) return false;
+  const t = text.trim();
+  if (!t) return false;
+  // A real sentence start is capitalized (or a digit/bullet, handled
+  // elsewhere) - a lowercase first letter means this chunk's text window
+  // begins partway through a sentence carried over from the previous
+  // chunk, same underlying cause as looksTruncated() at the tail end.
+  return /^[a-z]/.test(t);
+}
+
 function looksDirtyForStructuredView(text: string) {
   if (!text) return false;
 
@@ -615,8 +637,8 @@ export default function ExpandableCitation({
   );
 
   const rawParagraphs = useMemo(
-    () => splitReadableParagraphs(rawDisplayText),
-    [rawDisplayText]
+    () => splitReadableParagraphs(cleanedFullText),
+    [cleanedFullText]
   );
 
   const cleanedParagraphs = useMemo(
@@ -633,6 +655,25 @@ export default function ExpandableCitation({
     () => looksTruncated(rawDisplayText),
     [rawDisplayText]
   );
+
+  // Chunks are fixed-size retrieval windows, not paragraph-aligned, so
+  // the first/last line of a chunk's text routinely lands mid-sentence -
+  // that's expected (see "Source text appears truncated upstream" above),
+  // but a bare lowercase-starting fragment with no visual cue reads as
+  // broken rather than as "this is a fragment of a larger passage". An
+  // ellipsis marks the cut honestly without inventing any missing text.
+  const rawParagraphsForDisplay = useMemo(() => {
+    if (rawParagraphs.length === 0) return rawParagraphs;
+    const out = [...rawParagraphs];
+    if (looksLikeMidSentenceStart(out[0])) {
+      out[0] = `… ${out[0]}`;
+    }
+    const lastIdx = out.length - 1;
+    if (rawLikelyTruncated && !/[….!?]\s*$/.test(out[lastIdx])) {
+      out[lastIdx] = `${out[lastIdx]} …`;
+    }
+    return out;
+  }, [rawParagraphs, rawLikelyTruncated]);
 
   const shouldUseRawFallback = useMemo(
     () =>
@@ -873,7 +914,7 @@ citation.directLink.startsWith("http") ? (
                   </div>
 
                   <div className="space-y-2 text-[12px] leading-7">
-                    {rawParagraphs.slice(0, 40).map((line, i) =>
+                    {rawParagraphsForDisplay.slice(0, 40).map((line, i) =>
                       renderEvidenceLine(line, `${citation.id}-raw-${i}`, highlightTerms)
                     )}
                   </div>
