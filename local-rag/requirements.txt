@@ -16,3 +16,4 @@ pillow>=10,<12  # map_images.py - trims blank margins; also used by report_rende
 python-multipart>=0.0.9,<0.1  # proposal_review.py / service.py - multipart file uploads for /proposal-review
 weasyprint>=61,<65  # report_render.py - renders the compliance-review report (HTML/CSS + infographics) to PDF
 wtpsplit>=2,<3  # retrieve.py - SaT sentence-boundary model for citation-boundary trimming (get_complete_citation_text()); optional in code (falls back to a regex splitter if missing) but installed by default here since it materially improves citation correctness on messy PDF-extracted planning text
+transformers>=4.40,<5  # hallucination_check.py - Vectara HHEM-2.1-Open independent groundedness cross-check; was already a transitive dependency of sentence-transformers/wtpsplit, pinned directly here now that answer.py imports it by name

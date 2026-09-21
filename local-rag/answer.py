@@ -13,6 +13,7 @@ import re
 
 from groq import Groq
 
+import hallucination_check
 from common import load_dotenv_from_repo, DEFAULT_GROQ_MODEL
 from retrieve import get_complete_citation_text
 
@@ -197,17 +198,27 @@ def _extract_first_json_object(text):
     return None
 
 
-GROUNDEDNESS_JUDGE_PROMPT = """You are a strict fact-checking judge. You do NOT answer questions - you only grade whether an already-written ANSWER is actually backed by the given SOURCE EXCERPTS.
+# Decompose-then-verify, not a single holistic 0-100 guess: asking an
+# LLM to eyeball one number for an entire answer is exactly the kind of
+# judgment LLMs are least consistent at. Splitting the answer into atomic
+# claims first and verifying each independently - then scoring
+# supported/total - is what Ragas's actual faithfulness metric does; the
+# old single-score prompt only approximated that name, not the method.
+# Kept field-for-field identical to the cloud path's mirrored prompt in
+# app/api/rag-chat/route.ts's checkGroundedness() on purpose - see
+# _check_groundedness()'s docstring below for why that parity matters.
+GROUNDEDNESS_JUDGE_PROMPT = """You are a strict fact-checking judge. You do NOT answer questions - you grade whether an already-written ANSWER is backed by the given SOURCE EXCERPTS, one claim at a time.
 
-Score groundedness 0-100:
-- 100 = every substantive claim in the ANSWER is directly supported by the SOURCE EXCERPTS.
-- 50 = some claims are supported, others are not backed by the excerpts (invented, assumed, or from general knowledge instead of the excerpts).
-- 0 = the ANSWER is unsupported by, or contradicts, the SOURCE EXCERPTS.
+Step 1: Break the ANSWER into individual atomic factual claims - one discrete assertion per claim. A sentence asserting two facts (e.g. a date and a location) becomes two separate claims. Ignore claims that are pure hedging, formatting, or "I don't know" - grade only assertions of fact.
 
-Do not reward good writing, confident tone, or plausibility. Only reward factual grounding in the given excerpts. List any specific claims in the ANSWER that are NOT backed by the excerpts (empty array if none).
+Step 2: For each claim, judge independently whether it is directly supported by the SOURCE EXCERPTS - stated there, or something the excerpts directly imply. A claim is NOT supported if it is merely plausible, general knowledge, or something the excerpts leave unstated.
+
+Do not let the ANSWER's writing quality, tone, or confidence affect your judgment on any claim - grade only factual grounding, claim by claim.
 
 Respond with JSON only, no other text, no markdown fencing:
-{"groundedness": <integer 0-100>, "unsupportedClaims": ["short claim", "..."]}"""
+{"claims": [{"claim": "<short paraphrase, under 15 words>", "supported": <true|false>}, ...]}
+
+If the ANSWER makes no factual claims (e.g. it's a clarifying question, a refusal, or "the documents don't cover this"), return {"claims": []}."""
 
 
 def _check_groundedness(query, answer_text, context, client, model):
@@ -247,7 +258,9 @@ def _check_groundedness(query, answer_text, context, client, model):
                 },
             ],
             temperature=0.0,
-            max_tokens=600,
+            # Bumped from 600: a per-claim JSON array is longer than one
+            # holistic score, and a longer answer means more claims to list.
+            max_tokens=1200,
         )
         raw = (completion.choices[0].message.content or "").strip()
         json_text = _extract_first_json_object(raw)
@@ -257,14 +270,44 @@ def _check_groundedness(query, answer_text, context, client, model):
         import json
 
         parsed = json.loads(json_text)
-        score = parsed.get("groundedness")
+        claims = parsed.get("claims")
+        if not isinstance(claims, list):
+            return None, []
+
+        valid_claims = [
+            c
+            for c in claims
+            if isinstance(c, dict)
+            and isinstance(c.get("claim"), str)
+            and c.get("claim").strip()
+            and isinstance(c.get("supported"), bool)
+        ]
+        if not valid_claims:
+            # No gradeable claims (refusal, clarifying question, "not
+            # covered") - nothing to score. Same semantics as the old
+            # "no context" None fallback: absence of a number, not a
+            # claim of perfection.
+            return None, []
+
+        supported_count = sum(1 for c in valid_claims if c["supported"])
+        llm_groundedness = round(100 * supported_count / len(valid_claims))
+        unsupported_claims = [
+            c["claim"].strip() for c in valid_claims if not c["supported"]
+        ][:5]
+
+        # Independent cross-check (hallucination_check.py) - doesn't share
+        # a model family with whatever generated answer_text, so it can
+        # catch what a self-grading LLM judge might wave through.
+        # Pessimistic combination on purpose: either signal finding a
+        # problem is enough to lower the score, neither can inflate it
+        # past what the other found. Fail-open - if HHEM isn't available
+        # (not yet downloaded, offline, load error), the LLM score stands
+        # alone, exactly like before this cross-check existed.
+        hhem_groundedness = hallucination_check.score_groundedness(context, answer_text)
         groundedness = (
-            max(0, min(100, round(score))) if isinstance(score, (int, float)) else None
-        )
-        claims = parsed.get("unsupportedClaims")
-        unsupported_claims = (
-            [c for c in claims if isinstance(c, str) and c.strip()][:5]
-            if isinstance(claims, list) else []
+            min(llm_groundedness, round(hhem_groundedness))
+            if hhem_groundedness is not None
+            else llm_groundedness
         )
         return groundedness, unsupported_claims
     except Exception:

@@ -2929,6 +2929,43 @@ ${answerMarkdown}`,
 // written from, and flag any claim that isn't actually supported. It never
 // throws into the main response path - any failure just yields a null
 // score, which the frontend can treat as "not available."
+// Independent, non-LLM-as-judge cross-check - calls the same HHEM model
+// (vectara/hallucination_evaluation_model) local-rag's own
+// _check_groundedness() uses, over HTTP, since this pipeline is Node/TS
+// with no JS/ONNX port of that model available. See local-rag/
+// hallucination_check.py's docstring for the full rationale and
+// local-rag/service.py's /groundedness/check for the endpoint this
+// calls. Opt-in via LOCAL_RAG_HHEM_URL (unset by default - see
+// .env.example): unset means this pipeline behaves exactly as before
+// this cross-check existed. Fail-open on any error, including the
+// service simply not running - a missing cross-check is not a request
+// failure.
+async function fetchHhemGroundedness(
+  premise: string,
+  hypothesis: string
+): Promise<number | null> {
+  const baseUrl = process.env.LOCAL_RAG_HHEM_URL;
+  if (!baseUrl || !premise.trim() || !hypothesis.trim()) return null;
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 6000);
+    const res = await fetch(baseUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ premise, hypothesis }),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return typeof data?.score === "number" && Number.isFinite(data.score)
+      ? data.score
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 async function checkGroundedness(
   query: string,
   answerMarkdown: string,
@@ -2943,17 +2980,27 @@ async function checkGroundedness(
       return { groundedness: null, unsupportedClaims: [] };
     }
 
-    const systemPrompt = `You are a strict fact-checking judge. You do NOT answer questions - you only grade whether an already-written ANSWER is actually backed by the given SOURCE EXCERPTS.
+    // Decompose-then-verify, not a single holistic 0-100 guess: asking an
+    // LLM to eyeball one number for an entire answer is exactly the kind
+    // of judgment LLMs are least consistent at. Splitting the answer into
+    // atomic claims first and verifying each independently - then scoring
+    // supported/total - is what Ragas's actual faithfulness metric does;
+    // the old single-score prompt only approximated that name, not the
+    // method. Same {groundedness, unsupportedClaims} output shape as
+    // before, so nothing downstream (ChatInterface.tsx's badge, local-rag's
+    // mirrored _check_groundedness()) needs to change.
+    const systemPrompt = `You are a strict fact-checking judge. You do NOT answer questions - you grade whether an already-written ANSWER is backed by the given SOURCE EXCERPTS, one claim at a time.
 
-Score groundedness 0-100:
-- 100 = every substantive claim in the ANSWER is directly supported by the SOURCE EXCERPTS.
-- 50 = some claims are supported, others are not backed by the excerpts (invented, assumed, or from general knowledge instead of the excerpts).
-- 0 = the ANSWER is unsupported by, or contradicts, the SOURCE EXCERPTS.
+Step 1: Break the ANSWER into individual atomic factual claims - one discrete assertion per claim. A sentence asserting two facts (e.g. a date and a location) becomes two separate claims. Ignore claims that are pure hedging, formatting, or "I don't know" - grade only assertions of fact.
 
-Do not reward good writing, confident tone, or plausibility. Only reward factual grounding in the given excerpts. List any specific claims in the ANSWER that are NOT backed by the excerpts (empty array if none).
+Step 2: For each claim, judge independently whether it is directly supported by the SOURCE EXCERPTS - stated there, or something the excerpts directly imply. A claim is NOT supported if it is merely plausible, general knowledge, or something the excerpts leave unstated.
+
+Do not let the ANSWER's writing quality, tone, or confidence affect your judgment on any claim - grade only factual grounding, claim by claim.
 
 Respond with JSON only, no other text, no markdown fencing:
-{"groundedness": <integer 0-100>, "unsupportedClaims": ["short claim", "..."]}`;
+{"claims": [{"claim": "<short paraphrase, under 15 words>", "supported": <true|false>}, ...]}
+
+If the ANSWER makes no factual claims (e.g. it's a clarifying question, a refusal, or "the documents don't cover this"), return {"claims": []}.`;
 
     const userPrompt = `QUESTION:
 ${query}
@@ -2977,7 +3024,9 @@ ${answerMarkdown}`;
       // models can burn the whole max_tokens budget on hidden reasoning
       // before writing the JSON verdict, so this needs real headroom above
       // the old 500, plus explicitly keeping reasoning light and separate.
-      max_tokens: 1200,
+      // Bumped from 1200: a per-claim JSON array is longer than one
+      // holistic score, and a longer answer means more claims to list.
+      max_tokens: 1600,
       top_p: 1,
       reasoning_effort: "low",
       include_reasoning: false,
@@ -2989,16 +3038,43 @@ ${answerMarkdown}`;
 
     const parsed = JSON.parse(jsonText);
 
-    const groundedness =
-      typeof parsed?.groundedness === "number" && Number.isFinite(parsed.groundedness)
-        ? Math.max(0, Math.min(100, Math.round(parsed.groundedness)))
-        : null;
+    const claims = Array.isArray(parsed?.claims) ? parsed.claims : null;
+    if (!claims) return { groundedness: null, unsupportedClaims: [] };
 
-    const unsupportedClaims: string[] = Array.isArray(parsed?.unsupportedClaims)
-      ? parsed.unsupportedClaims
-          .filter((c: any) => typeof c === "string" && c.trim())
-          .slice(0, 5)
-      : [];
+    const validClaims = claims.filter(
+      (c: any) =>
+        c &&
+        typeof c.claim === "string" &&
+        c.claim.trim() &&
+        typeof c.supported === "boolean"
+    );
+
+    if (validClaims.length === 0) {
+      // No gradeable claims (refusal, clarifying question, "not covered")
+      // - nothing to score. Same semantics as the old "no context" null
+      // fallback: absence of a number, not a claim of perfection.
+      return { groundedness: null, unsupportedClaims: [] };
+    }
+
+    const supportedCount = validClaims.filter((c: any) => c.supported).length;
+    const llmGroundedness = Math.round((100 * supportedCount) / validClaims.length);
+    const unsupportedClaims: string[] = validClaims
+      .filter((c: any) => !c.supported)
+      .map((c: any) => c.claim.trim())
+      .slice(0, 5);
+
+    // Pessimistic combination on purpose: either signal finding a
+    // problem is enough to lower the score, neither can inflate it past
+    // what the other found. See fetchHhemGroundedness()'s comment for
+    // why this stays a no-op unless LOCAL_RAG_HHEM_URL is set.
+    const hhemScore = await fetchHhemGroundedness(
+      `${documentContext}\n${webContext}`,
+      answerMarkdown
+    );
+    const groundedness =
+      hhemScore !== null
+        ? Math.min(llmGroundedness, Math.round(hhemScore))
+        : llmGroundedness;
 
     return { groundedness, unsupportedClaims };
   } catch (error) {

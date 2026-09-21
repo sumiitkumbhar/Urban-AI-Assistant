@@ -39,6 +39,7 @@ from map_images import MAP_IMAGES_DIR
 import project_state as project_state_module
 import memory as memory_module
 from retrieve import _load_embedder, _load_reranker, _load_qdrant, _load_bm25, _load_chunk_texts, get_citation_context
+import hallucination_check
 
 LOG_FILE = DATA_DIR / "service.log"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -94,6 +95,16 @@ app.mount("/map-images", StaticFiles(directory=str(MAP_IMAGES_DIR)), name="map_i
 REPORTS_DIR = Path(__file__).parent / "reports"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/reports", StaticFiles(directory=str(REPORTS_DIR)), name="reports")
+
+
+class GroundednessCheckRequest(BaseModel):
+    # See hallucination_check.py's module docstring for what this
+    # endpoint is for: an independent, non-LLM-as-judge cross-check
+    # that both this service's own answer.py and Cloud mode's
+    # app/api/rag-chat/route.ts call - premise is the retrieved
+    # source excerpts, hypothesis is the generated answer text.
+    premise: str
+    hypothesis: str
 
 
 class QueryRequest(BaseModel):
@@ -279,6 +290,21 @@ def citation_context(chunk_id: str, window: int = 1):
     if ctx is None:
         raise HTTPException(status_code=404, detail=f"No chunk with id {chunk_id}.")
     return ctx
+
+
+@app.post("/groundedness/check")
+def groundedness_check(req: GroundednessCheckRequest):
+    """HTTP entry point for hallucination_check.py's independent
+    groundedness cross-check, so Cloud mode (app/api/rag-chat/route.ts,
+    a completely separate Node/TS pipeline) can call the same HHEM model
+    this service already loads for local mode, over the network, rather
+    than needing a JS/ONNX port of it - see hallucination_check.py's
+    docstring for why. Cloud mode calls this only when LOCAL_RAG_HHEM_URL
+    is set (see .env.example) and treats any failure - including this
+    service simply not running - as "no cross-check available", the same
+    fail-open contract this module already has internally."""
+    score = hallucination_check.score_groundedness(req.premise, req.hypothesis)
+    return {"score": score}
 
 
 @app.post("/query")

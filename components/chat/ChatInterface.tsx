@@ -7,6 +7,7 @@ import remarkGfm from "remark-gfm";
 
 import SourcesSection from "@/components/citations/SourcesSection";
 import InlineCitation from "@/components/citations/InlineCitation";
+import { getConfidenceTier } from "@/components/citations/ExpandableCitation";
 import ConversationSidebar from "@/components/chat/ConversationSidebar";
 import { getVisitorId } from "@/lib/visitorId";
 import { useVoiceChat, sanitizeForSpeech } from "@/lib/useVoiceChat";
@@ -683,7 +684,14 @@ function ConfidenceBadge({
   if (value == null || Number.isNaN(value)) return null;
 
   const pct = Math.max(0, Math.min(100, Math.round(value)));
-  const tier = pct >= 85 ? "high" : pct >= 60 ? "medium" : "low";
+  // Was a separately-calibrated 85/60 cutoff that disagreed with
+  // ExpandableCitation.tsx's 75/55 per-citation tiers - see that
+  // file's getConfidenceTier() comment for why 75/55 is the right
+  // calibration for scores in this 65-90% band. Reusing the same
+  // function here instead of a second hardcoded copy is what keeps
+  // the top-level answer badge and per-citation badges from ever
+  // showing a different verdict for the same number again.
+  const tier = getConfidenceTier(pct);
   const theme = CONFIDENCE_THEME[tier];
 
   return (
