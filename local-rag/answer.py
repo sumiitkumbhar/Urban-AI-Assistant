@@ -11,7 +11,7 @@ folder needs to change for that.
 import os
 import re
 
-from groq import Groq
+from groq import Groq, APIStatusError
 
 import hallucination_check
 from common import load_dotenv_from_repo, DEFAULT_GROQ_MODEL
@@ -48,6 +48,27 @@ piece of information that wasn't in the drafted answer. Return only the correcte
 answer text, nothing else - no preamble, no explanation of what you changed."""
 
 
+# Found the hard way 2026-09-22 (same class of bug already fixed for
+# proposal_review.py on 2026-09-18): this repo's Groq org is capped at
+# 8000 tokens/minute per request ("Request too large ... Limit 8000,
+# Requested 10853" on a perfectly ordinary broad question). Unlike
+# proposal_review.py's fixed MAX_EVIDENCE_CHUNKS, a chunk count alone
+# isn't a safe proxy for size here: get_complete_citation_text()
+# (retrieve.py) expands every citation toward sentence-complete
+# boundaries, up to its own MAX_EXPANSION_CHARS=6000 per side - the
+# right fix for citation accuracy, but it means a handful of already-
+# expanded citations can now blow the token budget in a way small
+# fixed-size chunks never could. Capped by TOTAL CONTEXT SIZE instead,
+# and by DROPPING whichever chunks don't fit rather than truncating the
+# joined string - a citation the model sees is either complete, with a
+# real evidence block behind it, or entirely absent; never a dangling
+# "[N]" marker with half its evidence text cut off. At a conservative
+# ~3.5 chars/token, 16000 chars is ~4500 tokens - comfortable headroom
+# under 8000 alongside the system prompt, question, and completion
+# budget below.
+MAX_CONTEXT_CHARS = 16000
+
+
 def build_context(chunks):
     """Numbered evidence blocks the model can cite by index, and the
     parallel citation list the caller returns alongside the answer -
@@ -64,10 +85,19 @@ def build_context(chunks):
     and that risk doesn't go away just because most citations are never
     manually expanded. Falls back to the raw chunk text only if
     chunk_id is missing or the lookup fails for some reason - never
-    silently drops a citation over this."""
+    silently drops a citation over this.
+
+    Chunks are consumed best-first (sorted by rerank_score) and cut off
+    once MAX_CONTEXT_CHARS is reached - see that constant's own comment
+    for why a size budget, not just a chunk-count cap, is what this
+    pipeline actually needs. The single best chunk is always included
+    even if it alone exceeds the budget, so a cap never produces an
+    empty context."""
+    ordered = sorted(chunks, key=lambda c: c.get("rerank_score", 0.0), reverse=True)
     blocks = []
     citations = []
-    for i, c in enumerate(chunks, start=1):
+    total_chars = 0
+    for c in ordered:
         chunk_id = c.get("chunk_id")
         complete_before = complete_after = None
         text = c["text"]
@@ -81,9 +111,12 @@ def build_context(chunks):
                 complete_before = complete["complete_before"]
                 complete_after = complete["complete_after"]
 
-        blocks.append(
-            f"[{i}] {c['doc_filename']} (page {c['page']}):\n{text}"
-        )
+        i = len(blocks) + 1
+        block = f"[{i}] {c['doc_filename']} (page {c['page']}):\n{text}"
+        if blocks and total_chars + len(block) > MAX_CONTEXT_CHARS:
+            continue
+        total_chars += len(block)
+        blocks.append(block)
         citations.append({
             "id": i,
             "doc": c["doc_filename"],
@@ -394,15 +427,37 @@ def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, proj
 
     system_prompt = _build_system_prompt(confidence)
 
-    completion = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": _build_user_content(query, context, project_context)},
-        ],
-        temperature=0.1,
-        max_tokens=800,
-    )
+    try:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": _build_user_content(query, context, project_context)},
+            ],
+            temperature=0.1,
+            max_tokens=800,
+        )
+    except APIStatusError as e:
+        # Found the hard way 2026-09-22 (same class of bug already fixed
+        # in proposal_review.py 2026-09-18): an uncaught APIStatusError
+        # here - most often a 413 "Request too large" token-per-minute
+        # rate limit - used to crash the whole request with a raw
+        # traceback instead of a clear message. MAX_CONTEXT_CHARS in
+        # build_context() above is the real fix (keeps requests under
+        # budget in the first place); this is the safety net for
+        # whatever still gets through it.
+        return {
+            "answer": (
+                f"The answer call to Groq failed ({e}). If this is a token-per-minute "
+                "rate limit, try a narrower question (one policy/document at a time) "
+                "or wait a minute and retry."
+            ),
+            "citations": citations,
+            "confidence": confidence,
+            "verified": False,
+            "groundedness": None,
+            "unsupported_claims": [],
+        }
     answer_text = completion.choices[0].message.content
 
     # Self-RAG-style reflect/repair pass - only for medium/low confidence,
@@ -493,24 +548,53 @@ def stream_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, projec
     client = Groq(api_key=api_key)
     system_prompt = _build_system_prompt(confidence)
 
-    stream = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": _build_user_content(query, context, project_context)},
-        ],
-        temperature=0.1,
-        max_tokens=800,
-        stream=True,
-    )
+    try:
+        stream = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": _build_user_content(query, context, project_context)},
+            ],
+            temperature=0.1,
+            max_tokens=800,
+            stream=True,
+        )
 
-    answer_parts = []
-    for chunk in stream:
-        delta = chunk.choices[0].delta.content if chunk.choices else None
-        if delta:
-            answer_parts.append(delta)
-            yield "delta", delta
-    answer_text = "".join(answer_parts)
+        answer_parts = []
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content if chunk.choices else None
+            if delta:
+                answer_parts.append(delta)
+                yield "delta", delta
+        answer_text = "".join(answer_parts)
+    except APIStatusError as e:
+        # Same fix as generate_answer() above, adapted for a generator -
+        # found the hard way 2026-09-22: an uncaught APIStatusError here
+        # (e.g. a 413 token-per-minute rate limit) used to propagate all
+        # the way up through service.py's SSE generator and abruptly
+        # close the HTTP connection mid-stream - no "done" event, no
+        # error message, just a dead socket. The Next.js proxy
+        # (app/api/local-rag-chat/stream/route.ts) saw that as
+        # "TypeError: terminated" / "other side closed" and returned a
+        # 500, which the frontend showed as an opaque "Error: Load
+        # failed" - true but useless to a user asking a perfectly
+        # reasonable question. Yielding a "done" event with the real
+        # explanation keeps the SSE contract intact (exactly one "done",
+        # same shape generate_answer() returns) instead of killing the
+        # connection.
+        yield "done", {
+            "answer": (
+                f"The answer call to Groq failed ({e}). If this is a token-per-minute "
+                "rate limit, try a narrower question (one policy/document at a time) "
+                "or wait a minute and retry."
+            ),
+            "citations": citations,
+            "confidence": confidence,
+            "verified": False,
+            "groundedness": None,
+            "unsupported_claims": [],
+        }
+        return
 
     verified = False
     if confidence in ("low", "medium"):

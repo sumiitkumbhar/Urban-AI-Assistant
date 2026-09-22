@@ -366,28 +366,41 @@ def query_stream(req: QueryRequest):
 
     def event_stream():
         yield f"event: coverage\ndata: {json.dumps(coverage)}\n\n"
-        for kind, payload in stream_answer(
-            question_for_llm, chunks, coverage=coverage, project_context=project_context
-        ):
-            if kind == "delta":
-                yield f"event: delta\ndata: {json.dumps({'text': payload})}\n\n"
-            else:  # "done"
-                t2 = time.time()
-                result = {
-                    **payload,
-                    "coverage": coverage,
-                    "map_citations": map_citations,
-                    "site_constraints": site_constraints_result,
-                    "retrieval_ms": round((t1 - t0) * 1000, 1),
-                    "generation_ms": round((t2 - t1) * 1000, 1),
-                }
-                _auto_log_query_event(req.project_id, req.question, payload.get("answer"))
-                logger.info(
-                    f"query(stream)={req.question!r} chunks={len(chunks)} "
-                    f"confidence={coverage['confidence']} "
-                    f"retrieval_ms={(t1-t0)*1000:.0f} generation_ms={(t2-t1)*1000:.0f}"
-                )
-                yield f"event: done\ndata: {json.dumps(result)}\n\n"
+        try:
+            for kind, payload in stream_answer(
+                question_for_llm, chunks, coverage=coverage, project_context=project_context
+            ):
+                if kind == "delta":
+                    yield f"event: delta\ndata: {json.dumps({'text': payload})}\n\n"
+                else:  # "done"
+                    t2 = time.time()
+                    result = {
+                        **payload,
+                        "coverage": coverage,
+                        "map_citations": map_citations,
+                        "site_constraints": site_constraints_result,
+                        "retrieval_ms": round((t1 - t0) * 1000, 1),
+                        "generation_ms": round((t2 - t1) * 1000, 1),
+                    }
+                    _auto_log_query_event(req.project_id, req.question, payload.get("answer"))
+                    logger.info(
+                        f"query(stream)={req.question!r} chunks={len(chunks)} "
+                        f"confidence={coverage['confidence']} "
+                        f"retrieval_ms={(t1-t0)*1000:.0f} generation_ms={(t2-t1)*1000:.0f}"
+                    )
+                    yield f"event: done\ndata: {json.dumps(result)}\n\n"
+        except Exception as e:
+            # Belt-and-suspenders on top of stream_answer()'s own
+            # APIStatusError handling (found the hard way 2026-09-22,
+            # see answer.py's stream_answer() docstring/comments) - ANY
+            # uncaught exception reaching this generator used to abort
+            # the HTTP response mid-stream with no "done" event at all,
+            # which the Next.js proxy surfaced as an opaque "Error: Load
+            # failed" no matter what actually went wrong. Whatever this
+            # catches now, the client still gets exactly one well-formed
+            # "done" event instead of a dead connection.
+            logger.error(f"query(stream) failed unexpectedly: {e}")
+            yield f"event: done\ndata: {json.dumps({'answer': f'Something went wrong generating this answer ({e}). Please try again.', 'citations': [], 'confidence': None, 'verified': False, 'groundedness': None, 'unsupported_claims': []})}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
