@@ -8523,9 +8523,31 @@ textarea.uaa-composer:focus {
   color: #1c1a16 !important;
 }
 textarea.uaa-composer {
-  min-height: 2.75rem;
+  /* 2026-09-29 text-vertical-centering fix (see this rule's own comment
+     block above for the surface/border/radius history). min-height used
+     to be 2.75rem (33px) - taller than the 26.4px the text content
+     actually needed under .ui-compact's forced 14.4px text-sm
+     line-height, and a <textarea> top-aligns its content rather than
+     centering it, so that slack sat below the text and visibly pushed it
+     (and the caret) above the icon buttons' centerline. Every dimension
+     below is now explicit and sums to exactly 30px - h-10, the same
+     height as MainChatComposer.tsx's icon buttons
+     (COMPOSER_ICON_BUTTON_BASE) - so there's no leftover slack for the
+     text to sit off-center in, and no dependence on Tailwind's
+     text-sm/leading-6 classes (dropped from the JSX; .ui-compact's
+     !important overrides on those made the actual computed line-height
+     hard to reason about from the component itself). */
+  box-sizing: border-box !important;
+  min-height: 30px;
   max-height: 168px;
   overflow-y: hidden;
+  font-size: 0.8rem !important;      /* unchanged visual size (was .text-sm's 0.8rem under .ui-compact) */
+  line-height: 18px !important;      /* explicit px, not rem/em - can't drift with root font-size elsewhere */
+  padding: 6px 0 6px 8px !important; /* 6 + 18 + 6 = 30px, zero slack. Left padding widened from the row's
+                                         plain 6px flex `gap-2` to ~14px total icon-to-text gap, per explicit request. */
+  margin: 0 !important;
+  -webkit-appearance: none;
+  appearance: none;
 }
 textarea.uaa-composer::placeholder { color: #a39b8d !important; }
 

@@ -291,7 +291,14 @@ export function MainChatComposerBar({
         onKeyDown={onKeyDown}
         placeholder="Ask anything"
         aria-label="Ask a question"
-        className="uaa-composer block min-w-0 flex-1 resize-none border-0 bg-transparent py-2 text-sm leading-6 focus:outline-none"
+        // font-size/line-height/padding are owned by the textarea.uaa-composer
+        // rule in app/globals.css (2026-09-29 text-vertical-centering fix) -
+        // deliberately NOT Tailwind's py-2/text-sm/leading-6 here, since
+        // .ui-compact's !important overrides on text-sm made the actual
+        // computed line-height impossible to see from this file, which is
+        // exactly what let the text/caret drift above the icon buttons'
+        // centerline unnoticed.
+        className="uaa-composer block min-w-0 flex-1 resize-none border-0 bg-transparent focus:outline-none"
         disabled={isLoading}
       />
 
