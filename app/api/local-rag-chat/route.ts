@@ -157,9 +157,18 @@ export async function POST(req: Request) {
 
   const postcode = extractPostcode(query);
   const upstreamPath = postcode ? "/site-answer" : "/query";
+  // Fully-local generation (added 2026-09-24, opt-in) - "ollama" routes
+  // the answer-generation step itself (not just retrieval) through a
+  // local Ollama instance instead of Groq's cloud API, see
+  // local-rag/answer.py's `backend` parameter and common.py's
+  // OLLAMA_BASE_URL/DEFAULT_OLLAMA_MODEL. Anything other than the
+  // literal string "ollama" is treated as "groq" (the existing
+  // default), so a missing/garbled field never silently changes
+  // behavior.
+  const backend = body?.backend === "ollama" ? "ollama" : "groq";
   const upstreamBody = postcode
-    ? { postcode, question: query }
-    : { question: query };
+    ? { postcode, question: query, backend }
+    : { question: query, backend };
 
   let upstream: Response;
   try {
@@ -282,14 +291,36 @@ export async function POST(req: Request) {
 
 // Lets the UI show a "local RAG offline" indicator without waiting for a
 // failed chat send first - see the ragSource toggle in ChatInterface.tsx.
+// Also probes local-rag's /ollama/status (added 2026-09-24 alongside the
+// fully-local backend toggle) and folds it in as `ollama` - so the same
+// one status check that already runs on switching to local mode also
+// tells the UI whether the Ollama backend option can actually be
+// offered right now, without a second round trip. Best-effort: any
+// failure on the Ollama probe just means "not available" (see
+// service.py's own ollama_status(), which never 500s either), never a
+// reason to fail this whole health check.
 export async function GET() {
+  let health: { reachable: boolean; [key: string]: any };
   try {
     const res = await fetch(`${LOCAL_RAG_URL}/health`, {
       signal: AbortSignal.timeout(5_000),
     });
     const data = await res.json().catch(() => ({}));
-    return NextResponse.json({ reachable: res.ok, ...data });
+    health = { reachable: res.ok, ...data };
   } catch {
-    return NextResponse.json({ reachable: false, status: "unreachable" });
+    health = { reachable: false, status: "unreachable" };
   }
+
+  let ollama: any = { available: false, models: [], default_model_pulled: false };
+  try {
+    const res = await fetch(`${LOCAL_RAG_URL}/ollama/status`, {
+      signal: AbortSignal.timeout(3_000),
+    });
+    ollama = await res.json().catch(() => ollama);
+  } catch {
+    // Ollama simply not installed/running is a normal state, not an
+    // error - `ollama` above already defaults to "not available".
+  }
+
+  return NextResponse.json({ ...health, ollama });
 }

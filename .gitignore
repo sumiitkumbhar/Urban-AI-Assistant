@@ -41,6 +41,11 @@ local-rag/venv/
 local-rag/data/
 local-rag/reports/
 local-rag/__pycache__/
+# Uploaded/generated document store (original.pdf, current.pdf,
+# paragraphs.json, report_meta.json per doc/report id) - runtime
+# data from real uploads and compliance reports, not source, and
+# large (100s of MB). Same category as data/ and reports/ above.
+local-rag/documents/
 
 # Copied from node_modules/pdfjs-dist by the copy-pdf-worker script
 # (package.json predev/prebuild) - see components/chat/DocumentPanel.tsx's

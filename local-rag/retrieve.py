@@ -473,7 +473,15 @@ def _sparse_search(query, top_k):
     if not tokens:
         return []
     scores = bm25.get_scores(tokens)
-    ranked = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
+    # 2026-09-28 determinism pass: explicit tie-break on chunk_id so two
+    # chunks scoring identically never depend on incidental index order
+    # (this was already effectively stable via range()'s own ascending
+    # order + Python's stable sort, but that was incidental, not a
+    # documented guarantee - making it explicit here matches the same
+    # treatment given to every other ranking step below).
+    ranked = sorted(
+        range(len(scores)), key=lambda i: (-scores[i], chunk_ids[i]),
+    )[:top_k]
     return [chunk_ids[i] for i in ranked if scores[i] > 0]
 
 
@@ -530,7 +538,10 @@ def _reciprocal_rank_fusion(*ranked_lists, k=RRF_K):
     for ranked in ranked_lists:
         for rank, chunk_id in enumerate(ranked):
             scores[chunk_id] = scores.get(chunk_id, 0.0) + 1.0 / (k + rank + 1)
-    return sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    # 2026-09-28 determinism pass: explicit chunk_id tie-break (see
+    # _sparse_search()'s own comment on this same change) rather than
+    # relying on dict insertion order alone to be deterministic.
+    return sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
 def assess_coverage(results, references):
@@ -672,7 +683,9 @@ def _retrieve_once(query, top_k, rerank_top_n, references, expanded_references, 
         boost += STATUS_BOOST.get(chunk.get("status"), 0.0)
         candidates.append((chunk, rrf_score + boost))
 
-    candidates.sort(key=lambda cs: cs[1], reverse=True)
+    # 2026-09-28 determinism pass: explicit chunk_id tie-break, same
+    # reasoning as _sparse_search()/_reciprocal_rank_fusion() above.
+    candidates.sort(key=lambda cs: (-cs[1], cs[0]["chunk_id"]))
     candidates = candidates[:top_k]
     if not candidates:
         return []
@@ -680,7 +693,15 @@ def _retrieve_once(query, top_k, rerank_top_n, references, expanded_references, 
     reranker = _load_reranker()
     pairs = [(query, c["text"]) for c, _ in candidates]
     cross_scores = reranker.predict(pairs)
-    reranked = sorted(zip(candidates, cross_scores), key=lambda x: x[1], reverse=True)
+    # 2026-09-28 determinism pass: explicit chunk_id tie-break. Matters
+    # more here than upstream - two distinct chunks scoring identically
+    # (or within float noise of each other) on the cross-encoder is a
+    # real, observed case, not just a theoretical one, since it's a much
+    # coarser model than the dense/sparse scores feeding it.
+    reranked = sorted(
+        zip(candidates, cross_scores),
+        key=lambda x: (-float(x[1]), x[0][0]["chunk_id"]),
+    )
 
     results = []
     for (chunk, _rrf), cross_score in reranked[:rerank_top_n]:

@@ -112,7 +112,15 @@ def _fuse(agent_results, rerank_top_n):
                 merged[cid] = chunk
 
     cap = rerank_top_n + 2 * max(0, len(agent_results) - 1)
-    fused_chunks = sorted(merged.values(), key=lambda c: c["rerank_score"], reverse=True)[:cap]
+    # 2026-09-28 determinism pass: explicit chunk_id tie-break, same
+    # reasoning as retrieve.py's own ranking steps - merged.values()'
+    # insertion order (and therefore any tie) currently happens to be
+    # deterministic (classify_domains() iterates DOMAIN_KEYWORDS in
+    # fixed dict order, not a thread pool), but that's incidental to
+    # this function, not something it should rely on silently.
+    fused_chunks = sorted(
+        merged.values(), key=lambda c: (-c["rerank_score"], c["chunk_id"]),
+    )[:cap]
 
     ok_agents = [a for a in agent_results if a["error"] is None]
     failed_agents = [a for a in agent_results if a["error"] is not None]

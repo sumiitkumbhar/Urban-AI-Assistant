@@ -74,6 +74,15 @@ RISK_LEVELS = {
     "Low": ("✓", "#0ca30c", "#eaf7ea"),
     "Medium": ("!", "#fab219", "#fef5e4"),
     "High": ("✗", "#d03b3b", "#fbecec"),
+    # Not a risk level - a distinct state (2026-09-28 reliability fix,
+    # points 1/2/5): shown INSTEAD OF a Low/Medium/High verdict whenever
+    # compliance_status == "incomplete" (see render_markdown/render_html's
+    # own comments), so a partial assessment can never be mistaken for a
+    # completed one just because it also has a colored badge. Uses the
+    # neutral accent blue, not amber/red, since "incomplete" isn't itself
+    # bad news the way "High risk" is - it's a statement about assessment
+    # coverage, not about the proposal.
+    "Incomplete": ("\u25d0", COLOR_ACCENT, COLOR_ACCENT_TINT),
 }
 
 FONT_STACK = '-apple-system, "Segoe UI", Helvetica, Arial, sans-serif'
@@ -153,6 +162,14 @@ def _site_detection_note(result):
 def render_markdown(result, document_names):
     assessment = result.get("assessment") or {}
     failed = bool(result.get("assessment_failed"))
+    # compliance_status (2026-09-28 reliability fix) is the real tri-state
+    # this report needs - "failed" (nothing usable, handled by the `failed`
+    # branch below, unchanged), "incomplete" (some excerpts couldn't be
+    # assessed - real findings shown, but no definitive risk/compliance
+    # verdict), "final" (full coverage). Older result dicts (saved reports
+    # from before this field existed) fall back to the old two-state
+    # reading so a stale saved report still renders instead of crashing.
+    compliance_status = result.get("compliance_status") or ("failed" if failed else "final")
 
     L = []
     L.append("# Proposal Compliance Review")
@@ -199,12 +216,44 @@ def render_markdown(result, document_names):
 
     issues = assessment.get("issues") or []
     checklist = assessment.get("checklist") or []
-    level, basis, counts = _compute_risk(assessment)
-    L.append(f"**Overall attention needed: {level}** — {basis}.")
-    L.append(
-        f"**Checklist status:** {counts.get('present', 0)} present, "
-        f"{counts.get('missing', 0)} missing, {counts.get('unclear', 0)} unclear."
-    )
+    coverage = result.get("assessment_coverage") or {}
+    evidence_confidence = result.get("evidence_confidence")
+
+    # Points 1/2 of the 2026-09-28 reliability fix: never present a
+    # definitive compliance verdict computed from a partial assessment.
+    # compliance_status == "incomplete" means some excerpts failed - the
+    # issues/checklist below are real (from the excerpts that DID
+    # succeed), but a "missing" item may simply live in a part of the
+    # document that couldn't be checked this run, so no Low/Medium/High
+    # verdict is shown here - only the three separate, honest numbers:
+    # assessment coverage, evidence confidence, and (still) the real
+    # counts of what was found, clearly framed as partial.
+    if compliance_status == "incomplete":
+        L.append("**Compliance result: Incomplete — this is not a final assessment.**")
+        L.append(
+            f"Only {coverage.get('assessed_units', 0)} of {coverage.get('total_units', 0)} "
+            f"document excerpt(s) could be assessed. A checklist item marked \"missing\" below "
+            "may simply be in a part of the document that wasn't assessed, not genuinely "
+            "absent - re-run the review for a complete, final result."
+        )
+        L.append(f"**Assessment coverage:** {coverage.get('pct', 0)}%")
+        if evidence_confidence:
+            L.append(f"**Evidence confidence:** {evidence_confidence}")
+        L.append(
+            f"**Checklist status (partial):** {sum(1 for c in checklist if c.get('status') == 'present')} present, "
+            f"{sum(1 for c in checklist if c.get('status') == 'missing')} missing, "
+            f"{sum(1 for c in checklist if c.get('status') == 'unclear')} unclear."
+        )
+    else:
+        level, basis, counts = _compute_risk(assessment)
+        L.append(f"**Overall attention needed: {level}** — {basis}.")
+        L.append(
+            f"**Checklist status:** {counts.get('present', 0)} present, "
+            f"{counts.get('missing', 0)} missing, {counts.get('unclear', 0)} unclear."
+        )
+        L.append(f"**Assessment coverage:** {coverage.get('pct', 100)}%")
+        if evidence_confidence:
+            L.append(f"**Evidence confidence:** {evidence_confidence}")
     L.append("")
     if assessment.get("summary"):
         L.append(f"**Summary:** {assessment['summary']}")
@@ -231,6 +280,19 @@ def render_markdown(result, document_names):
             cites = ", ".join(f"[{c}]" for c in issue.get("citations", []))
             L.append(f"{i}. **[{issue.get('topic', '')}]** {issue.get('issue', '')} {cites}")
             L.append(f"   - Suggested change: {issue.get('suggested_change', '')}")
+            # "verified" is only present when the second-opinion pass
+            # (proposal_review.py's _verify_issues(), added 2026-09-24)
+            # actually checked this issue - absent means "not
+            # independently checked" (past its cap, or that pass failed),
+            # a different, weaker claim than a pass, so it prints nothing
+            # rather than a misleading badge either way. See that
+            # function's own docstring for why a missing key is never
+            # read as true.
+            if issue.get("verified") is True:
+                L.append("   - ✓ Independently verified against the cited evidence.")
+            elif issue.get("verified") is False:
+                note = issue.get("verification_note", "")
+                L.append(f"   - ⚠ Second-opinion check flagged this: {note}")
     L.append("")
 
     L.append(f"## Required content checklist ({len(checklist)})")
@@ -287,6 +349,33 @@ def _linkify(text):
     return _CITE_RE.sub(
         lambda m: f'<a class="cite-link" href="#ev-{m.group(1)}">[{m.group(1)}]</a>', escaped
     )
+
+
+def _verification_badge_html(issue):
+    """Second-opinion badge for one issue card (proposal_review.py's
+    _verify_issues(), added 2026-09-24) - "" when this issue was never
+    independently checked (issue.get("verified") is None: past
+    MAX_ISSUES_TO_VERIFY, or the whole verification call failed/timed
+    out), since that's a distinct, weaker claim than a pass and must not
+    print a misleading badge either way (see that function's own
+    docstring). Reuses STATUS's existing present/unclear colors rather
+    than inventing new ones, so this reads as part of the same status
+    palette as the checklist chips instead of a one-off."""
+    verified = issue.get("verified")
+    if verified is True:
+        _, color, tint = STATUS["present"]
+        return (
+            f'<div class="card-verify" style="color:{color};background:{tint};">'
+            f"✓ Independently verified against the cited evidence.</div>"
+        )
+    if verified is False:
+        _, color, tint = STATUS["unclear"]
+        note = _esc(issue.get("verification_note", ""))
+        return (
+            f'<div class="card-verify" style="color:{color};background:{tint};">'
+            f"⚠ Second-opinion check flagged this: {note}</div>"
+        )
+    return ""
 
 
 # Small hand-drawn (not brand/emoji) icon per topic keyword, added
@@ -543,6 +632,7 @@ def _wrap_html(body_html, risk_icon, risk_color, risk_tint, animate=False):
   .card-topic {{ font-weight: 600; font-size: 9.5pt; text-transform: uppercase; letter-spacing: 0.03em; color: {COLOR_INK_SECONDARY}; margin-bottom: 5px; }}
   .card-body {{ margin: 5px 0 7px 0; }}
   .card-suggestion {{ font-size: 9.5pt; color: {COLOR_INK_SECONDARY}; padding-top: 7px; border-top: 1px solid {COLOR_GRIDLINE}; }}
+  .card-verify {{ font-size: 8.5pt; margin-top: 7px; padding: 5px 8px; border-radius: 5px; }}
   .cite {{ color: {COLOR_INK_MUTED}; font-size: 8.5pt; }}
   .chip {{
     display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px;
@@ -628,6 +718,33 @@ def render_html(result, document_names, images=None, animate=False):
     issues = assessment.get("issues") or []
     checklist = assessment.get("checklist") or []
     level, basis, counts = _compute_risk(assessment)
+    coverage = result.get("assessment_coverage") or {}
+    evidence_confidence = result.get("evidence_confidence")
+    compliance_status = result.get("compliance_status") or "final"
+    # Points 1/2/5 of the 2026-09-28 reliability fix: a partial assessment
+    # never gets to wear a Low/Medium/High badge - level/basis are
+    # overridden to a distinct "Incomplete" state (see RISK_LEVELS' own
+    # comment) whenever some excerpts couldn't be assessed, so the badge
+    # itself can never be misread as a completed, definitive verdict.
+    # counts (still real, from whatever WAS assessed) keeps flowing to the
+    # stat tiles/donut below unchanged - only the top-level verdict label
+    # changes, the underlying findings are not hidden.
+    coverage_banner_html = ""
+    if compliance_status == "incomplete":
+        level = "Incomplete"
+        basis = (
+            f"only {coverage.get('assessed_units', 0)} of {coverage.get('total_units', 0)} "
+            "document excerpt(s) could be assessed - this is not a final result"
+        )
+        coverage_banner_html = f"""
+  <div class="disclaimer" style="border-left-color:{RISK_LEVELS['Incomplete'][1]};">
+    <strong>Compliance result: Incomplete &mdash; this is not a final assessment.</strong><br>
+    Only {coverage.get('assessed_units', 0)} of {coverage.get('total_units', 0)} document
+    excerpt(s) could be assessed ({coverage.get('pct', 0)}% coverage). A checklist item marked
+    "missing" below may simply be in a part of the document that wasn't assessed, not
+    genuinely absent. Re-run the review for a complete, final result.
+  </div>
+"""
     risk_icon, risk_color, risk_tint = RISK_LEVELS[level]
     topic_counts = Counter(i.get("topic") or "Other" for i in issues)
     chart_svg = _bar_chart_svg(topic_counts, animate=animate)
@@ -642,6 +759,11 @@ def render_html(result, document_names, images=None, animate=False):
         ("Required items present", counts.get("present", 0), STATUS["present"][1], STATUS["present"][2]),
         ("Required items missing", counts.get("missing", 0), STATUS["missing"][1], STATUS["missing"][2]),
         ("Required items unclear", counts.get("unclear", 0), STATUS["unclear"][1], STATUS["unclear"][2]),
+        # Assessment coverage (2026-09-28) - a genuinely separate metric
+        # from the compliance counts above (see the module-level comment
+        # on compliance_status), always shown, not only when incomplete -
+        # a 100% tile is reassuring confirmation, not just a caveat.
+        ("Assessment coverage", f"{coverage.get('pct', 100)}%", COLOR_ACCENT, COLOR_ACCENT_TINT),
     ]
     stat_tiles = "".join(
         f'<div class="stat-tile" style="border-left-color:{color};background:{tint};">'
@@ -666,6 +788,7 @@ def render_html(result, document_names, images=None, animate=False):
         f'<div class="card-body">{_linkify(issue.get("issue", ""))}</div>'
         f'<div class="card-suggestion"><strong>Suggested change:</strong> '
         f'{_esc(issue.get("suggested_change", ""))}</div>'
+        f'{_verification_badge_html(issue)}'
         f'</div>'
         for issue in issues
     ) or '<p class="muted">No specific issues flagged.</p>'
@@ -733,6 +856,8 @@ def render_html(result, document_names, images=None, animate=False):
         )
 
     notes = []
+    if evidence_confidence:
+        notes.append(f"Evidence/grounding confidence for this review: {evidence_confidence}.")
     if result.get("topics_failed"):
         notes.append(
             "Topics that failed to retrieve and were skipped: "
@@ -760,6 +885,7 @@ def render_html(result, document_names, images=None, animate=False):
   </div>
 
   {disclaimer_html}
+  {coverage_banner_html}
 
   <div class="toc">
     <strong>Contents</strong>

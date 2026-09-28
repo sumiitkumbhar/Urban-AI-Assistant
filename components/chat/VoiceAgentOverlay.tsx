@@ -17,6 +17,10 @@
 // but paste me the first error if one shows up when you actually run it.
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
+// MIT, npm install thinking-orbs - free, no paid tier needed (same package,
+// same license check, as VoiceModeOverlay.tsx - this overlay is visually
+// meant to mirror that one, see the header comment above).
+import { ThinkingOrb } from "thinking-orbs";
 
 export type VoiceAgentState =
   | "connecting"
@@ -35,6 +39,20 @@ const STATUS_LABEL: Record<VoiceAgentState, string> = {
   thinking: "Thinking…",
   speaking: "Speaking…",
   error: "Something went wrong",
+};
+
+// "connecting" and "listening" are literal matches in thinking-orbs' own
+// vocabulary (this overlay's "connecting" is a real WebSocket handshake,
+// not a metaphor). "thinking"/"speaking" reuse VoiceModeOverlay.tsx's
+// mapping so the two overlays read as the same feature. "error" has no
+// entry - there's no thinking-orbs state for a failure, so that one stays
+// the plain red circle below rather than forcing a mismatched animation
+// onto it.
+const ORB_STATE: Partial<Record<VoiceAgentState, React.ComponentProps<typeof ThinkingOrb>["state"]>> = {
+  connecting: "connecting",
+  listening: "listening",
+  thinking: "working",
+  speaking: "composing",
 };
 
 export default function VoiceAgentOverlay({ onClose }: VoiceAgentOverlayProps) {
@@ -195,32 +213,16 @@ export default function VoiceAgentOverlay({ onClose }: VoiceAgentOverlayProps) {
       </button>
 
       <div className="relative flex h-48 w-48 items-center justify-center rounded-full">
-        {state === "listening" && (
-          <>
-            <span className="absolute inset-0 animate-ping rounded-full bg-neutral-950/10" />
-            <span
-              className="absolute inset-4 animate-ping rounded-full bg-neutral-950/10"
-              style={{ animationDelay: "300ms" }}
-            />
-          </>
+        {state === "error" ? (
+          // No thinking-orbs state fits a failure - kept as the original
+          // plain color cue rather than forcing a mismatched animation.
+          <span className="h-32 w-32 rounded-full bg-red-400 shadow-[0_0_20px_rgba(220,38,38,0.25)]" />
+        ) : (
+          // theme="light" is pinned rather than "auto" - DESIGN.md rules
+          // out dark mode for this app, so there's no light/dark switch
+          // for the library to correctly auto-detect.
+          <ThinkingOrb state={ORB_STATE[state]!} size={64} theme="light" aria-label={STATUS_LABEL[state]} />
         )}
-        {state === "speaking" && (
-          <span className="absolute inset-2 animate-pulse rounded-full bg-neutral-950/10" />
-        )}
-
-        <span
-          className={`h-32 w-32 rounded-full transition-all duration-500 ${
-            state === "speaking"
-              ? "scale-110 bg-neutral-950 shadow-[0_0_60px_rgba(0,0,0,0.35)]"
-              : state === "thinking"
-              ? "animate-pulse bg-neutral-700 shadow-[0_0_40px_rgba(0,0,0,0.2)]"
-              : state === "listening"
-              ? "scale-105 bg-neutral-900 shadow-[0_0_50px_rgba(0,0,0,0.3)]"
-              : state === "error"
-              ? "bg-red-400 shadow-[0_0_20px_rgba(220,38,38,0.25)]"
-              : "bg-neutral-300 shadow-[0_0_20px_rgba(0,0,0,0.08)]"
-          }`}
-        />
       </div>
 
       <p className="mt-8 text-sm font-medium text-neutral-600">

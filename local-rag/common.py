@@ -276,6 +276,43 @@ DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 # replaced this one too - Groq retires model IDs on a rolling basis,
 # this isn't a one-time fix.
 
+# Fully-local answer generation via Ollama - opt-in, added 2026-09-24
+# after triaging github.com/nilsherzig/LLocalSearch and
+# github.com/deepseek-ai/DeepSeek-LLM as a pattern worth adopting.
+# Retrieval + reranking here were already fully local/offline (see
+# answer.py's module docstring), but the answer-GENERATION step still
+# always called Groq's cloud API, even when the frontend's "Local
+# (offline)" toggle is on - that toggle has only ever meant "retrieval
+# is local", never "nothing leaves this machine". answer.py's `backend`
+# parameter (default "groq", unchanged) is what actually switches the
+# generation step itself to a local Ollama call - see that file's
+# _setup_backend() for the full explanation. This is strictly additive:
+# nothing here changes what happens when backend="groq" (the default
+# used everywhere until a caller explicitly opts in).
+#
+# Requires Ollama installed and running on this machine (the desktop
+# app runs `ollama serve` for you) with a model actually pulled, e.g.:
+#   ollama pull deepseek-r1:7b
+# DEFAULT_OLLAMA_MODEL is just a reasonable starting suggestion (a small
+# DeepSeek distill, per the LLocalSearch/DeepSeek-LLM repos above) - set
+# OLLAMA_MODEL in .env.local to whatever you actually pulled instead.
+# OLLAMA_BASE_URL covers the rare case Ollama is listening somewhere
+# other than its default localhost port.
+#
+# These are plain hardcoded fallbacks, deliberately NOT read from
+# os.environ here - common.py is imported (and this module-level code
+# runs) before load_dotenv_from_repo() ever gets a chance to load
+# .env.local, so an os.environ.get() at import time here would silently
+# miss anything set only in .env.local (as opposed to already exported
+# in the shell), unlike GROQ_API_KEY, which is deliberately re-read
+# from os.environ AFTER calling load_dotenv_from_repo() every time it's
+# needed. answer.py's _setup_backend() follows that same pattern for
+# these two - it calls load_dotenv_from_repo() first, then checks
+# OLLAMA_BASE_URL/OLLAMA_MODEL in the environment, falling back to these
+# constants only if neither is set.
+OLLAMA_BASE_URL = "http://localhost:11434"
+DEFAULT_OLLAMA_MODEL = "deepseek-r1:7b"
+
 
 def load_dotenv_from_repo():
     """.env.local lives at the repo root (Next.js convention) - reuse the

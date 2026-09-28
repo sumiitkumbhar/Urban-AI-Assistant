@@ -8,13 +8,16 @@ decide you want the answer step offline too - nothing else in this
 folder needs to change for that.
 """
 
+import json
 import os
 import re
+from types import SimpleNamespace
 
+import requests
 from groq import Groq, APIStatusError
 
 import hallucination_check
-from common import load_dotenv_from_repo, DEFAULT_GROQ_MODEL
+from common import load_dotenv_from_repo, DEFAULT_GROQ_MODEL, OLLAMA_BASE_URL, DEFAULT_OLLAMA_MODEL
 from retrieve import get_complete_citation_text
 
 SYSTEM_PROMPT = """You are a UK planning and building-regulations assistant. \
@@ -67,6 +70,256 @@ answer text, nothing else - no preamble, no explanation of what you changed."""
 # under 8000 alongside the system prompt, question, and completion
 # budget below.
 MAX_CONTEXT_CHARS = 16000
+
+# Read timeout for a local Ollama call. Deliberately generous compared to
+# Groq's cloud latency: a 7B-class model on ordinary consumer hardware
+# (CPU, or a modest GPU) can genuinely take a couple of minutes for a
+# long answer, especially the first call after the model has to load
+# into memory - a short timeout here would misreport "Ollama isn't
+# running" for what's actually just a slow local machine. The connect
+# timeout stays short (a few seconds) since a closed port fails
+# instantly either way.
+OLLAMA_TIMEOUT_SECONDS = (5, 180)
+
+
+class _OllamaResponse:
+    """Shim matching the one shape every caller in this file reads off a
+    Groq chat-completion response - resp.choices[0].message.content -
+    so _verify_and_repair()/_check_groundedness()/generate_answer() can
+    call client.chat.completions.create(...) without caring whether the
+    actual backend is Groq's SDK object or this plain wrapper around a
+    local Ollama HTTP call."""
+
+    def __init__(self, content, finish_reason="stop"):
+        # finish_reason: mirrors Groq's convention ("stop"/"length"/...)
+        # from Ollama's own done_reason field (see _OllamaChatCompletions
+        # .create() below) - added 2026-09-25 after proposal_review.py's
+        # _call_groq_json() (shared by the Groq and Ollama paths) crashed
+        # with AttributeError reading completion.choices[0].finish_reason
+        # on this shim, which previously left the attribute out entirely
+        # since no caller in THIS file happened to read it.
+        self.choices = [
+            SimpleNamespace(
+                message=SimpleNamespace(content=content),
+                finish_reason=finish_reason,
+            )
+        ]
+
+
+class _OllamaStreamChunk:
+    """Shim matching the one shape stream_answer() reads off a Groq
+    streaming chunk - chunk.choices[0].delta.content."""
+
+    def __init__(self, delta_text):
+        self.choices = [SimpleNamespace(delta=SimpleNamespace(content=delta_text))]
+
+
+class _OllamaChatCompletions:
+    """Just enough of the groq/openai `.chat.completions.create(...)`
+    surface for this file's own call sites to work unchanged against a
+    local Ollama instance - not a general-purpose client. Talks to
+    Ollama's native /api/chat endpoint (not its OpenAI-compatible one):
+    that endpoint streams newline-delimited JSON objects, one per line,
+    which is simpler to parse correctly with `requests` than the
+    OpenAI-compatible endpoint's SSE "data: {...}" framing, and Ollama
+    has supported /api/chat since well before it added OpenAI
+    compatibility, so this doesn't depend on a newer Ollama version."""
+
+    def __init__(self, base_url):
+        self._base_url = base_url.rstrip("/")
+
+    def create(self, model, messages, temperature=0.1, max_tokens=800, stream=False, seed=None,
+               think=None, format=None):
+        url = f"{self._base_url}/api/chat"
+        # See the num_ctx comment below for why this is computed here,
+        # before payload is built, rather than inline in the dict.
+        estimated_input_tokens = sum(
+            len(str(m.get("content") or "")) for m in messages
+        ) // 4
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": stream,
+            # 2026-09-25: added num_ctx. Without it Ollama loads the
+            # model with its own default context window (observed via
+            # `ollama ps`: 4096 tokens) regardless of what num_predict
+            # asks for - that 4096 covers the ENTIRE exchange (system
+            # prompt + retrieved evidence + reasoning + JSON answer),
+            # not just the output. deepseek-r1 (a reasoning model) writes
+            # a <think>...</think> block before answering, so real
+            # retrieved evidence in the prompt was leaving too little of
+            # that 4096 for reasoning-plus-answer - causing intermittent
+            # "model did not return a parseable rewrite" failures that
+            # raising document_edit.py's own MAX_COMPLETION_TOKENS alone
+            # didn't fix (num_predict can't produce more output than the
+            # context window has room for).
+            #
+            # 2026-09-25 (later same day): the first fix (below,
+            # max(8192, max_tokens*4)) only scaled with the OUTPUT budget
+            # and silently assumed the INPUT was small - true for a
+            # single-paragraph rewrite, false for document_edit.py's
+            # find_target_paragraph(), whose prompt lists every
+            # paragraph in the document (up to MAX_PARAGRAPHS_IN_LISTING
+            # = 200, ~100 chars each). Live-tested against a real 89-
+            # paragraph document: that listing alone is already close to
+            # 8192 tokens, leaving too little room for deepseek-r1's own
+            # <think> reasoning on top - reproduced live as "Could not
+            # parse the model's paragraph match." Fixed by actually
+            # measuring the request, not just the response: estimate
+            # input size from the real messages (a plain chars/4 estimate
+            # - rough, but this only needs to be in the right order of
+            # magnitude, not exact) and size num_ctx off BOTH ends of the
+            # exchange plus real headroom for reasoning, rather than
+            # just the output. deepseek-r1:7b's own max is 131072
+            # (confirmed via /api/show) so even a generous estimate here
+            # is nowhere near its ceiling, and this hardware (M5 Pro /
+            # 24GB unified memory) was already running the model at 100%
+            # GPU with room to spare.
+            "options": {
+                "temperature": temperature,
+                "num_predict": max_tokens,
+                "num_ctx": max(8192, (estimated_input_tokens + max_tokens) * 2),
+            },
+        }
+        # 2026-09-28: best-effort determinism, matching the Groq-side
+        # `seed` param proposal_review.py now sends on every call it
+        # makes. Ollama's native /api/chat endpoint reads seed from
+        # options.seed (not a top-level field), and only when a caller
+        # actually asked for one - omitted entirely otherwise so this
+        # never changes behavior for callers that don't pass seed
+        # (e.g. document_edit.py's existing calls).
+        if seed is not None:
+            payload["options"]["seed"] = seed
+        # think (2026-09-28, checklist-batch token-budget fix): Ollama's
+        # native /api/chat control for hybrid-reasoning models
+        # (deepseek-r1, qwen3, and similar) to skip their internal
+        # <think>...</think> block entirely - a TOP-LEVEL request field,
+        # not nested under "options" like everything else above. None
+        # (the default) omits it entirely, so every existing caller of
+        # this method is completely unaffected. Explicit False is what
+        # proposal_review.py's checklist-generation stage passes (see
+        # CHECKLIST_STAGE_OLLAMA_THINK) - structured extraction doesn't
+        # need the reasoning pass, and skipping it frees the WHOLE
+        # num_predict budget above for the actual JSON answer instead of
+        # splitting it with reasoning tokens the caller never reads. A
+        # model or Ollama version that doesn't support "think" control
+        # should simply ignore an unrecognized field rather than error -
+        # if that assumption ever turns out wrong for some real Ollama
+        # version, the caller still gets a real response either way,
+        # just without the budget savings this is meant to buy.
+        if think is not None:
+            payload["think"] = think
+        # format (2026-09-28, checklist single-evidence-batch truncation
+        # follow-up): Ollama's native /api/chat structured-output control
+        # - a TOP-LEVEL request field, matching "think"'s placement above,
+        # not nested under "options". Accepts either the literal string
+        # "json" (loose JSON-mode, already effectively what every caller
+        # gets via prompt instructions alone) or a full JSON Schema object
+        # (strict structured output - the model's response is constrained
+        # to match the schema, supported by Ollama versions recent enough
+        # to include this feature; not assumed here to be the version
+        # actually installed - see proposal_review.py's
+        # CHECKLIST_USE_OLLAMA_STRUCTURED_OUTPUT and
+        # _checklist_batch_raw_call()'s own fallback for how a caller
+        # confirms this empirically rather than assuming it). None (the
+        # default) omits the field entirely, so every existing caller of
+        # this method - including every checklist call when structured
+        # output is disabled or its own retry-without-schema fallback
+        # fires - is completely unaffected. If the installed Ollama
+        # doesn't recognize this field, the safest failure mode is it
+        # being ignored by a permissive server; if it instead causes an
+        # HTTP error, that surfaces to the caller as an ordinary
+        # RequestException through resp.raise_for_status() below, which
+        # _checklist_batch_raw_call() specifically catches and retries
+        # once without a schema - this method itself makes no assumption
+        # either way, it just forwards what it was asked to send.
+        if format is not None:
+            payload["format"] = format
+        if not stream:
+            resp = requests.post(url, json=payload, timeout=OLLAMA_TIMEOUT_SECONDS)
+            resp.raise_for_status()
+            data = resp.json()
+            content = (data.get("message") or {}).get("content", "")
+            finish_reason = data.get("done_reason") or "stop"
+            return _OllamaResponse(content, finish_reason=finish_reason)
+        return self._stream(url, payload)
+
+    def _stream(self, url, payload):
+        resp = requests.post(url, json=payload, stream=True, timeout=OLLAMA_TIMEOUT_SECONDS)
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            data = json.loads(line)
+            content = (data.get("message") or {}).get("content", "")
+            if content:
+                yield _OllamaStreamChunk(content)
+            if data.get("done"):
+                return
+
+
+class _OllamaClient:
+    """Drop-in stand-in for a Groq() client, scoped to exactly the one
+    attribute path (`.chat.completions.create`) this file actually
+    calls - see _OllamaChatCompletions above."""
+
+    def __init__(self, base_url):
+        self.chat = SimpleNamespace(completions=_OllamaChatCompletions(base_url))
+
+
+def _setup_backend(backend, model):
+    """Resolves (client, error_types, model, early_error) for either
+    "groq" (default, unchanged behavior) or "ollama" (opt-in, fully
+    local - see common.py's OLLAMA_BASE_URL/DEFAULT_OLLAMA_MODEL for the
+    background). error_types is the exception tuple generate_answer()/
+    stream_answer() should catch around the actual chat-completion call
+    and turn into a friendly in-band message instead of a raw traceback
+    or a dead connection - APIStatusError for Groq (rate limits, etc.,
+    the existing 2026-09-22 fix), requests' RequestException for Ollama
+    (connection refused because Ollama isn't running, a model that
+    hasn't been pulled, a timeout on slow hardware).
+
+    early_error is set only when the backend can't even be attempted -
+    today that's just "groq" with no GROQ_API_KEY configured (the
+    existing behavior, unchanged). There's no equivalent up-front check
+    for Ollama: unlike an API key, "is Ollama actually reachable" can
+    only be answered by trying the call, so that failure surfaces via
+    error_types at call time instead, with a message that tells the
+    user what to check (see the callers' except blocks)."""
+    if backend == "ollama":
+        load_dotenv_from_repo()
+        base_url = os.environ.get("OLLAMA_BASE_URL", OLLAMA_BASE_URL)
+        resolved_model = model or os.environ.get("OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
+        return _OllamaClient(base_url), (requests.exceptions.RequestException,), resolved_model, None
+
+    load_dotenv_from_repo()
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        return None, None, None, (
+            "GROQ_API_KEY isn't set (checked the repo's .env.local) - retrieval "
+            "worked, but I can't call the answer model without it."
+        )
+    resolved_model = model or DEFAULT_GROQ_MODEL
+    return Groq(api_key=api_key), (APIStatusError,), resolved_model, None
+
+
+def _backend_error_message(backend, error):
+    """Human-readable text for whatever error_types (see _setup_backend()
+    above) actually caught - kept as its own function since both
+    generate_answer() and stream_answer() need the identical message for
+    the identical failure."""
+    if backend == "ollama":
+        return (
+            f"Couldn't reach the local Ollama server ({error}). Make sure Ollama is "
+            "running (the desktop app starts it automatically, or run `ollama serve`) "
+            "and that the model is pulled, e.g. `ollama pull deepseek-r1:7b` - or "
+            "whichever model OLLAMA_MODEL in .env.local names."
+        )
+    return (
+        f"The answer call to Groq failed ({error}). If this is a token-per-minute "
+        "rate limit, try a narrower question (one policy/document at a time) "
+        "or wait a minute and retry."
+    )
 
 
 def build_context(chunks):
@@ -387,13 +640,23 @@ def _build_user_content(query, context, project_context=None):
     return user_content
 
 
-def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, project_context=None):
+def generate_answer(query, chunks, coverage=None, model=None, project_context=None, backend="groq"):
     """coverage is the dict retrieve() now returns alongside chunks
     (architecture plan section 52) - optional so this still works if a
     caller passes chunks straight from somewhere else, but query_cli.py
     and service.py always pass it through. project_context, if given, is
     project_state.py's build_context_summary() output - see
-    _build_user_content()."""
+    _build_user_content().
+
+    backend selects which model actually generates the answer: "groq"
+    (default, unchanged from before this parameter existed) calls Groq's
+    cloud API; "ollama" calls a local Ollama instance instead, so the
+    generation step - not just retrieval - stays entirely on this
+    machine. See common.py's OLLAMA_BASE_URL/DEFAULT_OLLAMA_MODEL and
+    _setup_backend() above for how the local path is configured.
+    model, if given, overrides the backend's own default model name
+    (DEFAULT_GROQ_MODEL / DEFAULT_OLLAMA_MODEL) - leave it None to use
+    whichever default matches the chosen backend."""
     confidence = coverage.get("confidence") if coverage else None
 
     if not chunks:
@@ -406,14 +669,10 @@ def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, proj
             "unsupported_claims": [],
         }
 
-    load_dotenv_from_repo()
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
+    client, error_types, model, early_error = _setup_backend(backend, model)
+    if early_error:
         return {
-            "answer": (
-                "GROQ_API_KEY isn't set (checked the repo's .env.local) - retrieval "
-                "worked, but I can't call the answer model without it."
-            ),
+            "answer": early_error,
             "citations": [],
             "retrieved_only": True,
             "confidence": confidence,
@@ -423,8 +682,6 @@ def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, proj
         }
 
     context, citations = build_context(chunks)
-    client = Groq(api_key=api_key)
-
     system_prompt = _build_system_prompt(confidence)
 
     try:
@@ -437,7 +694,7 @@ def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, proj
             temperature=0.1,
             max_tokens=800,
         )
-    except APIStatusError as e:
+    except error_types as e:
         # Found the hard way 2026-09-22 (same class of bug already fixed
         # in proposal_review.py 2026-09-18): an uncaught APIStatusError
         # here - most often a 413 "Request too large" token-per-minute
@@ -445,13 +702,11 @@ def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, proj
         # traceback instead of a clear message. MAX_CONTEXT_CHARS in
         # build_context() above is the real fix (keeps requests under
         # budget in the first place); this is the safety net for
-        # whatever still gets through it.
+        # whatever still gets through it. Extended 2026-09-24 to also
+        # catch the Ollama backend's own failure mode (server not
+        # running, model not pulled) - see _backend_error_message().
         return {
-            "answer": (
-                f"The answer call to Groq failed ({e}). If this is a token-per-minute "
-                "rate limit, try a narrower question (one policy/document at a time) "
-                "or wait a minute and retry."
-            ),
+            "answer": _backend_error_message(backend, e),
             "citations": citations,
             "confidence": confidence,
             "verified": False,
@@ -491,13 +746,13 @@ def generate_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, proj
     }
 
 
-def stream_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, project_context=None):
+def stream_answer(query, chunks, coverage=None, model=None, project_context=None, backend="groq"):
     """Streaming counterpart to generate_answer() (architecture-plan
     Phase 5's "streaming" item). Yields ("delta", text) tuples as the
-    draft answer streams in from Groq, followed by exactly one
-    ("done", result) tuple where result is the same dict shape
-    generate_answer() returns (answer, citations, confidence, verified,
-    groundedness, unsupported_claims).
+    draft answer streams in, followed by exactly one ("done", result)
+    tuple where result is the same dict shape generate_answer() returns
+    (answer, citations, confidence, verified, groundedness,
+    unsupported_claims).
 
     result["answer"] is authoritative and can differ slightly from the
     concatenation of every "delta" text seen: the Self-RAG repair pass
@@ -513,6 +768,12 @@ def stream_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, projec
 
     project_context, if given, is project_state.py's
     build_context_summary() output - see _build_user_content().
+
+    backend/model: same meaning as generate_answer()'s own params - see
+    that function's docstring and _setup_backend() above. Ollama's
+    /api/chat streams newline-delimited JSON the same way Groq's SDK
+    streams chunk objects, so the "delta"/"done" contract below is
+    identical regardless of which backend is chosen.
     """
     confidence = coverage.get("confidence") if coverage else None
 
@@ -527,14 +788,10 @@ def stream_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, projec
         }
         return
 
-    load_dotenv_from_repo()
-    api_key = os.environ.get("GROQ_API_KEY")
-    if not api_key:
+    client, error_types, model, early_error = _setup_backend(backend, model)
+    if early_error:
         yield "done", {
-            "answer": (
-                "GROQ_API_KEY isn't set (checked the repo's .env.local) - retrieval "
-                "worked, but I can't call the answer model without it."
-            ),
+            "answer": early_error,
             "citations": [],
             "retrieved_only": True,
             "confidence": confidence,
@@ -545,7 +802,6 @@ def stream_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, projec
         return
 
     context, citations = build_context(chunks)
-    client = Groq(api_key=api_key)
     system_prompt = _build_system_prompt(confidence)
 
     try:
@@ -567,7 +823,7 @@ def stream_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, projec
                 answer_parts.append(delta)
                 yield "delta", delta
         answer_text = "".join(answer_parts)
-    except APIStatusError as e:
+    except error_types as e:
         # Same fix as generate_answer() above, adapted for a generator -
         # found the hard way 2026-09-22: an uncaught APIStatusError here
         # (e.g. a 413 token-per-minute rate limit) used to propagate all
@@ -581,13 +837,12 @@ def stream_answer(query, chunks, coverage=None, model=DEFAULT_GROQ_MODEL, projec
         # reasonable question. Yielding a "done" event with the real
         # explanation keeps the SSE contract intact (exactly one "done",
         # same shape generate_answer() returns) instead of killing the
-        # connection.
+        # connection. Extended 2026-09-24 for the Ollama backend's own
+        # failure mode (server not running, model not pulled, or a
+        # request that timed out on slow local hardware) - see
+        # _backend_error_message().
         yield "done", {
-            "answer": (
-                f"The answer call to Groq failed ({e}). If this is a token-per-minute "
-                "rate limit, try a narrower question (one policy/document at a time) "
-                "or wait a minute and retry."
-            ),
+            "answer": _backend_error_message(backend, e),
             "citations": citations,
             "confidence": confidence,
             "verified": False,

@@ -1,7 +1,14 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState, useLayoutEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
+// MIT, npm install thinking-orbs - free, no paid tier needed for the base
+// <ThinkingOrb> component (verified in node_modules/thinking-orbs/LICENSE
+// and package.json before adding, per this project's zero-cost rule).
+// Deliberately not using its `gravity` prop (a cursor-deform effect) - it
+// needs a pixel-perfect raster of this app's actual OS pointer or the
+// swap is visibly wrong, which is more than this pass needs to take on.
+import { ThinkingOrb } from "thinking-orbs";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -15,7 +22,9 @@ import VoiceModeOverlay, {
   type VoiceOverlayState,
 } from "@/components/chat/VoiceModeOverlay";
 import VoiceAgentOverlay from "@/components/chat/VoiceAgentOverlay";
-import DocumentPanel from "@/components/chat/DocumentPanel";
+import DocumentPanel, { type DocumentBlock } from "@/components/chat/DocumentPanel";
+import { FloatingComposerShell } from "@/components/chat/FloatingComposerShell";
+import { MainChatComposerBar, MainChatComposerContext } from "@/components/chat/MainChatComposer";
 // ---------------------------------------------------------------------------
 // FEATURE FLAGS - unfinished functionality
 // ---------------------------------------------------------------------------
@@ -43,7 +52,8 @@ const FEATURES: Record<
   | "diagramSvgFetch"
   | "diagramPngExport"
   | "ragSourceToggle"
-  | "localStreamingAnswers",
+  | "localStreamingAnswers"
+  | "liquidGlassComposer",
   boolean
 > = {
   modeSelector: false,
@@ -67,6 +77,13 @@ const FEATURES: Record<
   // Cloud mode and feasibility/drawing-analysis mode are unaffected either
   // way - neither backend route streams yet.
   localStreamingAnswers: true,
+  // 2026-09-28 Liquid Glass proof of concept (see
+  // components/chat/LiquidGlassSurface.tsx) - scoped to the main chat
+  // composer only via FloatingComposerShell's `glass` prop. Disable by
+  // flipping this to false; no other code path needs to change since
+  // FloatingComposerShell falls back to the plain CSS surface whenever
+  // `glass` is false/omitted.
+  liquidGlassComposer: true,
 };
 
 export interface Citation {
@@ -155,8 +172,46 @@ export interface ChatMessage {
     // different data, different renderer.
     reviewChart?: {
       checklist: Array<{ item: string; status: string; note?: string }>;
+      // The full issues list (proposal_review.py's REVIEW_SYSTEM_PROMPT
+      // "issues" shape: topic/issue/suggested_change) - added 2026-09-23
+      // so the in-chat summary can show the actual "how to fix this"
+      // guidance, not just a pass/fail checklist. The backend has always
+      // generated suggested_change per issue and note per checklist item
+      // (see the full PDF/markdown report), but the chat widget was
+      // dropping both and only showing item names with a red/green dot -
+      // explicit user feedback: "we are supposed to give suggestions...
+      // where it fails how can it be avoided", i.e. the fix belongs
+      // in the very first thing they see, not only in a PDF they have
+      // to separately open.
+      issues?: Array<{
+        topic?: string;
+        issue?: string;
+        suggested_change?: string;
+        // Second-opinion cross-check (local-rag/proposal_review.py's
+        // _verify_issues(), added 2026-09-24, karpathy/llm-council's
+        // "have another model check the first one's work" pattern) -
+        // undefined means this issue was never independently checked
+        // (past the backend's per-report cap, or that pass failed), a
+        // weaker claim than a pass, so ReviewSummaryChart below must
+        // only ever render a badge when this key is actually present -
+        // never treat "undefined" as "verified".
+        verified?: boolean;
+        verification_note?: string;
+      }>;
       issuesCount: number;
-      level: "Low" | "Medium" | "High" | null;
+      // "Incomplete" (added 2026-09-28 reliability fix, points 1/2/5) is
+      // a genuinely distinct state from Low/Medium/High, not a fourth
+      // risk tier - it means some document excerpts couldn't be
+      // assessed, so no definitive compliance verdict is shown; see
+      // ReviewSummaryChart's own handling and proposal_review.py's
+      // compliance_status field.
+      level: "Low" | "Medium" | "High" | "Incomplete" | null;
+      // assessment_coverage/evidence_confidence (same 2026-09-28 fix) -
+      // kept as their own separate fields, never folded into `level` or
+      // the checklist itself, so a partial assessment is always visibly
+      // partial rather than silently looking like a complete one.
+      coverage?: { assessedUnits: number; totalUnits: number; pct: number; complete: boolean } | null;
+      evidenceConfidence?: string | null;
     };
   };
   diagramData?: DiagramData;
@@ -234,7 +289,7 @@ function ArrowUpRightIcon({ className }: { className?: string }) {
       viewBox="0 0 24 24"
       fill="none"
       stroke="currentColor"
-      strokeWidth={2}
+      strokeWidth={1.8}
       strokeLinecap="round"
       strokeLinejoin="round"
       className={className}
@@ -343,6 +398,37 @@ function looksIncompleteEvidence(text: string) {
     /[:;,-]$/.test(lastLine) ||
     /^(\d+\.|[a-z]\.)$/i.test(lastLine)
   );
+}
+
+// Routes a chat message to live clause editing (runDocumentEdit, via
+// /api/local-rag-edit-clause) instead of the normal chat/review-chat
+// path - see that function and local-rag/document_edit.py's own module
+// docstring for the full feature. Deliberately conservative: editing is
+// a WRITE against a persisted document, so an ambiguous message falls
+// through to the normal (read-only) Q&A path rather than risk rewriting
+// the wrong paragraph. Two ways to match:
+//   1. An explicit reference ("paragraph 4", "clause 6", "#3") - mirrors
+//      document_edit.py's own _explicit_paragraph_reference() regex, so
+//      the frontend's routing guess and the backend's actual target-
+//      finding agree on what counts as "explicit".
+//   2. An edit-ish verb together with a paragraph/clause/section word or
+//      phrase ("reframe the parking paragraph", "the bit about parking
+//      needs to mention EV charging").
+// Being explicit ("paragraph 4: ...") always routes correctly; this is
+// a heuristic for everything short of that, not a guarantee - the
+// backend's own find_target_paragraph() still does the real, careful
+// match once a message gets here.
+const EDIT_EXPLICIT_REF_RE =
+  /\b(?:paragraph|para|clause|point|section)\s*#?\s*\d+\b|#\d+\b/i;
+const EDIT_VERB_RE =
+  /\b(reframe|reword|rewrite|rephrase|revise|edit|change|update|replace|fix|tweak|shorten|expand|clarify|strengthen|soften|add|remove|mention|include)\b/i;
+const EDIT_TARGET_RE =
+  /\b(paragraph|para|clause|point|section|sentence|line|bit about|part about|wording)\b/i;
+
+function looksLikeEditInstruction(text: string): boolean {
+  if (!text.trim()) return false;
+  if (EDIT_EXPLICIT_REF_RE.test(text)) return true;
+  return EDIT_VERB_RE.test(text) && EDIT_TARGET_RE.test(text);
 }
 
 function buildExcerpt(text: string, max = 240) {
@@ -569,6 +655,16 @@ const SpeakerIcon = (props: IconProps) => (
   <Svg {...props}>
     <path d="M4 9v6h4l5 5V4L8 9H4z" />
     <path d="M17 8a5 5 0 0 1 0 8" />
+  </Svg>
+);
+
+const WaveformIcon = (props: IconProps) => (
+  <Svg {...props}>
+    <path d="M4 10v4" />
+    <path d="M8 6v12" />
+    <path d="M12 3v18" />
+    <path d="M16 6v12" />
+    <path d="M20 10v4" />
   </Svg>
 );
 
@@ -874,11 +970,29 @@ function ReviewSummaryChart({
 }: {
   data: {
     checklist: Array<{ item: string; status: string; note?: string }>;
+    issues?: Array<{
+      topic?: string;
+      issue?: string;
+      suggested_change?: string;
+      // See ChatMessage.metadata.reviewChart's matching field comment -
+      // undefined means "not independently checked", never a false pass.
+      verified?: boolean;
+      verification_note?: string;
+    }>;
     issuesCount: number;
-    level: "Low" | "Medium" | "High" | null;
+    level: "Low" | "Medium" | "High" | "Incomplete" | null;
+    coverage?: { assessedUnits: number; totalUnits: number; pct: number; complete: boolean } | null;
+    evidenceConfidence?: string | null;
   };
 }) {
-  const { checklist, issuesCount, level } = data;
+  const { checklist, issues, issuesCount, level, coverage, evidenceConfidence } = data;
+  // "Incomplete" (2026-09-28 reliability fix) is never treated as a
+  // fourth risk tier - it replaces the ring's own "X% present" reading
+  // with the honest "X% assessed" coverage number instead, since a
+  // present/missing split computed from a partial assessment isn't a
+  // real answer to "is this compliant" (see report_render.py's matching
+  // compliance_status handling for the full report).
+  const isIncomplete = level === "Incomplete";
   const size = 92;
   const stroke = 14;
   const r = (size - stroke) / 2;
@@ -891,6 +1005,8 @@ function ReviewSummaryChart({
     if (counts[c.status] !== undefined) counts[c.status] += 1;
   }
   const pctPresent = total > 0 ? Math.round((counts.present / total) * 100) : 0;
+  const displayPct = isIncomplete ? coverage?.pct ?? 0 : pctPresent;
+  const displayLabel = isIncomplete ? "assessed" : "present";
 
   // Same gap convention as the backend (a small visual break between
   // segments) - expressed here as a fraction of the circle rather than a
@@ -907,8 +1023,13 @@ function ReviewSummaryChart({
     offsetFraction += n / total;
   }
 
-  const levelColor =
-    level === "High" ? "#d03b3b" : level === "Medium" ? "#fab219" : "#0ca30c";
+  const levelColor = isIncomplete
+    ? "#2a78d6"
+    : level === "High"
+    ? "#d03b3b"
+    : level === "Medium"
+    ? "#fab219"
+    : "#0ca30c";
 
   if (total === 0) return null;
 
@@ -953,9 +1074,9 @@ function ReviewSummaryChart({
           </svg>
           <div className="absolute inset-0 flex flex-col items-center justify-center">
             <span className="text-base font-semibold text-neutral-900">
-              {pctPresent}%
+              {displayPct}%
             </span>
-            <span className="text-[9px] text-neutral-500">present</span>
+            <span className="text-[9px] text-neutral-500">{displayLabel}</span>
           </div>
         </div>
 
@@ -966,7 +1087,7 @@ function ReviewSummaryChart({
                 className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-medium"
                 style={{ color: levelColor, backgroundColor: `${levelColor}1a` }}
               >
-                {level} attention
+                {isIncomplete ? "Incomplete — not final" : `${level} attention`}
               </span>
             )}
             <span className="text-neutral-500">
@@ -974,33 +1095,114 @@ function ReviewSummaryChart({
               {total === 1 ? "" : "s"} checked
             </span>
           </div>
+          {isIncomplete && (
+            <p className="mb-2 text-[11px] leading-snug text-neutral-500">
+              Only {coverage?.assessedUnits ?? 0} of {coverage?.totalUnits ?? 0} document
+              excerpt{coverage?.totalUnits === 1 ? "" : "s"} could be assessed — a "missing"
+              item below may simply be in the part that wasn't checked, not genuinely absent.
+              {evidenceConfidence ? ` Evidence confidence: ${evidenceConfidence}.` : ""}
+            </p>
+          )}
 
-          <div className="space-y-1">
-            {checklist.slice(0, 6).map((c, i) => (
-              <motion.div
-                key={`${c.item}-${i}`}
-                initial={{ opacity: 0, x: -6 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ duration: 0.25, delay: 0.25 + i * 0.06 }}
-                className="flex items-center gap-2 text-xs text-neutral-700"
-              >
-                <span
-                  className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white"
-                  style={{ backgroundColor: REVIEW_STATUS_COLORS[c.status] || "#898781" }}
+          {/* Missing/unclear items first (most-attention-first, same order
+              as the donut segments and the PDF's own checklist table) -
+              "present" items don't need an explanation, so they're not
+              worth the vertical space here. Each row now shows the
+              backend's own `note` text (proposal_review.py's REVIEW_
+              SYSTEM_PROMPT: "if missing or unclear, what to add") right
+              under the item name, not just a pass/fail dot - added
+              2026-09-23 per explicit feedback that the checklist alone
+              ("just a list of X marks") wasn't actually telling the user
+              how to fix anything, even though that guidance already
+              existed in the full PDF report the whole time. */}
+          <div className="space-y-2">
+            {[...checklist]
+              .sort((a, b) => {
+                const rank: Record<string, number> = { missing: 0, unclear: 1, present: 2 };
+                return (rank[a.status] ?? 3) - (rank[b.status] ?? 3);
+              })
+              .slice(0, 4)
+              .map((c, i) => (
+                <motion.div
+                  key={`${c.item}-${i}`}
+                  initial={{ opacity: 0, x: -6 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ duration: 0.25, delay: 0.25 + i * 0.06 }}
+                  className="flex items-start gap-2 text-xs"
                 >
-                  {REVIEW_STATUS_ICON[c.status] || "?"}
-                </span>
-                <span className="truncate">{c.item}</span>
-              </motion.div>
-            ))}
-            {checklist.length > 6 && (
+                  <span
+                    className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white"
+                    style={{ backgroundColor: REVIEW_STATUS_COLORS[c.status] || "#898781" }}
+                  >
+                    {REVIEW_STATUS_ICON[c.status] || "?"}
+                  </span>
+                  <div className="min-w-0">
+                    <span className="font-medium text-neutral-800">{c.item}</span>
+                    {c.note && c.status !== "present" && (
+                      <p className="mt-0.5 text-[11px] leading-snug text-neutral-500">
+                        {c.note}
+                      </p>
+                    )}
+                  </div>
+                </motion.div>
+              ))}
+            {checklist.length > 4 && (
               <p className="pl-6 text-[11px] text-neutral-500">
-                +{checklist.length - 6} more in the full report
+                +{checklist.length - 4} more in the full report
               </p>
             )}
           </div>
         </div>
       </div>
+
+      {/* Suggested fixes - the same "suggested_change" prose the full PDF
+          report shows per issue (report_render.py's Issues section),
+          surfaced here too so a fix is visible without downloading
+          anything. Optional: only present on messages created after this
+          field was added, so a saved/reloaded older conversation just
+          shows the checklist above without this section - see
+          ChatMessage.metadata.reviewChart's own comment. */}
+      {issues && issues.some((i) => i.suggested_change) && (
+        <div className="mt-3 border-t border-neutral-950/10 pt-3">
+          <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-neutral-500">
+            Suggested fixes
+          </p>
+          <div className="space-y-2">
+            {issues.slice(0, 3).map((iss, i) => (
+              <div key={`${iss.topic}-${i}`} className="text-xs text-neutral-700">
+                {iss.topic && (
+                  <span className="font-medium text-neutral-800">{iss.topic}: </span>
+                )}
+                <span className="text-neutral-600">
+                  {iss.suggested_change || iss.issue}
+                </span>
+                {/* Second-opinion badge (local-rag/proposal_review.py's
+                    _verify_issues(), added 2026-09-24) - `verified` is
+                    only ever present when the backend actually ran that
+                    check on this issue; undefined (the common case for an
+                    issue past its per-report cap) renders nothing, never
+                    a false pass - see the reviewChart type's own comment. */}
+                {iss.verified === true && (
+                  <span className="ml-1.5 text-emerald-600">✓ verified</span>
+                )}
+                {iss.verified === false && (
+                  <span
+                    className="ml-1.5 text-amber-600"
+                    title={iss.verification_note || "Second-opinion check flagged this claim"}
+                  >
+                    ⚠ needs a second look
+                  </span>
+                )}
+              </div>
+            ))}
+            {issues.length > 3 && (
+              <p className="text-[11px] text-neutral-500">
+                +{issues.length - 3} more in the full report
+              </p>
+            )}
+          </div>
+        </div>
+      )}
     </motion.div>
   );
 }
@@ -1009,6 +1211,12 @@ function ReviewSummaryChart({
 
 export default function ChatInterface() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // Only used for the two motion enhancements below (the welcome/first-
+  // message crossfade) - DESIGN.md requires full prefers-reduced-motion
+  // support, and unlike CSS .rise/.press (already collapsed by the global
+  // reduced-motion media query) Framer Motion animates in JS, so it needs
+  // its own explicit check.
+  const shouldReduceMotion = useReducedMotion();
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1038,25 +1246,117 @@ export default function ChatInterface() {
   const [localRagStatus, setLocalRagStatus] = useState<
     "unknown" | "checking" | "reachable" | "unreachable"
   >("unknown");
+  // Fully-local generation (added 2026-09-24; made automatic 2026-09-25 -
+  // see local-rag/answer.py's `backend` parameter). Only meaningful when
+  // ragSource is "local": "groq" (default) answers via Groq's cloud API
+  // same as before this existed; "ollama" answers via a local Ollama
+  // instance too, so nothing about the query leaves this machine.
+  // Originally an opt-in checkbox the user had to notice and tick after
+  // switching to "Local (offline)" - user feedback: switching to Local
+  // should just mean fully local, automatically, with no extra control
+  // to discover. The health-check effect below now sets this directly
+  // from ollamaStatus (available + default model pulled -> "ollama",
+  // otherwise "groq") whenever ragSource becomes "local" - there is no
+  // longer any UI for the user to set this by hand.
+  const [ragBackend, setRagBackend] = useState<"groq" | "ollama">("groq");
+  const [ollamaStatus, setOllamaStatus] = useState<{
+    available: boolean;
+    models: string[];
+    default_model: string;
+    default_model_pulled: boolean;
+  }>({ available: false, models: [], default_model: "", default_model_pulled: false });
 
   const [isModeMenuOpen, setIsModeMenuOpen] = useState(false);
 
-  // Side panel previewing a generated document (PDF for now) next to the
-  // chat - see components/chat/DocumentPanel.tsx. Added 2026-09-19,
-  // originally verified against a hardcoded sample report via a
-  // temporary test button; now opened for real by runProposalReview
-  // below with a live report_files.pdf_url from local-rag's
-  // /proposal-review.
+  // Side panel next to the chat - see components/chat/DocumentPanel.tsx.
+  // Added 2026-09-19, originally verified against a hardcoded sample
+  // report via a temporary test button; now opened for real by
+  // runProposalReview below.
+  //
+  // Rewritten 2026-09-23, FIFTH pass - this is the one that actually
+  // matches the original request. Re-reading it after repeated "you're
+  // still returning me the original document, not the report" feedback:
+  // "if the report is generated based on the documents that I upload
+  // then THAT is shown in the view and can be edited" - "that" is the
+  // REPORT, not the document. The second pass (previous version of this
+  // comment) read it backwards and made the uploaded document the main
+  // view with the report demoted to a small button - which is exactly
+  // what kept looking wrong no matter how many times the button wiring
+  // was checked, because the WRONG FILE was the main view by design, not
+  // by bug.
+  //
+  // So: `url`/`filename` is now the GENERATED COMPLIANCE REPORT
+  // (report_files.pdf_url) - the primary, read-only view (confirmed
+  // explicitly: the report itself isn't paragraph-editable, only
+  // downloadable/readable). `documentUrl`/`documentFilename` is the
+  // uploaded document - demoted to the small secondary button, still
+  // editable via chat (looksLikeEditInstruction/runDocumentEdit below
+  // still targets it through `docId`), just no longer what's rendered in
+  // the main PDF view. There's no more in-panel page-flash on an edit
+  // (see the highlightPage removal below) since the document being
+  // edited isn't the thing on screen anymore - runDocumentEdit's chat
+  // reply is now where that confirmation lives instead.
   const [documentPanel, setDocumentPanel] = useState<{
     url: string;
     filename: string;
-    // Live animated report view URL (report_files.html_url) - see
-    // DocumentPanel's new "report" view, added alongside the PDF one
-    // 2026-09-21 for "animated report visuals". Optional: only set when
-    // the backend's live-HTML render succeeded (see build_reports'
-    // live_html_error for why it might not have).
-    htmlUrl?: string;
+    // The uploaded document's own (live-regenerated) PDF - secondary
+    // download only now, see the block comment above. Undefined in the
+    // rare case persistence failed (see runProposalReview) - editing is
+    // simply unavailable then, same framing as before this rewrite.
+    documentUrl?: string;
+    documentFilename?: string;
+    // The persisted document's id (local-rag/document_edit.py's
+    // save_document()) - still needed even though the document isn't
+    // the main view, since chat-driven edits (runDocumentEdit) target it
+    // by this id. Only the FIRST uploaded document gets one (matches
+    // this panel's existing one-document-at-a-time design).
+    docId?: string;
+    // The REPORT's own editable identity (2026-09-25, Report-tab
+    // correction) - completely separate from docId above, which is the
+    // uploaded SOURCE. Undefined when local-rag couldn't persist the
+    // report's blocks that time (best-effort, see service.py) - the
+    // Report tab then just falls back to the plain PDF preview (see
+    // DocumentPanel.tsx's own `assessment ? ... : ...` fallback).
+    reportDocId?: string;
   } | null>(null);
+  const [isEditingClause, setIsEditingClause] = useState(false);
+
+  // The report's own block role map ({localId, kind, index}[] - GET
+  // /proposal-review's report_blocks, see service.py's save_report_blocks())
+  // - what StructuredReportView (DocumentPanel.tsx) uses to know which
+  // rendered DOM node maps to which local_id, the DOM equivalent of
+  // documentParagraphs' bbox index just below for the source PDF.
+  const [reportBlocks, setReportBlocks] = useState<{ localId: number; kind: string; index: number | null }[]>([]);
+
+  // The uploaded document's own blocks (id/page/bbox/text), fetched once
+  // via the existing GET /api/local-rag-document proxy (see that route's
+  // own header comment - it already existed, just wasn't called from
+  // here yet) whenever a new docId shows up. This is the index the new
+  // "Document" tab's InteractiveDocumentView (DocumentPanel.tsx,
+  // 2026-09-25 inline-block-editing milestone) uses to resolve an
+  // arbitrary text selection back to a specific block - see that
+  // component's own docstring. Re-fetched after every applied/undone
+  // block edit too (below), so a second selection on the same session
+  // resolves against current text/bboxes, not a stale snapshot.
+  const [documentParagraphs, setDocumentParagraphs] = useState<DocumentBlock[]>([]);
+  const fetchDocumentParagraphs = useCallback(async (docId: string) => {
+    try {
+      const res = await fetch(`/api/local-rag-document?doc_id=${encodeURIComponent(docId)}`);
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data?.success && Array.isArray(data.paragraphs)) {
+        setDocumentParagraphs(
+          data.paragraphs.map((p: any) => ({ id: p.id, page: p.page, bbox: p.bbox, text: p.text }))
+        );
+      }
+    } catch {
+      // Best-effort - the Document tab just can't resolve selections to
+      // a block yet if this fails; the Report tab and every other
+      // existing flow are completely unaffected.
+    }
+  }, []);
+  useEffect(() => {
+    if (documentPanel?.docId) fetchDocumentParagraphs(documentPanel.docId);
+  }, [documentPanel?.docId, fetchDocumentParagraphs]);
 
   // Proposal compliance review (local-rag/service.py's /proposal-review +
   // /proposal-review-chat, proxied via app/api/local-rag-proposal-review*)
@@ -1085,6 +1385,13 @@ export default function ChatInterface() {
 
   const endRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  // How much bottom padding the scrollable message list reserves so the
+  // floating composer never covers the last message - measured live by
+  // FloatingComposerShell's ResizeObserver (composer height changes as
+  // uploaded-doc cards, the pending-upload card, or the active-review
+  // chip appear/disappear below it). Same technique DocumentPanel's own
+    // composerReserve already used before this shell existed.
+  const [composerReserve, setComposerReserve] = useState(96);
 
   // How tall the composer is allowed to get before it scrolls instead of
   // growing. Six lines: past that the box starts eating the conversation it is
@@ -1149,6 +1456,53 @@ export default function ChatInterface() {
       return next;
     });
   }, []);
+  // Hide/unhide toggle for the right-hand DocumentPanel (see its own prop
+  // comment) - added 2026-09-24 per explicit request: "I also want the
+  // option on the right hand side where I can get the option to hide and
+  // unhide the preview of the generated document." Mirrors
+  // isSidebarCollapsed's own persist-to-localStorage pattern immediately
+  // above, for the same reason (the choice sticks across reloads). This
+  // is deliberately separate from documentPanel itself: nulling
+  // documentPanel (onClose, handleNewChat) discards the report entirely,
+  // while this only hides/shows it - reset to false whenever a NEW report
+  // is opened (see runProposalReview) so a fresh review always opens
+  // visible regardless of whether a previous one was left collapsed.
+  const [isDocumentPanelCollapsed, setIsDocumentPanelCollapsed] = useState(false);
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem("uaa-document-panel-collapsed");
+      if (stored === "1") setIsDocumentPanelCollapsed(true);
+    } catch {
+      // ignore - localStorage unavailable, panel just stays expanded
+    }
+  }, []);
+  const toggleDocumentPanelCollapsed = useCallback(() => {
+    setIsDocumentPanelCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem("uaa-document-panel-collapsed", next ? "1" : "0");
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  }, []);
+  // Fullscreen (isExpanded) and Report/Document tab (viewMode) state for
+  // DocumentPanel - lifted here 2026-09-27 (fullscreen-composer-
+  // interactivity fix pass, item 4: "preserve panel state... at least
+  // during the current session, ideally at the workspace/layout level
+  // rather than inside the panel component itself... do not reset the
+  // panel just because another component rerenders"). Previously local
+  // useState inside DocumentPanel itself, so any remount of that
+  // component (including via the onClose bug fixed the same pass)
+  // silently reset both back to their defaults. Mirrors
+  // isDocumentPanelCollapsed immediately above, minus the localStorage
+  // persistence - only same-session persistence was asked for here.
+  const [isDocumentPanelExpanded, setIsDocumentPanelExpanded] = useState(false);
+  const toggleDocumentPanelExpanded = useCallback(() => {
+    setIsDocumentPanelExpanded((prev) => !prev);
+  }, []);
+  const [documentPanelViewMode, setDocumentPanelViewMode] = useState<"report" | "document">("report");
   const [loadingConversationId, setLoadingConversationId] = useState<
     string | null
   >(null);
@@ -1157,9 +1511,121 @@ export default function ChatInterface() {
     setVisitorId(getVisitorId());
   }, []);
 
+  // Tracks the message count as of the previous run of the effect below,
+  // across renders - a plain variable would reset every render, a ref
+  // survives. Needed to reliably detect the *transition* from empty to
+  // non-empty (see the effect's own comment), not just the current length.
+  const prevMessagesLengthRef = useRef(0);
+
+  // Scroll-anchoring fix (2026-09-25, diagnosed live via the real running
+  // app, not guessed): a ref on the chat's own scrollable container
+  // (attached to the overflow-y-auto div below) plus a ref tracking
+  // whether the user is currently scrolled near its bottom. Kept live by
+  // a plain scroll listener rather than read at effect-run time, because
+  // by the time the effect a few lines down runs, the new message has
+  // ALREADY been appended to the DOM - scrollTop doesn't move on its own
+  // just because content was added below it, so this ref still correctly
+  // reflects where the user was BEFORE this update, which is exactly the
+  // question that matters: were they already following the bottom, or
+  // had they moved away? Starts true - an empty/fresh view is trivially
+  // "at the bottom."
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  const isNearBottomRef = useRef(true);
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isLoading]);
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const NEAR_BOTTOM_PX = 120;
+    const handleScroll = () => {
+      isNearBottomRef.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_PX;
+    };
+    handleScroll();
+    el.addEventListener("scroll", handleScroll, { passive: true });
+    return () => el.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  // Scrolls ONLY chatScrollRef - never endRef.scrollIntoView(), which per
+  // spec is free to also adjust the scrollTop of any scrollable ancestor
+  // it passes through (including an `overflow: hidden` one) on its way to
+  // the target. That ancestor-walk is the real mechanism behind the
+  // "whole page jumps up when a starter card is clicked" bug: this app's
+  // shell (page.tsx's outer div, and html/body in globals.css) is only
+  // ever made scroll-INVISIBLE, not scroll-inert, so scrollIntoView()
+  // calling it mid-layout (during the WelcomeScreen -> messages crossfade,
+  // or on the first token of the very first answer) can nudge one of
+  // those ancestors instead of, or as well as, chatScrollRef itself.
+  // Element.scrollTo() on chatScrollRef directly can only ever move that
+  // one element, by construction - there is no ancestor-walk to guard
+  // against.
+  const scrollChatToBottom = useCallback((behavior: ScrollBehavior) => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior });
+  }, []);
+
+  useEffect(() => {
+    const wasEmpty = prevMessagesLengthRef.current === 0;
+    prevMessagesLengthRef.current = messages.length;
+
+    // First guard, from a real bug: setMessages([]) in handleNewChat() is a
+    // *new* array reference even when messages was already empty (clicking
+    // "New chat" while already on the welcome screen), so this effect fired
+    // on every click. endRef sits at the bottom of a container that's
+    // min-h-[calc(100vh-16rem)] tall - scrolling it into view dragged the
+    // whole pane down past WelcomeScreen's centered content, which is what
+    // produced the "composer near the top, blank space below, sidebar
+    // scrolled oddly" glitch reported after New Chat. Nothing to scroll to
+    // when there's no message list.
+    if (messages.length === 0) return;
+
+    // Second guard, from the same symptom reported again - this time from
+    // clicking a suggestion card (empty -> one message), not New Chat. The
+    // welcome/messages crossfade a few hundred lines down uses
+    // AnimatePresence mode="wait": the outgoing WelcomeScreen branch stays
+    // mounted, mid-exit-animation, for ~140ms before the messages branch
+    // mounts. This effect fires the instant `messages` changes, which is
+    // well before that animation finishes - so scrollIntoView was running
+    // against a DOM that still had WelcomeScreen's full-height layout in
+    // it, landing the scroll position wherever that half-finished layout
+    // put it, with nothing to correct it once the real layout settled in.
+    // Skipping the empty->non-empty transition specifically sidesteps the
+    // race outright rather than trying to time around it: the crossfade
+    // already brings the message area into view on its own, and there's
+    // nothing below the fold yet on message #1 anyway. Every later message
+    // (2nd, 3rd, regenerate, ...) still auto-scrolls exactly as before.
+    if (wasEmpty) return;
+
+    // Root cause of the reported "screen shifts up... then shifts down"
+    // during a document edit: runProposeEdit() echoes the typed
+    // instruction into `messages` the instant it's submitted, and
+    // chooseEditAlternative() appends a second confirmation message once
+    // a choice is applied - each push re-runs this effect, which was
+    // UNCONDITIONALLY smooth-scrolling the whole chat pane to its bottom
+    // sentinel regardless of where the user was actually reading. That's
+    // invisible for an ordinary quick Q&A turn (the user is normally
+    // still sitting at the bottom waiting), but a document edit has a
+    // real human gap in the middle - resolving three alternatives,
+    // reading them over in DocumentPanel, picking one - during which the
+    // user has very likely scrolled the chat away from the bottom (or
+    // never left DocumentPanel's own area at all), so the SECOND, later
+    // scroll yanked them back down with no warning. Fix: only follow new
+    // content when the user was already near the bottom - never steal
+    // their scroll position from wherever they've moved to.
+    if (!isNearBottomRef.current) return;
+
+    scrollChatToBottom("smooth");
+    // 2026-09-25: added `error` to this effect's own dependency array.
+    // Found live: a runDocumentEdit() failure (e.g. the edit-clause
+    // route's own timeout) calls setError(...) without touching
+    // `messages` or `isLoading` at all, so this effect never re-ran and
+    // the "Backend error: ..." banner (rendered right above endRef, a
+    // few hundred lines down) landed in the DOM below the fold with
+    // nothing to scroll it into view - looked exactly like the message
+    // vanished into nothing, when it had actually just failed silently
+    // off-screen. Same fix applies to any other setError() caller that
+    // doesn't otherwise touch messages/isLoading (runProposalReview,
+    // handleFileUpload's own catch blocks) - all share this one effect.
+  }, [messages, isLoading, error]);
 
   function handleNewChat() {
     chatSessionRef.current += 1;
@@ -1175,6 +1641,9 @@ export default function ChatInterface() {
     setIsReviewing(false);
     setActiveReview(null);
     setDocumentPanel(null);
+    setIsDocumentPanelCollapsed(false);
+    setIsDocumentPanelExpanded(false);
+    setDocumentPanelViewMode("report");
     stopListening();
     stopSpeaking();
     setIsVoiceOverlayOpen(false);
@@ -1364,6 +1833,11 @@ export default function ChatInterface() {
       const formData = new FormData();
       formData.append("files", file);
       if (postcode.trim()) formData.append("postcode", postcode.trim());
+      // 2026-09-25: same ragBackend chat answers and document edits
+      // already send - a compliance review now runs fully local (zero
+      // Groq calls) whenever Ollama is reachable/pulled, automatically,
+      // instead of always hitting Groq regardless of local mode.
+      formData.append("backend", ragBackend);
 
       const res = await fetch("/api/local-rag-proposal-review", {
         method: "POST",
@@ -1381,25 +1855,96 @@ export default function ChatInterface() {
       const checklist = assessment.checklist || [];
       const missing = checklist.filter((c: any) => c.status === "missing").length;
       const unclear = checklist.filter((c: any) => c.status === "unclear").length;
+      // compliance_status/assessment_coverage/evidence_confidence
+      // (2026-09-28 reliability fix, points 1/2/5): a review whose
+      // excerpts partly failed to assess must never show a confident
+      // Low/Medium/High word here, the same rule report_render.py's own
+      // compliance_status handling enforces on the downloadable report -
+      // this chat summary is the FIRST thing the user sees, so it's the
+      // most important place to get this right, not an afterthought.
+      const complianceStatus: string = review.compliance_status || (review.assessment_failed ? "failed" : "final");
+      const coverage = review.assessment_coverage
+        ? {
+            assessedUnits: review.assessment_coverage.assessed_units ?? 0,
+            totalUnits: review.assessment_coverage.total_units ?? 0,
+            pct: review.assessment_coverage.pct ?? 0,
+            complete: !!review.assessment_coverage.complete,
+          }
+        : null;
+      const evidenceConfidence: string | null = review.evidence_confidence || null;
       // Same transparent, disclosed heuristic as report_render.py's
       // _compute_risk() - kept in sync deliberately (see that function's
       // own comment) so the chat summary's risk word never disagrees
-      // with the badge on the report the user is looking at.
-      const level = review.assessment_failed
-        ? null
-        : missing >= 2 || issues.length >= 4
-        ? "High"
-        : missing >= 1 || unclear >= 2 || issues.length >= 1
-        ? "Medium"
-        : "Low";
+      // with the badge on the report the user is looking at. Only
+      // computed for a "final" (full-coverage) result - "incomplete"
+      // gets its own distinct label below, never a Low/Medium/High word.
+      const level =
+        complianceStatus !== "final"
+          ? complianceStatus === "incomplete"
+            ? "Incomplete"
+            : null
+          : missing >= 2 || issues.length >= 4
+          ? "High"
+          : missing >= 1 || unclear >= 2 || issues.length >= 1
+          ? "Medium"
+          : "Low";
 
       setActiveReview({ review, reportFiles, label: file.name });
 
+      // The first persisted uploaded document (local-rag/document_edit.py
+      // save_document(), see app/api/local-rag-proposal-review/route.ts's
+      // `documents` field) - only the first, matching this panel's
+      // existing one-document-at-a-time design. Undefined when
+      // persistence wasn't possible for some reason.
+      const firstDocument = Array.isArray(data.documents)
+        ? data.documents[0]
+        : undefined;
+      // The REPORT's own editable identity (2026-09-25, Report-tab
+      // correction) - see the documentPanel/reportBlocks state comments
+      // above. Independent of firstDocument/docId - a review whose
+      // source document failed to persist can still have an editable
+      // report, and vice versa.
+      const reportDocId: string | undefined =
+        typeof data.reportDocId === "string" ? data.reportDocId : undefined;
+      setReportBlocks(Array.isArray(data.reportBlocks) ? data.reportBlocks : []);
+
+      // A fresh review always opens visible, even if a previous report was
+      // left collapsed (see isDocumentPanelCollapsed's own comment above) -
+      // the user just asked for a new report, so hiding it by default
+      // would be surprising.
+      setIsDocumentPanelCollapsed(false);
+      // Same reasoning for fullscreen/tab state (item 4, 2026-09-27 pass):
+      // a brand new report shouldn't silently inherit fullscreen or the
+      // Document tab from whatever the previous report was left in.
+      setIsDocumentPanelExpanded(false);
+      setDocumentPanelViewMode("report");
+
       if (reportFiles?.pdf_url) {
+        // The normal case, per the documentPanel state comment above:
+        // the generated REPORT is the main view - it's the whole point
+        // of running a review, and it's what "that is shown in the view"
+        // referred to. The uploaded document rides along as the small
+        // secondary download, still editable via chat through docId.
         setDocumentPanel({
           url: reportFiles.pdf_url,
-          filename: reportFiles.pdf_filename || file.name,
-          htmlUrl: reportFiles.html_url,
+          filename: reportFiles.pdf_filename || `${file.name.replace(/\.[^./]+$/, "")}-report.pdf`,
+          documentUrl: firstDocument?.url,
+          documentFilename: firstDocument?.filename || file.name,
+          docId: firstDocument?.docId,
+          reportDocId,
+        });
+      } else if (firstDocument?.url) {
+        // Fallback: report generation failed for some reason (see
+        // report_render.py's build_reports() - a WeasyPrint failure
+        // never blocks the rest of the review, it just means no PDF).
+        // Show the uploaded document itself instead of leaving the panel
+        // empty - there's no report to also offer as a secondary button
+        // since it doesn't exist this run.
+        setDocumentPanel({
+          url: firstDocument.url,
+          filename: firstDocument.filename || file.name,
+          docId: firstDocument.docId,
+          reportDocId,
         });
       }
 
@@ -1439,25 +1984,37 @@ export default function ChatInterface() {
         } for compliance.`,
         timestamp: new Date(),
       };
-      const summaryText = review.assessment_failed
-        ? `${siteNote}I couldn't generate a full assessment for this one — ${
-            review.parse_error || "the model didn't return a usable answer"
-          }. Retrieval itself worked, so you can still ask me what evidence was found, or try the review again.`
-        : `${siteNote}Review complete${
-            level ? ` — overall attention needed: ${level}` : ""
-          }. I found ${issues.length} issue${
-            issues.length === 1 ? "" : "s"
-          } and ${missing} required item${
-            missing === 1 ? "" : "s"
-          } missing from the checklist. I've opened the full report in the panel — ask me anything about it, or download it from there.`;
+      // complianceStatus === "incomplete" (2026-09-28 reliability fix,
+      // points 1/2/5) gets its OWN summary, distinct from both "failed"
+      // and a normal complete review - it must never read like a
+      // confident result ("Review complete — attention needed: ...")
+      // when some of the document genuinely wasn't checked.
+      const summaryText =
+        complianceStatus === "failed"
+          ? `${siteNote}I couldn't generate a full assessment for this one — ${
+              review.parse_error || "the model didn't return a usable answer"
+            }. Retrieval itself worked, so you can still ask me what evidence was found, or try the review again.`
+          : complianceStatus === "incomplete"
+          ? `${siteNote}I could only assess part of this document — ${
+              coverage ? `${coverage.assessedUnits} of ${coverage.totalUnits} excerpt(s)` : "some excerpts"
+            } (${coverage?.pct ?? 0}% coverage)${
+              review.parse_error ? `: ${review.parse_error}` : ""
+            }. This is not a final compliance result — a "missing" item below may just be in the part that couldn't be checked. I've opened what was found in the panel; you can try the review again for a complete result, or ask me what evidence was retrieved.`
+          : `${siteNote}Review complete${
+              level ? ` — overall attention needed: ${level}` : ""
+            }. I found ${issues.length} issue${
+              issues.length === 1 ? "" : "s"
+            } and ${missing} required item${
+              missing === 1 ? "" : "s"
+            } missing from the checklist. I've opened the compliance report in the panel — ask me anything about it, ask me to edit a paragraph in the document you uploaded (I'll rewrite it and ground the change in the same evidence), or download either file from the panel.`;
       const assistantMsg: ChatMessage = {
         id: `${Date.now()}-assistant`,
         type: "assistant",
         content: summaryText,
         timestamp: new Date(),
         metadata:
-          !review.assessment_failed && checklist.length > 0
-            ? { reviewChart: { checklist, issuesCount: issues.length, level } }
+          complianceStatus !== "failed" && checklist.length > 0
+            ? { reviewChart: { checklist, issues, issuesCount: issues.length, level, coverage, evidenceConfidence } }
             : undefined,
       };
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
@@ -1477,6 +2034,900 @@ export default function ChatInterface() {
     }
   }
 
+  // Live, in-place clause editing - alternatives-before-replace workflow
+  // (2026-09-25, architecture plan section 53 Phase 2, per the product
+  // owner's own detailed voice brief: "detect edit intent, resolve the
+  // real source block, highlight it, generate three grounded
+  // alternatives, do not change the text yet, show the options, let the
+  // user pick one, validate, patch just that block, allow undo, then
+  // refresh the PDF"). Replaces the old single-shot runDocumentEdit()
+  // (still available server-side as the unchanged /edit-clause endpoint,
+  // just no longer called from here) with four small steps against the
+  // real propose/choose/reject/revert endpoints:
+  //
+  //   runProposeEdit()        - resolve target + generate 3 alternatives,
+  //                              WRITES NOTHING to the live document yet.
+  //   chooseEditAlternative() - apply the alternative the user picked.
+  //   rejectEditProposal()    - "keep the original wording".
+  //   undoLastEdit()          - revert an already-applied edit back to
+  //                              its previous revision.
+  //
+  // editState drives the small in-panel "editing this paragraph" card
+  // (see DocumentPanel.tsx's EditingBlockCard) - its own status field
+  // ("resolving" -> "choosing" -> "applying" -> "applied"/"error") is
+  // what that card's skeleton-shimmer/highlight/updated-badge states key
+  // off of, kept separate from the chat message list so the highlighted-
+  // block UI and the permanent chat record can each do their own job.
+  type EditAlternative = { index: number; label: string; text: string; rationale?: string };
+  type EditState = {
+    status: "resolving" | "choosing" | "applying" | "applied" | "error";
+    docId: string;
+    instruction: string;
+    patchId?: string;
+    paragraphId?: number;
+    page?: number;
+    bbox?: [number, number, number, number];
+    originalText?: string;
+    matchedIssueTopic?: string | null;
+    matchedIssueText?: string | null;
+    alternatives?: EditAlternative[];
+    baseDocVersion?: number;
+    previousRevisionId?: string | null;
+    errorMessage?: string;
+  };
+  const [editState, setEditState] = useState<EditState | null>(null);
+
+  async function runProposeEdit(instruction: string) {
+    if (!documentPanel?.docId) return;
+    const docId = documentPanel.docId;
+
+    const userMsg: ChatMessage = {
+      id: `${Date.now()}-user`,
+      type: "user",
+      content: instruction,
+      timestamp: new Date(),
+    };
+    // Same "the user just explicitly sent this" override as
+    // handleSend above - always follow their own submitted instruction
+    // down. The LATER confirmation message this function (or
+    // chooseEditAlternative) appends after the model responds is NOT
+    // covered by this - that one correctly only follows if they're
+    // still near the bottom, since by then they've likely moved to
+    // DocumentPanel to read the alternatives.
+    isNearBottomRef.current = true;
+    setMessages((prev) => [...prev, userMsg]);
+    setIsEditingClause(true);
+    setError(null);
+    // "resolving" state - DocumentPanel's editing card shows the
+    // skeleton shimmer + "Finding the right paragraph..." from here,
+    // before we even know which block it'll be.
+    setEditState({ status: "resolving", docId, instruction });
+
+    try {
+      // The active review's own merged issue list, so the backend can
+      // match "rewrite the fire safety clause" against the ACTUAL
+      // compliance issue it's probably about (proposal_review.py's
+      // assessment.issues, unchanged shape) rather than only the bare
+      // instruction text - see document_edit.match_compliance_issue().
+      const issues = activeReview?.review?.assessment?.issues ?? [];
+
+      const res = await fetch("/api/local-rag-propose-edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          docId,
+          instruction,
+          geography: activeReview?.review?.geography,
+          backend: ragBackend,
+          issues,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Couldn't find that paragraph (${res.status})`);
+      }
+
+      setEditState({
+        status: "choosing",
+        docId,
+        instruction,
+        patchId: data.patchId,
+        paragraphId: data.paragraphId,
+        page: data.page,
+        bbox: data.bbox,
+        originalText: data.originalText,
+        matchedIssueTopic: data.matchedIssue?.topic ?? null,
+        matchedIssueText: data.matchedIssue?.issue ?? null,
+        alternatives: data.alternatives,
+        baseDocVersion: data.baseDocVersion,
+      });
+    } catch (err: any) {
+      // Nothing was ever written (propose-edit never touches `blocks`),
+      // so there's nothing to roll back - just clear the card and
+      // report back in chat, same "always leave a visible message"
+      // discipline as every other failure path in handleSend.
+      const message = err?.message || "Couldn't find a paragraph matching that instruction.";
+      setEditState(null);
+      setError(message);
+      const assistantMsg: ChatMessage = {
+        id: `${Date.now()}-assistant`,
+        type: "assistant",
+        content: message,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, assistantMsg]);
+    } finally {
+      setIsEditingClause(false);
+    }
+  }
+
+  async function chooseEditAlternative(alternativeIndex: number) {
+    if (!editState || editState.status !== "choosing") return;
+    const { docId, patchId, baseDocVersion, alternatives, paragraphId } = editState;
+    if (!patchId || baseDocVersion === undefined) return;
+
+    setIsEditingClause(true);
+    setEditState((prev) => (prev ? { ...prev, status: "applying" } : prev));
+
+    try {
+      const res = await fetch("/api/local-rag-choose-patch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          docId,
+          patchId,
+          alternativeIndex,
+          expectedDocVersion: baseDocVersion,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Couldn't apply that revision (${res.status})`);
+      }
+
+      if (data.pdfUrl) {
+        setDocumentPanel((prev) => (prev ? { ...prev, documentUrl: data.pdfUrl } : prev));
+      }
+
+      setEditState((prev) =>
+        prev ? { ...prev, status: "applied", previousRevisionId: data.previousRevisionId ?? null } : prev
+      );
+
+      const chosen = alternatives?.[alternativeIndex];
+      const assistantMsg: ChatMessage = {
+        id: `${Date.now()}-assistant`,
+        type: "assistant",
+        content: `Updated paragraph ${paragraphId}${chosen?.label ? ` (${chosen.label} version)` : ""}${
+          chosen?.rationale ? ` — ${chosen.rationale}` : ""
+        }${
+          data.pdfRegenerated === false
+            ? ". The change was saved, but I couldn't refresh the document preview just now — try downloading it again in a moment."
+            : ". Download the updated document from the panel to see it; the compliance report itself isn't re-run automatically. You can undo this from the editing card for a few seconds, or ask me to change it again."
+        }`,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, assistantMsg]);
+
+      // Soft "Updated" badge, then auto-clear the card - only if nothing
+      // else (e.g. a new edit) has replaced it in the meantime. 1800ms per
+      // explicit request (2026-09-25 border-beam follow-up): "a subtle
+      // 'Updated' indicator for ~1-2 seconds" - was 3000ms.
+      setTimeout(() => {
+        setEditState((prev) =>
+          prev && prev.patchId === patchId && prev.status === "applied" ? null : prev
+        );
+      }, 1800);
+    } catch (err: any) {
+      const message = err?.message || "Couldn't apply that revision.";
+      setError(message);
+      // Instantly revert to showing the original (nothing optimistic was
+      // ever rendered onto the live document - "applying" never touched
+      // documentPanel.documentUrl) - just surface the inline error and
+      // drop back to the choosing state so the user can try another
+      // alternative or reject.
+      setEditState((prev) => (prev ? { ...prev, status: "error", errorMessage: message } : prev));
+    } finally {
+      setIsEditingClause(false);
+    }
+  }
+
+  async function rejectEditProposal() {
+    if (!editState || editState.status !== "choosing") return;
+    const { docId, patchId } = editState;
+    setEditState(null);
+    if (patchId) {
+      try {
+        await fetch("/api/local-rag-reject-patch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ docId, patchId }),
+        });
+      } catch {
+        // Best-effort - the proposal simply sits unchosen either way,
+        // and never had any effect on the live document regardless.
+      }
+    }
+    const assistantMsg: ChatMessage = {
+      id: `${Date.now()}-assistant`,
+      type: "assistant",
+      content: "Kept the original wording.",
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, assistantMsg]);
+  }
+
+  async function undoLastEdit() {
+    if (!editState || editState.status !== "applied" || !editState.previousRevisionId) return;
+    const { docId, paragraphId, previousRevisionId, baseDocVersion } = editState;
+    // choose_patch left the document at baseDocVersion + 1 - that's the
+    // version revert_block needs to see as "current" for its own
+    // staleness check.
+    const expectedDocVersion = (baseDocVersion ?? 0) + 1;
+
+    setIsEditingClause(true);
+    setEditState((prev) => (prev ? { ...prev, status: "applying" } : prev));
+
+    try {
+      const res = await fetch("/api/local-rag-revert-block", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          docId,
+          localId: paragraphId,
+          toRevisionId: previousRevisionId,
+          expectedDocVersion,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Couldn't undo that edit (${res.status})`);
+      }
+      if (data.pdfUrl) {
+        setDocumentPanel((prev) => (prev ? { ...prev, documentUrl: data.pdfUrl } : prev));
+      }
+      setEditState(null);
+      const assistantMsg: ChatMessage = {
+        id: `${Date.now()}-assistant`,
+        type: "assistant",
+        content: `Undid that change to paragraph ${paragraphId} — back to the previous wording.`,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, assistantMsg]);
+    } catch (err: any) {
+      const message = err?.message || "Couldn't undo that edit.";
+      setError(message);
+      setEditState((prev) => (prev ? { ...prev, status: "error", errorMessage: message } : prev));
+    } finally {
+      setIsEditingClause(false);
+    }
+  }
+
+  function dismissEditState() {
+    setEditState(null);
+  }
+
+  // --- Inline block editing (2026-09-25, selection-driven, interactive-
+  // document-view milestone) - a SECOND, SEPARATE propose/choose/reject/
+  // undo state machine, deliberately not sharing editState/runProposeEdit
+  // above at all: "keep chat edits as a separate path," per the brief.
+  // The two paths hit the exact same backend endpoints (propose-edit,
+  // choose-patch, reject-patch, revert-block - same validation/staleness/
+  // immutable-revisions/undo guarantees either way), they just get there
+  // from different UI: chat's free-text instruction (which still has the
+  // backend GUESS the target paragraph) vs. a selection in the new
+  // "Document" tab (where the target block is already known, so it's
+  // sent explicitly as targetLocalId and never re-guessed - see
+  // document_edit.propose_edit()'s own docstring on the backend for the
+  // full split). blockEditState drives DocumentPanel's new in-place
+  // BlockEditOverlay (border-beam/skeleton directly over the selected
+  // block, then the alternatives/exact-replacement popover) instead of
+  // EditingBlockCard's side-card - see DocumentPanel.tsx.
+  type BlockEditAlternative = { index: number; label: string; text: string; rationale?: string };
+  type BlockEditState = {
+    status: "resolving" | "choosing" | "applying" | "applied" | "error";
+    paragraphId: number;
+    page: number;
+    bbox: [number, number, number, number];
+    instruction: string;
+    selectedText: string;
+    patchId?: string;
+    originalText?: string;
+    alternatives?: BlockEditAlternative[];
+    isExactReplacement?: boolean;
+    baseDocVersion?: number;
+    previousRevisionId?: string | null;
+    errorMessage?: string;
+  };
+  const [blockEditState, setBlockEditState] = useState<BlockEditState | null>(null);
+
+  // Selection submitted the instruction (Enter in SelectionCommandBox) -
+  // "submitting text there should create a proposed edit request for
+  // that specific block ID... Enter just submits the instruction[,] it
+  // does not change any text." Nothing is mutated here or anywhere until
+  // the user later picks an alternative / applies the exact-replacement
+  // preview.
+  async function runInlineBlockEdit(
+    target: { paragraphId: number; page: number; bbox: [number, number, number, number]; selectedText: string; parentText: string },
+    instruction: string
+  ) {
+    if (!documentPanel?.docId) return;
+    const docId = documentPanel.docId;
+
+    setBlockEditState({
+      status: "resolving",
+      paragraphId: target.paragraphId,
+      page: target.page,
+      bbox: target.bbox,
+      instruction,
+      selectedText: target.selectedText,
+      originalText: target.parentText,
+    });
+
+    try {
+      const res = await fetch("/api/local-rag-propose-edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          docId,
+          instruction,
+          backend: ragBackend,
+          targetLocalId: target.paragraphId,
+          selectedText: target.selectedText,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Couldn't propose that edit (${res.status})`);
+      }
+
+      setBlockEditState({
+        status: "choosing",
+        paragraphId: data.paragraphId ?? target.paragraphId,
+        page: data.page ?? target.page,
+        bbox: data.bbox ?? target.bbox,
+        instruction,
+        selectedText: target.selectedText,
+        patchId: data.patchId,
+        originalText: data.originalText ?? target.parentText,
+        alternatives: data.alternatives,
+        isExactReplacement: Boolean(data.isExactReplacement),
+        baseDocVersion: data.baseDocVersion,
+      });
+    } catch (err: any) {
+      const message = err?.message || "Couldn't propose that edit.";
+      setBlockEditState((prev) => (prev ? { ...prev, status: "error", errorMessage: message } : prev));
+    }
+  }
+
+  // alternativeIndex is always 0 for an exact-replacement preview's
+  // single "Apply" button, or the chosen card's index for a normal
+  // 3-alternatives choice - same shape as chooseEditAlternative above,
+  // just against blockEditState/local-rag-choose-patch's own patchId.
+  async function chooseInlineBlockAlternative(alternativeIndex: number) {
+    if (!blockEditState || blockEditState.status !== "choosing") return;
+    const { patchId, baseDocVersion, alternatives, paragraphId } = blockEditState;
+    if (!patchId || baseDocVersion === undefined || !documentPanel?.docId) return;
+    const docId = documentPanel.docId;
+
+    setBlockEditState((prev) => (prev ? { ...prev, status: "applying" } : prev));
+
+    try {
+      const res = await fetch("/api/local-rag-choose-patch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ docId, patchId, alternativeIndex, expectedDocVersion: baseDocVersion }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Couldn't apply that revision (${res.status})`);
+      }
+
+      // "Update only that block in place. Preserve the scroll position,
+      // then refresh or regenerate the PDF." - documentUrl swap here is
+      // exactly that refresh; InteractiveDocumentView owns preserving
+      // scroll position across it (see that component's own comment).
+      // The PDF preview (report `url`) is untouched, per the brief.
+      if (data.pdfUrl) {
+        setDocumentPanel((prev) => (prev ? { ...prev, documentUrl: data.pdfUrl } : prev));
+      }
+      if (documentPanel?.docId) fetchDocumentParagraphs(documentPanel.docId);
+
+      setBlockEditState((prev) =>
+        prev ? { ...prev, status: "applied", previousRevisionId: data.previousRevisionId ?? null } : prev
+      );
+
+      const chosen = alternatives?.[alternativeIndex];
+      const assistantMsg: ChatMessage = {
+        id: `${Date.now()}-assistant`,
+        type: "assistant",
+        content: `Updated paragraph ${paragraphId} from the document view${
+          chosen?.rationale ? ` — ${chosen.rationale}` : ""
+        }. You can undo this from the editing overlay for a few seconds, or select it again to change it further.`,
+        timestamp: new Date(),
+      };
+      // Same "only follow if already near the bottom" scroll-anchoring
+      // discipline as every other later/async chat message - the user is
+      // very likely still in the Document tab, not the chat, right now.
+      setMessages((prev) => [...prev, assistantMsg]);
+
+      setTimeout(() => {
+        setBlockEditState((prev) =>
+          prev && prev.patchId === patchId && prev.status === "applied" ? null : prev
+        );
+      }, 1800);
+    } catch (err: any) {
+      const message = err?.message || "Couldn't apply that revision.";
+      setBlockEditState((prev) => (prev ? { ...prev, status: "error", errorMessage: message } : prev));
+    }
+  }
+
+  async function rejectInlineBlockEdit() {
+    if (!blockEditState || (blockEditState.status !== "choosing" && blockEditState.status !== "error")) return;
+    const { patchId } = blockEditState;
+    setBlockEditState(null);
+    if (patchId && documentPanel?.docId) {
+      try {
+        await fetch("/api/local-rag-reject-patch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ docId: documentPanel.docId, patchId }),
+        });
+      } catch {
+        // Best-effort, same as rejectEditProposal above - the proposal
+        // simply sits unchosen either way.
+      }
+    }
+  }
+
+  async function undoInlineBlockEdit() {
+    if (!blockEditState || blockEditState.status !== "applied" || !blockEditState.previousRevisionId) return;
+    if (!documentPanel?.docId) return;
+    const docId = documentPanel.docId;
+    const { paragraphId, previousRevisionId, baseDocVersion } = blockEditState;
+    const expectedDocVersion = (baseDocVersion ?? 0) + 1;
+
+    setBlockEditState((prev) => (prev ? { ...prev, status: "applying" } : prev));
+
+    try {
+      const res = await fetch("/api/local-rag-revert-block", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ docId, localId: paragraphId, toRevisionId: previousRevisionId, expectedDocVersion }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Couldn't undo that edit (${res.status})`);
+      }
+      if (data.pdfUrl) {
+        setDocumentPanel((prev) => (prev ? { ...prev, documentUrl: data.pdfUrl } : prev));
+      }
+      fetchDocumentParagraphs(docId);
+      setBlockEditState(null);
+    } catch (err: any) {
+      const message = err?.message || "Couldn't undo that edit.";
+      setBlockEditState((prev) => (prev ? { ...prev, status: "error", errorMessage: message } : prev));
+    }
+  }
+
+  function dismissBlockEditState() {
+    setBlockEditState(null);
+  }
+
+  // --------------------------------------------------------------------
+  // Report-block editing (2026-09-25, CORRECTION to the inline-editing
+  // milestone above): "the inline editing experience must be implemented
+  // in the Report tab, not the Document tab... Document = original
+  // uploaded source document, Report = AI-generated compliance report."
+  // A THIRD, completely separate propose/choose/reject/undo state
+  // machine - deliberately not sharing blockEditState (source PDF
+  // blocks) or editState (the original chat-driven path) at all, same
+  // "keep chat edits as a separate path" discipline that split those two
+  // apart in the first place. Hits the exact same backend endpoints as
+  // blockEditState above (propose-edit/choose-patch/reject-patch/
+  // revert-block are fully generic over doc_id - see document_edit.py's
+  // own "Report-block editing" section), just always against
+  // documentPanel.reportDocId instead of documentPanel.docId, and with
+  // localId/kind/index identifying the target instead of
+  // paragraphId/page/bbox (a report block was never on a PDF page).
+  //
+  // The one genuinely different step: after a successful choose/undo,
+  // the REPORT itself (not a PDF redaction) has to be rebuilt from the
+  // block's new text - see local-rag-regenerate-report/route.ts. That
+  // response's `assessment` is applied straight into activeReview.review
+  // so StructuredReportView (DocumentPanel.tsx) shows the edited text
+  // immediately, without a second fetch.
+  type ReportBlockEditAlternative = { index: number; label: string; text: string; rationale?: string };
+  type ReportBlockEditState = {
+    status: "resolving" | "choosing" | "applying" | "applied" | "error";
+    localId: number;
+    kind: string;
+    index: number | null;
+    instruction: string;
+    selectedText: string;
+    patchId?: string;
+    originalText?: string;
+    alternatives?: ReportBlockEditAlternative[];
+    isExactReplacement?: boolean;
+    baseDocVersion?: number;
+    previousRevisionId?: string | null;
+    errorMessage?: string;
+    // Added 2026-09-26, six-area Report-tab polish pass: the "Custom"
+    // refinement box's own sub-state (area 1 - "a refinement/composition
+    // mode operating over the already generated alternatives", NOT a
+    // fourth independent blank replacement). customPreviewIndex points at
+    // an alternative already appended to `alternatives` below by a
+    // refine call, awaiting its own Apply/Back decision before it can
+    // touch the report - see refineReportBlockEdit below.
+    customLoading?: boolean;
+    customError?: string | null;
+    customPreviewIndex?: number | null;
+  };
+  const [reportBlockEditState, setReportBlockEditState] = useState<ReportBlockEditState | null>(null);
+
+  // Persistent, timeout-independent Undo/Redo (2026-09-26, area 3 of the
+  // six-area polish pass). Keyed by report block localId. Each stack is a
+  // list of REAL, immutable, already-stored block_revisions ids (oldest
+  // first - never LLM-reconstructed text) with `pointer` marking which one
+  // is currently applied. Undo/Redo just walk pointer left/right and call
+  // revert_block with the exact id at the new position - see
+  // revertReportBlockToStackIndex below. Deliberately kept independent of
+  // reportBlockEditState's own lifecycle (that state still clears itself
+  // ~1.8s after a successful apply, same as before) so Undo keeps working
+  // long after the transient "✓ Updated" badge/overlay is gone - "leave
+  // room for a future redo stack" is satisfied by literally building redo
+  // in from the start, not bolting it on later.
+  const [reportUndoStacks, setReportUndoStacks] = useState<
+    Record<number, { revisionIds: string[]; pointer: number }>
+  >({});
+  const [reportUndoErrors, setReportUndoErrors] = useState<Record<number, string | null>>({});
+  // The report pseudo-document's live optimistic-concurrency version.
+  // ALL report blocks share one document-wide `current_version` counter
+  // (document_store.py) - so this has to be a single tracked value, not
+  // per-block, and every choose/revert call must use the CURRENT value,
+  // not whatever was captured when an unrelated block's edit overlay last
+  // opened. Refreshed from the live backend response after every
+  // propose-edit (data.baseDocVersion, always freshly read server-side)
+  // and every choose/revert (data.version) - never incremented by
+  // assumption on the client.
+  const [reportDocVersion, setReportDocVersion] = useState<number | null>(null);
+
+  // Records one more entry onto a block's undo stack after a successful
+  // choose/refine-apply, using the exact revision ids the backend just
+  // returned (never derived/guessed). First edit ever seen for a block
+  // seeds the stack with [previousRevisionId, newRevisionId] so Undo has
+  // somewhere real to land; previousRevisionId is only ever absent if the
+  // block truly has no prior revision yet, in which case there's nothing
+  // to undo to. A later edit starting from a state reached via Undo
+  // truncates the discarded redo branch first, exactly like a normal text
+  // editor.
+  function pushReportBlockRevision(
+    localId: number,
+    previousRevisionId: string | null | undefined,
+    newRevisionId: string | null | undefined
+  ) {
+    if (!newRevisionId) return;
+    setReportUndoStacks((prev) => {
+      const existing = prev[localId];
+      let revisionIds: string[];
+      if (!existing) {
+        revisionIds = previousRevisionId ? [previousRevisionId, newRevisionId] : [newRevisionId];
+      } else {
+        revisionIds = [...existing.revisionIds.slice(0, existing.pointer + 1), newRevisionId];
+      }
+      return { ...prev, [localId]: { revisionIds, pointer: revisionIds.length - 1 } };
+    });
+    setReportUndoErrors((prev) => (prev[localId] ? { ...prev, [localId]: null } : prev));
+  }
+
+  // Shared by both Undo and Redo - reverts the block to the exact stored
+  // revision id at `newPointer` in its stack (store.revert_block(), never
+  // an LLM call), then moves the pointer there and best-effort refreshes
+  // the report/PDF, mirroring chooseReportBlockAlternative's own refresh
+  // step.
+  async function revertReportBlockToStackIndex(localId: number, newPointer: number) {
+    if (!documentPanel?.reportDocId) return;
+    const reportDocId = documentPanel.reportDocId;
+    const stack = reportUndoStacks[localId];
+    if (!stack || newPointer < 0 || newPointer >= stack.revisionIds.length) return;
+    if (reportDocVersion == null) return;
+    const toRevisionId = stack.revisionIds[newPointer];
+
+    setReportUndoErrors((prev) => ({ ...prev, [localId]: null }));
+
+    try {
+      const res = await fetch("/api/local-rag-revert-block", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ docId: reportDocId, localId, toRevisionId, expectedDocVersion: reportDocVersion }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Couldn't undo that edit (${res.status})`);
+      }
+      if (typeof data.version === "number") setReportDocVersion(data.version);
+      setReportUndoStacks((prev) => ({ ...prev, [localId]: { ...stack, pointer: newPointer } }));
+
+      try {
+        const regenRes = await fetch("/api/local-rag-regenerate-report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reportDocId }),
+        });
+        const regenData = await regenRes.json().catch(() => ({}));
+        if (regenRes.ok && regenData?.success) {
+          setActiveReview((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  reportFiles: { ...prev.reportFiles, ...regenData.reportFiles },
+                  review: regenData.assessment
+                    ? { ...prev.review, assessment: regenData.assessment }
+                    : prev.review,
+                }
+              : prev
+          );
+        }
+      } catch {
+        // Best-effort, same reasoning as chooseReportBlockAlternative above.
+      }
+    } catch (err: any) {
+      const message = err?.message || "Couldn't undo that edit.";
+      setReportUndoErrors((prev) => ({ ...prev, [localId]: message }));
+    }
+  }
+
+  function undoReportBlock(localId: number) {
+    const stack = reportUndoStacks[localId];
+    if (!stack || stack.pointer <= 0) return;
+    void revertReportBlockToStackIndex(localId, stack.pointer - 1);
+  }
+
+  function redoReportBlock(localId: number) {
+    const stack = reportUndoStacks[localId];
+    if (!stack || stack.pointer >= stack.revisionIds.length - 1) return;
+    void revertReportBlockToStackIndex(localId, stack.pointer + 1);
+  }
+
+  async function runInlineReportEdit(
+    target: { localId: number; kind: string; index: number | null; selectedText: string; parentText: string },
+    instruction: string
+  ) {
+    if (!documentPanel?.reportDocId) return;
+    const reportDocId = documentPanel.reportDocId;
+
+    setReportBlockEditState({
+      status: "resolving",
+      localId: target.localId,
+      kind: target.kind,
+      index: target.index,
+      instruction,
+      selectedText: target.selectedText,
+      originalText: target.parentText,
+    });
+
+    try {
+      const res = await fetch("/api/local-rag-propose-edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          docId: reportDocId,
+          instruction,
+          backend: ragBackend,
+          targetLocalId: target.localId,
+          selectedText: target.selectedText,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Couldn't propose that edit (${res.status})`);
+      }
+
+      // Always freshly read server-side at propose time - authoritative,
+      // never stale, so this doubles as the one place reportDocVersion
+      // resyncs itself even if it was never set before (e.g. this is the
+      // very first edit attempted this session).
+      if (typeof data.baseDocVersion === "number") setReportDocVersion(data.baseDocVersion);
+
+      setReportBlockEditState({
+        status: "choosing",
+        localId: data.paragraphId ?? target.localId,
+        kind: target.kind,
+        index: target.index,
+        instruction,
+        selectedText: target.selectedText,
+        patchId: data.patchId,
+        originalText: data.originalText ?? target.parentText,
+        alternatives: data.alternatives,
+        isExactReplacement: Boolean(data.isExactReplacement),
+        baseDocVersion: data.baseDocVersion,
+      });
+    } catch (err: any) {
+      const message = err?.message || "Couldn't propose that edit.";
+      setReportBlockEditState((prev) => (prev ? { ...prev, status: "error", errorMessage: message } : prev));
+    }
+  }
+
+  async function chooseReportBlockAlternative(alternativeIndex: number) {
+    if (!reportBlockEditState || reportBlockEditState.status !== "choosing") return;
+    const { patchId, baseDocVersion, alternatives } = reportBlockEditState;
+    if (!patchId || baseDocVersion === undefined || !documentPanel?.reportDocId) return;
+    const reportDocId = documentPanel.reportDocId;
+
+    setReportBlockEditState((prev) => (prev ? { ...prev, status: "applying" } : prev));
+
+    try {
+      const res = await fetch("/api/local-rag-choose-patch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ docId: reportDocId, patchId, alternativeIndex, expectedDocVersion: baseDocVersion }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Couldn't apply that revision (${res.status})`);
+      }
+
+      // "The report/PDF is refreshed... after the user accepts an
+      // alternative" - regenerate-report is the report's own analog of
+      // the source document's PDF redaction/restamp: it rebuilds the
+      // report from the store's now-current block text and returns both
+      // the fresh report_files (swapped into activeReview.reportFiles,
+      // so the Download button and any PDF fallback view pick it up)
+      // and the fresh assessment (swapped into activeReview.review, so
+      // StructuredReportView shows the new wording immediately).
+      try {
+        const regenRes = await fetch("/api/local-rag-regenerate-report", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reportDocId }),
+        });
+        const regenData = await regenRes.json().catch(() => ({}));
+        if (regenRes.ok && regenData?.success) {
+          setActiveReview((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  reportFiles: { ...prev.reportFiles, ...regenData.reportFiles },
+                  review: regenData.assessment
+                    ? { ...prev.review, assessment: regenData.assessment }
+                    : prev.review,
+                }
+              : prev
+          );
+        }
+      } catch {
+        // Best-effort - the patch itself already applied and is
+        // reflected in reportBlockEditState's own "applied" status
+        // below; a failed refresh here just means the Download button/
+        // PDF fallback stay one revision behind until the next edit or
+        // a page reload re-fetches the review.
+      }
+
+      // Persistent undo (area 3): record the real stored revision ids the
+      // backend just returned onto this block's stack, independent of
+      // reportBlockEditState's own transient lifecycle below. Also
+      // resync reportDocVersion from this response - it's now the live
+      // value for every OTHER block's next edit/undo too, since the
+      // whole document shares one version counter.
+      if (typeof data.version === "number") setReportDocVersion(data.version);
+      pushReportBlockRevision(reportBlockEditState.localId, data.previousRevisionId, data.revisionId);
+
+      setReportBlockEditState((prev) =>
+        prev ? { ...prev, status: "applied", previousRevisionId: data.previousRevisionId ?? null } : prev
+      );
+
+      const chosen = alternatives?.[alternativeIndex];
+      const assistantMsg: ChatMessage = {
+        id: `${Date.now()}-assistant`,
+        type: "assistant",
+        content: `Updated the report${chosen?.rationale ? ` — ${chosen.rationale}` : ""}. You can undo this anytime from the block's Undo control, or select it again to change it further.`,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, assistantMsg]);
+
+      setTimeout(() => {
+        setReportBlockEditState((prev) =>
+          prev && prev.patchId === patchId && prev.status === "applied" ? null : prev
+        );
+      }, 1800);
+    } catch (err: any) {
+      const message = err?.message || "Couldn't apply that revision.";
+      setReportBlockEditState((prev) => (prev ? { ...prev, status: "error", errorMessage: message } : prev));
+    }
+  }
+
+  async function rejectReportBlockEdit() {
+    if (
+      !reportBlockEditState ||
+      (reportBlockEditState.status !== "choosing" && reportBlockEditState.status !== "error")
+    )
+      return;
+    const { patchId } = reportBlockEditState;
+    setReportBlockEditState(null);
+    if (patchId && documentPanel?.reportDocId) {
+      try {
+        await fetch("/api/local-rag-reject-patch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ docId: documentPanel.reportDocId, patchId }),
+        });
+      } catch {
+        // Best-effort, same as rejectInlineBlockEdit above.
+      }
+    }
+  }
+
+  // Superseded 2026-09-26 by the persistent, stack-based undoReportBlock/
+  // redoReportBlock above (area 3 of the six-area polish pass) - this
+  // timeout-bound version depended on reportBlockEditState.status
+  // ("applied") and a guessed "(baseDocVersion ?? 0) + 1" expected
+  // version, both of which broke the instant the transient badge cleared
+  // or a second edit landed on any block. Undo is no longer tied to this
+  // function or to reportBlockEditState's lifecycle at all.
+
+  // "Custom" refinement (area 1) - NOT a fourth independent blank
+  // replacement. Operates over the SAME already-open patch's existing
+  // alternatives plus the original block text (local-rag/document_edit.py's
+  // refine_alternatives()), and appends one more alternative to that same
+  // patch rather than starting a new propose-edit cycle. Requires no new
+  // apply/validation path: the previewed result is applied by calling
+  // chooseReportBlockAlternative with its index, exactly like picking
+  // option 1/2/3 (see DocumentPanel.tsx's customPreviewAlt Apply button).
+  async function refineReportBlockEdit(instruction: string) {
+    if (!reportBlockEditState || reportBlockEditState.status !== "choosing") return;
+    const { patchId } = reportBlockEditState;
+    const trimmed = instruction.trim();
+    if (!patchId || !trimmed || !documentPanel?.reportDocId) return;
+    const reportDocId = documentPanel.reportDocId;
+
+    setReportBlockEditState((prev) => (prev ? { ...prev, customLoading: true, customError: null } : prev));
+
+    try {
+      const res = await fetch("/api/local-rag-refine-patch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ docId: reportDocId, patchId, instruction: trimmed, backend: ragBackend }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `Couldn't refine that (${res.status})`);
+      }
+
+      setReportBlockEditState((prev) => {
+        if (!prev || prev.patchId !== patchId) return prev;
+        const newAlt: ReportBlockEditAlternative = {
+          index: data.index,
+          label: data.label || "Custom",
+          text: data.text,
+          rationale: data.rationale,
+        };
+        return {
+          ...prev,
+          alternatives: [...(prev.alternatives || []), newAlt],
+          customLoading: false,
+          customError: null,
+          // "Generate a refined proposal WITHOUT immediately applying
+          // it - show the refined result and require Apply/Back" - the
+          // preview step, not an auto-apply.
+          customPreviewIndex: data.index,
+        };
+      });
+    } catch (err: any) {
+      const message = err?.message || "Couldn't refine that.";
+      setReportBlockEditState((prev) =>
+        prev && prev.patchId === patchId ? { ...prev, customLoading: false, customError: message } : prev
+      );
+    }
+  }
+
+  function backFromReportCustomPreview() {
+    setReportBlockEditState((prev) => (prev ? { ...prev, customPreviewIndex: null } : prev));
+  }
+
+  function dismissReportBlockEditState() {
+    setReportBlockEditState(null);
+  }
+  // --------------------------------------------------------------------
+
   // Voice I/O - see lib/useVoiceChat.ts. Built entirely on the browser's
   // native Web Speech API (SpeechRecognition + SpeechSynthesis), so this
   // costs nothing: no API key, no per-request billing, no server round
@@ -1490,6 +2941,21 @@ export default function ChatInterface() {
   //    aloud, and the mic re-opens for your next turn as soon as the
   //    reply finishes speaking.
   const [voiceModeEnabled, setVoiceModeEnabled] = useState(false);
+  // Last thing useVoiceChat's onFinalTranscript heard, kept around purely
+  // so the full voice overlay's caption doesn't go blank the instant
+  // recognition stops - see voiceOverlayCaption below.
+  const lastVoiceUtteranceRef = useRef("");
+  // The exact text passed to speak() for the reply currently playing (or
+  // about to play) - the source text the Speaking-state progressive
+  // reveal below slices words out of. A ref because it's written at
+  // call-speak time, read every render; never itself triggers a render.
+  const speakingTextRef = useRef("");
+  // 0..1, driven by useVoiceChat's onProgress (audio.currentTime /
+  // audio.duration - the only playback-position signal the self-hosted
+  // TTS gives us, since it returns one complete blob with no word/
+  // phoneme timing). Reset to 0 at the start of every speak() call so a
+  // new reply doesn't start already-revealed.
+  const [speechProgress, setSpeechProgress] = useState(0);
   // speak()'s onDone callback (below, in handleSend) fires whenever the
   // self-hosted voice actually finishes - which on CPU-only hardware can
   // be a real ~10+ seconds after the tap that triggered it. A plain
@@ -1521,6 +2987,7 @@ export default function ChatInterface() {
     isListening,
     isSpeaking,
     isPreparingSpeech,
+    sttError,
     startListening,
     stopListening,
     speak,
@@ -1529,6 +2996,13 @@ export default function ChatInterface() {
     onInterimTranscript: (text) => setInputValue(text),
     onFinalTranscript: (text) => {
       setInputValue(text);
+      // Kept so the full voice overlay can still show what the user said
+      // once recognition itself stops (isListening -> false) and the
+      // turn moves into "thinking" - see voiceOverlayCaption below. Without
+      // this the transcript the user just watched build up word-by-word
+      // vanished the instant they stopped talking, well before the reply
+      // even started - reported explicitly as a missing acceptance test.
+      lastVoiceUtteranceRef.current = text;
       if (voiceModeEnabled && text.trim()) {
         handleSend(text);
       }
@@ -1556,13 +3030,27 @@ export default function ChatInterface() {
     ? "listening"
     : "idle";
 
+  // Word-sliced proportional reveal: we don't know which word CosyVoice2
+  // is speaking at any given instant (no timing data comes back with the
+  // audio), but we do know the full text and how far through playback we
+  // are, so "reveal the same fraction of words as we're through the
+  // audio" reads as a natural follow-along without pretending to a
+  // precision we don't have.
+  const voiceSpeakingReveal = (() => {
+    const full = speakingTextRef.current;
+    if (!full) return "";
+    const words = full.split(/\s+/).filter(Boolean);
+    if (words.length === 0) return "";
+    const count = Math.max(1, Math.ceil(speechProgress * words.length));
+    return words.slice(0, count).join(" ");
+  })();
+
   const voiceOverlayCaption = isSpeaking
-    ? sanitizeForSpeech(
-        [...messages].reverse().find((m) => m.type === "assistant")?.content ||
-          ""
-      )
+    ? voiceSpeakingReveal
     : isListening
     ? inputValue
+    : voiceOverlayState === "thinking"
+    ? lastVoiceUtteranceRef.current
     : "";
 
   const handleVoiceOverlayOrbClick = () => {
@@ -1612,6 +3100,26 @@ export default function ChatInterface() {
       .then((data) => {
         if (!cancelled) {
           setLocalRagStatus(data?.reachable ? "reachable" : "unreachable");
+          const ollama = data?.ollama;
+          setOllamaStatus({
+            available: !!ollama?.available,
+            models: Array.isArray(ollama?.models) ? ollama.models : [],
+            default_model: ollama?.default_model || "",
+            default_model_pulled: !!ollama?.default_model_pulled,
+          });
+          // Automatic, not opt-in (2026-09-25) - "Local (offline)" now
+          // means fully local whenever it genuinely can: answer
+          // generation routes through Ollama the moment it's reachable
+          // and has the default model pulled, with no separate control
+          // for the user to notice or tick. Falls back to "groq"
+          // (cloud generation, local retrieval only) silently when
+          // Ollama isn't ready yet - the existing "service not
+          // running"/"checking…" status text above already covers the
+          // local-rag-unreachable case, so no new status text is added
+          // here for the Ollama-specific fallback.
+          setRagBackend(
+            ollama?.available && ollama?.default_model_pulled ? "ollama" : "groq"
+          );
         }
       })
       .catch(() => {
@@ -1670,7 +3178,7 @@ export default function ChatInterface() {
     const res = await fetch("/api/local-rag-chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: prompt }),
+      body: JSON.stringify({ query: prompt, backend: ragBackend }),
     });
 
     if (!res.ok || !res.body) {
@@ -1741,9 +3249,15 @@ export default function ChatInterface() {
 
           if (voiceModeEnabled && ttsSupported) {
             const speechText = sanitizeForSpeech(finalAnswer);
-            speak(speechText, () => {
-              if (voiceModeEnabledRef.current) startListening();
-            });
+            speakingTextRef.current = speechText;
+            setSpeechProgress(0);
+            speak(
+              speechText,
+              () => {
+                if (voiceModeEnabledRef.current) startListening();
+              },
+              (fraction) => setSpeechProgress(fraction)
+            );
           }
         }
       }
@@ -1752,7 +3266,29 @@ export default function ChatInterface() {
 
   const handleSend = async (overridePrompt?: string) => {
     const prompt = (overridePrompt ?? inputValue).trim();
-    if ((!prompt && !drawingFile) || isLoading || isUploadingDoc || isReviewing) return;
+    if (
+      (!prompt && !drawingFile) ||
+      isLoading ||
+      isUploadingDoc ||
+      isReviewing ||
+      isEditingClause
+    )
+      return;
+
+    // Live, in-place clause editing via the alternatives-before-replace
+    // workflow (2026-09-25, architecture plan section 53 Phase 2 - see
+    // runProposeEdit()/chooseEditAlternative() above, and local-rag/
+    // document_edit.py's own "Phase 2" module docstring section). Only
+    // intercepts while a persisted, editable document is actually open
+    // (documentPanel.docId loaded) AND the message reads like an edit
+    // instruction - anything else (no document open, or an ambiguous/
+    // plain question) falls through to the normal flow below unchanged,
+    // including the existing /proposal-review-chat Q&A path.
+    if (documentPanel?.docId && looksLikeEditInstruction(prompt)) {
+      setInputValue("");
+      await runProposeEdit(prompt);
+      return;
+    }
 
     const userMessage: ChatMessage = {
       id: `${Date.now()}-user`,
@@ -1761,6 +3297,13 @@ export default function ChatInterface() {
       timestamp: new Date(),
     };
 
+    // The user just explicitly sent this - always follow it down,
+    // regardless of where they'd scrolled to before (part of the
+    // 2026-09-25 scroll-anchoring fix, see isNearBottomRef's own
+    // comment above: this is the one case that SHOULD override
+    // wherever they'd scrolled to, since it's their own fresh action,
+    // not an async arrival they may not still be watching for).
+    isNearBottomRef.current = true;
     setMessages((prev) => [...prev, userMessage]);
     setInputValue("");
     setIsLoading(true);
@@ -1820,7 +3363,7 @@ export default function ChatInterface() {
         res = await fetch("/api/local-rag-chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: prompt }),
+          body: JSON.stringify({ query: prompt, backend: ragBackend }),
         });
       } else {
         res = await fetch("/api/rag-chat", {
@@ -1909,9 +3452,15 @@ export default function ChatInterface() {
           // the cited, document-formatted on-screen answer verbatim.
           const speechText: string =
             data?.data?.speechText || sanitizeForSpeech(answerText);
-          speak(speechText, () => {
-            if (voiceModeEnabledRef.current) startListening();
-          });
+          speakingTextRef.current = speechText;
+          setSpeechProgress(0);
+          speak(
+            speechText,
+            () => {
+              if (voiceModeEnabledRef.current) startListening();
+            },
+            (fraction) => setSpeechProgress(fraction)
+          );
         }
       }
 
@@ -1980,7 +3529,17 @@ export default function ChatInterface() {
         onToggleCollapse={toggleSidebarCollapsed}
       />
 
-      <div className="flex h-full min-w-0 flex-1 flex-col">
+      {/* overflow-hidden (2026-09-28, live-diagnostic overlap-bug
+          fix): at a narrow viewport with the report panel open, this
+          column can be flex-shrunk to a sliver - a bare <textarea>'s
+          browser-default intrinsic min-width doesn't shrink with it
+          (confirmed live: the column measured 0px wide while its own
+          textarea still rendered ~107px, bleeding into the report
+          panel). This column's own content, including its floating
+          composer, must never paint outside its own box regardless of
+          what any descendant's intrinsic size wants - the same
+          containment DocumentPanel's own body wrapper already uses. */}
+      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden">
       <div className="flex items-center gap-2 border-b border-neutral-950/5 px-4 py-2 lg:hidden">
         <button
           type="button"
@@ -1994,58 +3553,112 @@ export default function ChatInterface() {
           Urban AI Assistant
         </span>
       </div>
-      <div className="flex-1 overflow-y-auto px-4 py-6 sm:px-6">
+      <div className="relative min-h-0 flex-1">
+      <div
+        ref={chatScrollRef}
+        className="h-full overflow-y-auto px-4 py-6 sm:px-6"
+        style={{ paddingBottom: composerReserve }}
+      >
       {/* Same min-height whether the welcome screen or a conversation is
           showing, so the scroll container does not resize under the user
           the instant they send - which is what made the thinking
           indicator appear to snap to the top of an empty page. */}
       <div className="mx-auto flex min-h-[calc(100vh-16rem)] w-full max-w-3xl flex-col space-y-6 px-2 sm:px-4">
-          {messages.length === 0 ? (
-            <WelcomeScreen onSuggestionClick={(s) => handleSend(s)} />
-          ) : (
-            <AnimatePresence>
-              {messages.map((message, index) => (
-                <div
-                  key={message.id}
-                  className="rise"
-                  // Cap the stagger: on a restored 40-message conversation an
-                  // uncapped cascade would take two seconds to finish drawing.
-                  style={{ ["--i" as any]: Math.min(index, 6) }}
-                >
-                <MessageBubble
-                  key={message.id}
-                  message={message}
-                  setMessages={setMessages}
-                  onTypingProgress={() =>
-                    endRef.current?.scrollIntoView({
-                      behavior: "auto",
-                      block: "end",
-                    })
-                  }
-                  queryText={
-                    message.type === "assistant"
-                      ? [...messages]
-                          .slice(0, index)
-                          .reverse()
-                          .find((m) => m.type === "user")?.content
-                      : undefined
-                  }
-                  onRegenerate={
-                    message.type === "assistant"
-                      ? () => {
-                          const priorUser = [...messages]
-                            .slice(0, index)
-                            .reverse()
-                            .find((m) => m.type === "user");
-                          if (priorUser) handleSend(priorUser.content);
-                        }
-                      : undefined
-                  }
-                />
-                </div>
-              ))}
-            </AnimatePresence>
-          )}
+          {/* mode="wait" - not a plain unmount/mount swap any more, but
+              deliberately NOT a true overlapping crossfade either. Tried
+              overlapping first (both branches mounted briefly, old fading
+              out while new fades in); it produced a real layout bug: this
+              container's children stretch to min-h-[calc(100vh-16rem)]
+              (see the comment above), so for ~150ms two of them were in the
+              DOM at once, roughly doubling the scroll container's height
+              and visibly jumping the page/sidebar - exactly what showed up
+              switching between a conversation and "New chat". mode="wait"
+              fully unmounts the outgoing branch before the incoming one
+              mounts, so only one ever contributes height. Costs ~140ms of
+              delay before the reply area appears after the first message -
+              acceptable; the layout jump was not. initial={false} on the
+              outer AnimatePresence means a restored conversation (messages
+              already populated on first render) never plays this as an
+              entrance animation - only a live transition from an actually-
+              empty state does. */}
+          <AnimatePresence mode="wait" initial={false}>
+            {messages.length === 0 ? (
+              <motion.div
+                key="welcome"
+                exit={{ opacity: 0, y: -12 }}
+                transition={{
+                  duration: shouldReduceMotion ? 0.01 : 0.14,
+                  ease: EASE_SETTLE,
+                }}
+              >
+                <WelcomeScreen onSuggestionClick={(s) => handleSend(s)} />
+              </motion.div>
+            ) : (
+              <motion.div
+                key="messages"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{
+                  duration: shouldReduceMotion ? 0.01 : 0.18,
+                  ease: EASE_SETTLE,
+                }}
+              >
+                <AnimatePresence>
+                  {messages.map((message, index) => (
+                    <div
+                      key={message.id}
+                      className="rise"
+                      // Cap the stagger: on a restored 40-message conversation an
+                      // uncapped cascade would take two seconds to finish drawing.
+                      style={{ ["--i" as any]: Math.min(index, 6) }}
+                    >
+                    <MessageBubble
+                      key={message.id}
+                      message={message}
+                      setMessages={setMessages}
+                      onTypingProgress={() => {
+                        // Same scroll-anchoring discipline as the
+                        // message-list effect above (2026-09-25 fix):
+                        // this fires on every chunk of a message's
+                        // typewriter reveal, completely separately from
+                        // that effect - it was ALSO unconditionally
+                        // dragging the view to the bottom while any
+                        // message typed itself out, which turned out to
+                        // be the bigger contributor to the reported
+                        // "shifts down" (the edit flow's own confirmation
+                        // message types itself out through this same
+                        // MessageBubble path). Gated the same way: only
+                        // follow the typing if the user was already
+                        // reading from the bottom.
+                        if (!isNearBottomRef.current) return;
+                        scrollChatToBottom("auto");
+                      }}
+                      queryText={
+                        message.type === "assistant"
+                          ? [...messages]
+                              .slice(0, index)
+                              .reverse()
+                              .find((m) => m.type === "user")?.content
+                          : undefined
+                      }
+                      onRegenerate={
+                        message.type === "assistant"
+                          ? () => {
+                              const priorUser = [...messages]
+                                .slice(0, index)
+                                .reverse()
+                                .find((m) => m.type === "user");
+                              if (priorUser) handleSend(priorUser.content);
+                            }
+                          : undefined
+                      }
+                    />
+                    </div>
+                  ))}
+                </AnimatePresence>
+              </motion.div>
+            )}
+          </AnimatePresence>
 
           {isLoading && <ThinkingIndicator />}
 
@@ -2059,419 +3672,150 @@ export default function ChatInterface() {
         </div>
       </div>
 
-      <div className="border-t border-neutral-950/8 bg-[#f7f4ee]/80 p-4 shadow-[0_-1px_16px_rgba(0,0,0,0.04)] backdrop-blur-xl sm:p-6">
-      <div className="mx-auto w-full max-w-3xl px-4 sm:px-6">
-          <div className="relative">
-            <textarea
-              ref={composerRef}
-              rows={1}
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyDown={onKeyDown}
-              placeholder="Ask anything"
-              aria-label="Ask a question"
-              className="uaa-composer block w-full resize-none border border-neutral-950/10 bg-[#fbf9f5] py-3.5 pl-11 pr-32 text-sm leading-6 shadow-paper-sm transition-[box-shadow,border-color,background-color,border-radius] duration-200 ease-settle focus:outline-none focus:border-neutral-950/25 focus:bg-white focus:shadow-paper-md"
-              disabled={isLoading}
-            />
-
-            {/* Bottom-anchored: with a growing composer, a vertically
-                centred control drifts down the box as you type. */}
-            <div className="absolute bottom-2 left-2">
-              <label
-                className="press flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border border-neutral-950/10 bg-neutral-100/80 text-neutral-800 hover:bg-neutral-200/90 hover:border-neutral-950/20"
-                title="Upload document"
-                aria-label="Upload document"
-              >
-                <input
-                  type="file"
-                  onChange={handleFileSelected}
-                  className="hidden"
-                  disabled={isLoading || isUploadingDoc || isReviewing || !!pendingUploadFile}
-                />
-                <DocumentIcon className="h-4 w-4" />
-              </label>
-            </div>
-
-            <div className="absolute bottom-2 right-2 flex items-center gap-2">
-              {sttSupported && (
-                <button
-                  type="button"
-                  onClick={handleMicClick}
-                  disabled={isLoading || isUploadingDoc}
-                  className={`flex h-8 w-8 items-center justify-center rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
-                    isListening
-                      ? "animate-pulse border-red-300 bg-red-100 text-red-600"
-                      : isSpeaking
-                      ? "border-neutral-950/10 bg-neutral-200 text-neutral-800"
-                      : "border-neutral-950/10 bg-neutral-100/80 text-neutral-700 hover:bg-neutral-200/90"
-                  }`}
-                  title={
-                    isSpeaking
-                      ? "Stop speaking"
-                      : isListening
-                      ? "Stop listening"
-                      : "Voice input"
-                  }
-                  aria-label={
-                    isSpeaking
-                      ? "Stop speaking"
-                      : isListening
-                      ? "Stop listening"
-                      : "Voice input"
-                  }
-                >
-                  {isSpeaking ? (
-                    <SpeakerIcon className="h-4 w-4" />
-                  ) : (
-                    <MicIcon className="h-4 w-4" />
-                  )}
-                </button>
-              )}
-
-              <button
-                onClick={() => handleSend()}
-                disabled={
-                  (!inputValue.trim() && !drawingFile) ||
-                  isLoading ||
-                  isUploadingDoc ||
-                  isReviewing
-                }
-                className="press flex h-8 w-8 items-center justify-center rounded-full bg-neutral-950 shadow-paper-sm hover:bg-neutral-800 hover:shadow-paper-md disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
-                aria-label="Send"
-              >
-                <PaperAirplaneIcon className="h-4 w-4 text-white" />
-              </button>
-            </div>
-          </div>
-
-          {uploadedDocs.length > 0 && (
-            <div className="mt-3 flex flex-col gap-2">
-              {uploadedDocs.map((doc) => (
-                <div
-                  key={doc.id}
-                  className="flex items-center justify-between gap-3 rounded-2xl border border-neutral-950/10 bg-neutral-950/5 px-3 py-2"
-                >
-                  <div className="min-w-0">
-                    <p className="truncate text-xs text-neutral-700">
-                      <span className="text-neutral-800">{doc.name}</span>
-                    </p>
-                    <p className="text-[11px] text-neutral-500">
-                      {doc.status === "uploading" &&
-                        "Reading and indexing this document…"}
-                      {doc.status === "ready" &&
-                        "Ready — your questions in this chat will now use it."}
-                      {doc.status === "error" &&
-                        "Couldn't process this file — try again or ask without it."}
-                    </p>
-                  </div>
-
-                  <button
-                    onClick={() =>
-                      setUploadedDocs((prev) => prev.filter((d) => d.id !== doc.id))
-                    }
-                    className="shrink-0 rounded-xl border border-neutral-950/20 bg-neutral-950/[0.06] px-3 py-1.5 text-xs text-neutral-900 transition hover:bg-neutral-950/15 hover:text-neutral-950"
-                  >
-                    Dismiss
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Choice card for a just-selected file - added 2026-09-19,
-              replacing the old auto-upload-into-Q&A behaviour. Lets the
-              user pick between the existing cloud Q&A ingestion
-              (uploadForQA, no site needed) and a real local-rag
-              compliance review (runProposalReview) - the review needs a
-              site (postcode/project/lat-lon) to check GIS constraints
-              against, but the postcode field is optional: leaving it
-              blank asks local-rag's proposal_review._resolve_site() to
-              auto-detect one from the uploaded document itself (a
-              postcode written in the text, or failing that a name/
-              address geocoded via site_lookup.detect_site() - added
-              2026-09-19, per explicit request: "find the postcode based
-              on the documents... or if postcode is not mentioned then...
-              look up the postcode based on the name"). Detection can
-              still fail (no postcode and no recognizable name/address in
-              the document) - that surfaces as the normal backend error
-              message asking the user to enter a postcode manually,
-              same as before this change. */}
-          <AnimatePresence>
-          {pendingUploadFile && (
-            <motion.div
-              key="pending-upload-choice-card"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.18, ease: "easeOut" }}
-              className="mt-3 space-y-2 rounded-2xl border border-neutral-950/10 bg-neutral-950/5 px-3 py-3"
-            >
-              <p className="truncate text-xs text-neutral-700">
-                <span className="text-neutral-800">{pendingUploadFile.name}</span>
-                {" — what would you like to do with it?"}
-              </p>
-
-              <input
-                type="text"
-                value={reviewPostcode}
-                onChange={(e) => setReviewPostcode(e.target.value)}
-                placeholder="Postcode, e.g. SW1V 3LX — optional, I'll try to detect it from the document if left blank"
-                disabled={isReviewing}
-                className="block w-full rounded-xl border border-neutral-950/10 bg-white px-3 py-2 text-xs text-neutral-900 placeholder:text-neutral-400 focus:outline-none focus:border-neutral-950/25"
-              />
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  disabled={isReviewing}
-                  onClick={() => uploadForQA(pendingUploadFile)}
-                  className="rounded-xl border border-neutral-950/20 bg-white px-3 py-1.5 text-xs text-neutral-900 transition hover:bg-neutral-950/10 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Ask questions about it
-                </button>
-                <button
-                  type="button"
-                  disabled={isReviewing}
-                  onClick={() => runProposalReview(pendingUploadFile, reviewPostcode)}
-                  title={
-                    !reviewPostcode.trim()
-                      ? "No postcode entered - I'll try to detect the site from the document itself"
-                      : undefined
-                  }
-                  className="rounded-xl border border-neutral-950/20 bg-neutral-950 px-3 py-1.5 text-xs text-white transition hover:bg-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {isReviewing ? <ReviewingLabel /> : "Run compliance review"}
-                </button>
-                <button
-                  type="button"
-                  disabled={isReviewing}
-                  onClick={() => {
-                    setPendingUploadFile(null);
-                    setReviewPostcode("");
-                  }}
-                  className="rounded-xl px-3 py-1.5 text-xs text-neutral-500 transition hover:text-neutral-800 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-              </div>
-            </motion.div>
-          )}
-          </AnimatePresence>
-
-          {/* Persistent indicator once a review exists for this
-              conversation - handleSend routes every message through
-              /proposal-review-chat while this is set (see that branch
-              above). Exiting just stops that routing; it doesn't close
-              the report panel or delete anything. */}
-          <AnimatePresence>
-          {activeReview && (
-            <motion.div
-              key="active-review-banner"
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.18, ease: "easeOut" }}
-              className="mt-3 flex items-center justify-between gap-3 rounded-2xl border border-neutral-950/10 bg-neutral-950/5 px-3 py-2"
-            >
-              <p className="truncate text-xs text-neutral-700">
-                Discussing the compliance review for{" "}
-                <span className="text-neutral-800">{activeReview.label}</span>
-              </p>
-              <button
-                type="button"
-                onClick={() => setActiveReview(null)}
-                className="shrink-0 rounded-xl border border-neutral-950/20 bg-neutral-950/[0.06] px-3 py-1.5 text-xs text-neutral-900 transition hover:bg-neutral-950/15 hover:text-neutral-950"
-              >
-                Exit review chat
-              </button>
-            </motion.div>
-          )}
-          </AnimatePresence>
-
-          {FEATURES.drawingAnalysis && chatMode === "feasibility" && (
-            <div className="mt-3 space-y-2">
-              <label className="block text-xs text-neutral-600">
-                Optional: Upload floor plan or site plan for automatic analysis
-                <input
-                  type="file"
-                  accept=".pdf,.png,.jpg,.jpeg"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) setDrawingFile(file);
-                  }}
-                  className="mt-1 block w-full text-xs text-neutral-600 file:mr-4 file:rounded-xl file:border-0 file:bg-neutral-200 file:px-4 file:py-2 file:text-xs file:text-neutral-950 hover:file:bg-neutral-300"
-                  disabled={isLoading}
-                />
-              </label>
-
-              {drawingFile && (
-                <div className="flex items-center justify-between gap-3 rounded-2xl border border-neutral-950/10 bg-neutral-950/5 px-3 py-2">
-                  <div className="min-w-0">
-                    <p className="truncate text-xs text-neutral-700">
-                      Drawing:{" "}
-                      <span className="text-neutral-800">{drawingFile.name}</span>
-                    </p>
-                    <p className="text-[11px] text-neutral-500">
-                      Will be analyzed for code compliance when you send
-                    </p>
-                  </div>
-
-                  <button
-                    onClick={() => setDrawingFile(null)}
-                    className="rounded-xl border border-neutral-950/20 bg-neutral-950/[0.06] px-3 py-1.5 text-xs text-neutral-900 transition hover:bg-neutral-950/15 hover:text-neutral-950"
-                  >
-                    Remove
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-
-          {FEATURES.modeSelector && (
-          <div className="relative mt-2 text-left text-[11px] text-neutral-600">
-            <button
-              type="button"
-              onClick={() => setIsModeMenuOpen((v) => !v)}
-              className="inline-flex items-center gap-1 rounded-full hover:text-neutral-900"
-            >
-              <span>
-                {chatMode === "auto" &&
-                  "Mode: Auto – describe what you want; the assistant will choose Feasibility, Permitting, or Risk."}
-                {chatMode === "feasibility" &&
-                  "Mode: Feasibility – share the site location, jurisdiction, and what you want to build."}
-                {chatMode === "permitting" &&
-                  "Mode: Permitting – upload your submission pack and specify the authority/jurisdiction."}
-                {chatMode === "risk" &&
-                  "Mode: Risk – provide project context/documents to analyze what could get rejected or delayed."}
-              </span>
-              <span aria-hidden="true">▾</span>
-            </button>
-
-            {isModeMenuOpen && (
-              <div className="absolute bottom-6 left-0 z-10 w-44 rounded-2xl border border-neutral-950/10 bg-neutral-100/95 py-1 text-xs text-neutral-900 shadow-lg">
-                {[
-                  { id: "auto", label: "Auto (default)" },
-                  { id: "feasibility", label: "Feasibility" },
-                  { id: "permitting", label: "Permitting" },
-                  { id: "risk", label: "Risk review" },
-                ].map((mode) => (
-                  <button
-                    key={mode.id}
-                    type="button"
-                    onClick={() => {
-                      setChatMode(
-                        mode.id as
-                          | "auto"
-                          | "feasibility"
-                          | "permitting"
-                          | "risk"
-                      );
-                      setIsModeMenuOpen(false);
-                    }}
-                    className={`flex w-full items-center justify-between px-3 py-2 hover:bg-neutral-950/10 ${
-                      chatMode === mode.id ? "text-neutral-950" : ""
-                    }`}
-                  >
-                    <span>{mode.label}</span>
-                    {chatMode === mode.id && <span>•</span>}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-          )}
-
-          {FEATURES.ragSourceToggle && (
-            <div className="mt-2 flex items-center justify-center gap-2 text-[11px] text-neutral-600">
-              <span>Answers from:</span>
-              <div className="relative inline-flex overflow-hidden rounded-full border border-neutral-950/10">
-                {(["cloud", "local"] as const).map((source) => (
-                  <button
-                    key={source}
-                    type="button"
-                    onClick={() => setRagSource(source)}
-                    className={`relative z-10 px-2.5 py-1 transition-colors duration-150 ${
-                      ragSource === source
-                        ? "text-neutral-100"
-                        : "hover:bg-neutral-950/5"
-                    }`}
-                  >
-                    {ragSource === source && (
-                      <motion.span
-                        layoutId="ragSourcePill"
-                        className="absolute inset-0 -z-10 rounded-full bg-neutral-950"
-                        transition={{ type: "spring", stiffness: 500, damping: 35 }}
-                      />
-                    )}
-                    {source === "cloud" ? "Cloud" : "Local (offline)"}
-                  </button>
-                ))}
-              </div>
-              {ragSource === "local" && localRagStatus === "checking" && (
-                <span className="text-neutral-500">checking…</span>
-              )}
-              {ragSource === "local" && localRagStatus === "unreachable" && (
-                <span className="text-red-600">
-                  service not running - see local-rag/README.md
-                </span>
-              )}
-            </div>
-          )}
-
-
-          {sttSupported && ttsSupported && (
-            <div className="mt-2 flex items-center justify-center gap-2">
-              <button
-                type="button"
-                onClick={handleStartVoiceConversation}
-                className="press inline-flex items-center gap-1.5 rounded-full border border-neutral-950/10 bg-neutral-100/80 px-3 py-1.5 text-[11px] text-neutral-700 hover:bg-neutral-200/90 hover:border-neutral-950/20"
-              >
-                <MicIcon className="h-3.5 w-3.5" />
-                Start voice conversation
-              </button>
-              {voiceAgentUrl && (
-                <button
-                  type="button"
-                  onClick={() => setIsVoiceAgentOverlayOpen(true)}
-                  title="Full-duplex voice - real barge-in, requires voice-agent/ running (see its README)"
-                  className="press inline-flex items-center gap-1.5 rounded-full border border-neutral-950/10 bg-neutral-100/80 px-3 py-1.5 text-[11px] text-neutral-700 hover:bg-neutral-200/90 hover:border-neutral-950/20"
-                >
-                  <MicIcon className="h-3.5 w-3.5" />
-                  Full-duplex voice (beta)
-                </button>
-              )}
-            </div>
-          )}
-
-          <p className="mt-3 text-center text-xs text-neutral-500">
-            Enter to send. Shift+Enter for new line. AI can be wrong.
-          </p>
-        </div>
+      <FloatingComposerShell
+        fadeBackground="#f7f4ee"
+        onMeasure={setComposerReserve}
+        glass={FEATURES.liquidGlassComposer}
+        belowChildren={
+          <MainChatComposerContext
+            isReviewing={isReviewing}
+            pendingUploadFile={pendingUploadFile}
+            reviewPostcode={reviewPostcode}
+            onReviewPostcodeChange={setReviewPostcode}
+            onAskQuestionsAboutFile={(file) => uploadForQA(file)}
+            onRunComplianceReview={(file, postcode) => runProposalReview(file, postcode)}
+            onCancelPendingUpload={() => {
+              setPendingUploadFile(null);
+              setReviewPostcode("");
+            }}
+            reviewingLabel={<ReviewingLabel />}
+            uploadedDocs={uploadedDocs}
+            onDismissUploadedDoc={(id) =>
+              setUploadedDocs((prev) => prev.filter((d) => d.id !== id))
+            }
+            activeReview={activeReview}
+            onExitReviewChat={() => setActiveReview(null)}
+            drawingAnalysisEnabled={FEATURES.drawingAnalysis}
+            chatMode={chatMode}
+            drawingFile={drawingFile}
+            onDrawingFileChange={setDrawingFile}
+            isLoading={isLoading}
+            modeSelectorEnabled={FEATURES.modeSelector}
+            isModeMenuOpen={isModeMenuOpen}
+            onToggleModeMenu={() => setIsModeMenuOpen((v) => !v)}
+            onSelectChatMode={setChatMode}
+            ragSourceToggleEnabled={FEATURES.ragSourceToggle}
+            ragSource={ragSource}
+            onRagSourceChange={setRagSource}
+            localRagStatus={localRagStatus}
+            voiceAgentUrl={voiceAgentUrl}
+            onOpenVoiceAgentOverlay={() => setIsVoiceAgentOverlayOpen(true)}
+            composerRef={composerRef}
+            inputValue={inputValue}
+            onInputChange={setInputValue}
+            onKeyDown={onKeyDown}
+            onSend={() => handleSend()}
+            onFileSelected={handleFileSelected}
+            isUploadingDoc={isUploadingDoc}
+            sttSupported={sttSupported}
+            ttsSupported={ttsSupported}
+            isListening={isListening}
+            isSpeaking={isSpeaking}
+            sttError={sttError}
+            onMicClick={handleMicClick}
+            onStartVoiceConversation={handleStartVoiceConversation}
+            isEditingClause={isEditingClause}
+          />
+        }
+      >
+        <MainChatComposerBar
+          composerRef={composerRef}
+          inputValue={inputValue}
+          onInputChange={setInputValue}
+          onKeyDown={onKeyDown}
+          isLoading={isLoading}
+          onSend={() => handleSend()}
+          onFileSelected={handleFileSelected}
+          isUploadingDoc={isUploadingDoc}
+          isReviewing={isReviewing}
+          pendingUploadFile={pendingUploadFile}
+          sttSupported={sttSupported}
+          ttsSupported={ttsSupported}
+          isListening={isListening}
+          isSpeaking={isSpeaking}
+          sttError={sttError}
+          onMicClick={handleMicClick}
+          onStartVoiceConversation={handleStartVoiceConversation}
+          drawingFile={drawingFile}
+          isEditingClause={isEditingClause}
+        />
+      </FloatingComposerShell>
       </div>
       </div>
 
-      {/* Side panel previewing a generated document (see the documentPanel
-          state above and components/chat/DocumentPanel.tsx) - a sibling of
-          the main chat column, same outer flex row as ConversationSidebar,
-          so it docks to the right the same way the sidebar docks to the
-          left. */}
+      {/* Side panel showing the generated compliance report (see the
+          documentPanel state above and components/chat/DocumentPanel.tsx)
+          - a sibling of the main chat column, same outer flex row as
+          ConversationSidebar, so it docks to the right the same way the
+          sidebar docks to the left. */}
       {documentPanel && (
         <DocumentPanel
           url={documentPanel.url}
           filename={documentPanel.filename}
-          htmlUrl={documentPanel.htmlUrl}
+          documentUrl={documentPanel.documentUrl}
+          documentFilename={documentPanel.documentFilename}
           onClose={() => setDocumentPanel(null)}
+          isCollapsed={isDocumentPanelCollapsed}
+          onToggleCollapse={toggleDocumentPanelCollapsed}
+          isExpanded={isDocumentPanelExpanded}
+          onToggleExpanded={toggleDocumentPanelExpanded}
+          viewMode={documentPanelViewMode}
+          onViewModeChange={setDocumentPanelViewMode}
+          editState={editState}
+          onChooseAlternative={chooseEditAlternative}
+          onRejectEdit={rejectEditProposal}
+          onUndoEdit={undoLastEdit}
+          onDismissEdit={dismissEditState}
+          documentParagraphs={documentParagraphs}
+          blockEditState={blockEditState}
+          onSubmitBlockInstruction={runInlineBlockEdit}
+          onChooseBlockAlternative={chooseInlineBlockAlternative}
+          onRejectBlockEdit={rejectInlineBlockEdit}
+          onUndoBlockEdit={undoInlineBlockEdit}
+          onDismissBlockEdit={dismissBlockEditState}
+          assessment={activeReview?.review?.assessment}
+          reportGeography={activeReview?.review?.geography}
+          reportConstraintSummary={activeReview?.review?.constraint_summary}
+          reportBlocks={reportBlocks}
+          reportBlockEditState={reportBlockEditState}
+          onSubmitReportInstruction={runInlineReportEdit}
+          onChooseReportAlternative={chooseReportBlockAlternative}
+          onRejectReportEdit={rejectReportBlockEdit}
+          onDismissReportEdit={dismissReportBlockEditState}
+          onRefineReportEdit={refineReportBlockEdit}
+          onBackFromReportCustomPreview={backFromReportCustomPreview}
+          reportUndoStacks={reportUndoStacks}
+          reportUndoErrors={reportUndoErrors}
+          onUndoReportBlock={undoReportBlock}
+          onRedoReportBlock={redoReportBlock}
         />
       )}
     </div>
   );
 }
 
+// Same curve as --ease-settle in globals.css (DESIGN.md: "one easing
+// curve"). Framer Motion animates via JS, not CSS, so it can't read the
+// custom property directly - this keeps the two in numeric sync by hand.
+const EASE_SETTLE: [number, number, number, number] = [0.16, 1, 0.3, 1];
+
 function WelcomeScreen({
   onSuggestionClick,
 }: {
   onSuggestionClick: (s: string) => void;
 }) {
+  const shouldReduceMotion = useReducedMotion();
+
   return (
     // min-h fills the space the composer leaves, so the block sits optically
     // centred instead of stranded at the top above 600px of nothing.
@@ -2493,18 +3837,48 @@ function WelcomeScreen({
             changing hue. The product name lives in the sidebar and the tab
             title - repeating it here as the headline spent the largest type
             on the page saying nothing. */}
-        <h1 className="rise mb-4 text-center text-[2.15rem] font-semibold leading-[1.08] tracking-tight text-neutral-950 sm:text-[2.9rem]"
-            style={{ ["--i" as any]: 1, textWrap: "balance" as any }}>
-          A clearer view.
-          <br />
-          <span className="text-neutral-500">A better decision.</span>
+        <h1
+          className="mb-4 text-center text-[2.15rem] font-semibold leading-[1.08] tracking-tight text-neutral-950 sm:text-[2.9rem]"
+          style={{ textWrap: "balance" as any }}
+        >
+          {/* Each line reveals on its own beat rather than the whole
+              headline fading in as one block - same opacity/y move .rise
+              does, just choreographed in two steps instead of one. */}
+          <motion.span
+            className="block"
+            initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: shouldReduceMotion ? 0.01 : 0.42, ease: EASE_SETTLE }}
+          >
+            A clearer view.
+          </motion.span>
+          <motion.span
+            className="block text-neutral-500"
+            initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{
+              duration: shouldReduceMotion ? 0.01 : 0.42,
+              ease: EASE_SETTLE,
+              delay: shouldReduceMotion ? 0 : 0.07,
+            }}
+          >
+            A better decision.
+          </motion.span>
         </h1>
 
-        <p className="rise mx-auto mb-10 max-w-[46ch] text-center text-[0.95rem] leading-relaxed text-neutral-600"
-           style={{ ["--i" as any]: 2 }}>
+        <motion.p
+          className="mx-auto mb-10 max-w-[46ch] text-center text-[0.95rem] leading-relaxed text-neutral-600"
+          initial={shouldReduceMotion ? false : { opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{
+            duration: shouldReduceMotion ? 0.01 : 0.42,
+            ease: EASE_SETTLE,
+            delay: shouldReduceMotion ? 0 : 0.14,
+          }}
+        >
           Grounded regulatory answers with citations, page references and
           clause-level support.
-        </p>
+        </motion.p>
 
         {/* Hairline label rather than a floating "Try asking:" line - the rule
             does the separating, the words just name the group. */}
@@ -2520,12 +3894,20 @@ function WelcomeScreen({
             the cards are visible even if JS animation never runs. */}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {suggestions.map(({ policy, topic, question }, i) => (
-            <button
+            <motion.button
               key={question}
               type="button"
               onClick={() => onSuggestionClick(question)}
               style={{ ["--i" as any]: 4 + i }}
-              className="rise press group relative flex min-h-[6.5rem] w-full flex-col justify-start rounded-2xl border border-neutral-950/[0.08] bg-[#fbf9f5] p-5 pr-11 text-left shadow-paper-xs transition-[background-color,border-color,box-shadow] duration-200 ease-settle hover:border-neutral-950/20 hover:bg-white hover:shadow-paper-md"
+              className="rise group relative flex min-h-[6.5rem] w-full flex-col justify-start rounded-2xl border border-neutral-950/[0.08] bg-[#fbf9f5] p-5 pr-11 text-left shadow-paper-xs transition-[background-color,border-color,box-shadow] duration-200 ease-settle hover:border-neutral-950/20 hover:bg-white hover:shadow-paper-md"
+              // Replaces the .press CSS class for these cards specifically -
+              // Framer now owns their transform (lift on hover, settle on
+              // tap) so it can share one easing curve with the rest of this
+              // screen's motion instead of mixing a CSS :active transform in
+              // too. No hover scale-up (DESIGN.md) - only a translateY lift.
+              whileHover={shouldReduceMotion ? undefined : { y: -3 }}
+              whileTap={shouldReduceMotion ? undefined : { y: 0, scale: 0.985 }}
+              transition={{ duration: 0.14, ease: EASE_SETTLE }}
             >
               {/* Arrow parked top-right rather than on a row of its own at the
                   bottom. On the draft that row added ~50px of empty height to
@@ -2542,7 +3924,7 @@ function WelcomeScreen({
               <span className="text-[0.9rem] leading-snug text-neutral-800">
                 {question}
               </span>
-            </button>
+            </motion.button>
           ))}
         </div>
       </div>
@@ -3021,14 +4403,23 @@ function MessageBubble({
 // Mirrors the real backend pipeline (hybrid search -> LLM rerank ->
 // generation -> groundedness check) so the copy is honest about what's
 // actually happening, not just decorative. Cycles on a timer since the
-// route isn't streaming progress events yet.
-const THINKING_STAGES = [
-  "Searching indexed planning documents…",
-  "Ranking sources by relevance…",
-  "Reranking with AI for precision…",
-  "Drafting a grounded answer…",
-  "Cross-checking citations…",
+// route isn't streaming progress events yet. Each stage is paired with a
+// thinking-orbs state chosen for what it depicts, not just decoration -
+// searching is a literal scan; ranking sources is wiring them into a
+// constellation ("connecting"); a rerank pass is the result set drawing
+// itself more precisely ("shaping"); drafting text is "composing"; and
+// checking each citation resolves like solved bands clicking into place
+// ("solving"). Declared as one paired array, not two indexed in parallel,
+// so the text and the orb state can never drift out of sync with each
+// other.
+const THINKING_STAGE_DEFS: { text: string; orb: React.ComponentProps<typeof ThinkingOrb>["state"] }[] = [
+  { text: "Searching indexed planning documents…", orb: "searching" },
+  { text: "Ranking sources by relevance…", orb: "connecting" },
+  { text: "Reranking with AI for precision…", orb: "shaping" },
+  { text: "Drafting a grounded answer…", orb: "composing" },
+  { text: "Cross-checking citations…", orb: "solving" },
 ];
+const THINKING_STAGES = THINKING_STAGE_DEFS.map((s) => s.text);
 
 // Shimmering text: a bright band sweeps across otherwise-muted text via an
 // animated background-position on a background-clipped gradient. This is
@@ -3065,12 +4456,18 @@ function ShimmerText({
 // local-rag/proposal_review.py), same honesty rule as THINKING_STAGES:
 // this cycles on a timer, not real progress events, since the review
 // route isn't streaming stage updates yet.
-const REVIEW_STAGES = [
-  "Reading document & detecting the site…",
-  "Checking GIS constraints…",
-  "Retrieving & ranking planning policy…",
-  "Drafting the compliance assessment…",
+// Same pairing approach as THINKING_STAGE_DEFS just above - reading/
+// detecting the site is a literal scan ("searching"); a GIS constraint
+// check resolves pass/fail like solved bands clicking into place
+// ("solving"); retrieving & ranking policy wires evidence together
+// ("connecting"); drafting the assessment is "composing".
+const REVIEW_STAGE_DEFS: { text: string; orb: React.ComponentProps<typeof ThinkingOrb>["state"] }[] = [
+  { text: "Reading document & detecting the site…", orb: "searching" },
+  { text: "Checking GIS constraints…", orb: "solving" },
+  { text: "Retrieving & ranking planning policy…", orb: "connecting" },
+  { text: "Drafting the compliance assessment…", orb: "composing" },
 ];
+const REVIEW_STAGES = REVIEW_STAGE_DEFS.map((s) => s.text);
 
 // Compact counterpart to ThinkingIndicator, sized to sit inside a button
 // rather than a full message row - a small rotating ring plus the same
@@ -3088,11 +4485,17 @@ function ReviewingLabel() {
 
   return (
     <span className="inline-flex items-center gap-1.5">
-      <motion.span
-        className="h-3 w-3 shrink-0 rounded-full border-2 border-white/30 border-t-white"
-        animate={{ rotate: 360 }}
-        transition={{ repeat: Infinity, duration: 0.8, ease: "linear" }}
-        aria-hidden="true"
+      {/* theme="dark" here means "light dots for a dark background" (the
+          library's naming, opposite of this file's own ShimmerText
+          tone="dark"/"light", which names the TEXT colour) - this renders
+          on the dark "Run compliance review" button, same as ShimmerText's
+          tone="light" call just below. */}
+      <ThinkingOrb
+        state={REVIEW_STAGE_DEFS[stageIndex].orb}
+        size={20}
+        theme="dark"
+        aria-label={REVIEW_STAGES[stageIndex]}
+        className="shrink-0"
       />
       <AnimatePresence mode="wait">
         <motion.span
@@ -3126,23 +4529,19 @@ function ThinkingIndicator() {
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex items-center gap-4">
-      {/* rotating 3D "crystal" - see .uaa-crystal* rules in globals.css */}
-      <div className="uaa-crystal-wrap shrink-0" aria-hidden="true">
-        <div className="uaa-crystal">
-          <div className="uaa-pyramid uaa-pyramid-top">
-            <div className="uaa-side uaa-s1" />
-            <div className="uaa-side uaa-s2" />
-            <div className="uaa-side uaa-s3" />
-            <div className="uaa-side uaa-s4" />
-          </div>
-          <div className="uaa-pyramid uaa-pyramid-bottom">
-            <div className="uaa-side uaa-s1" />
-            <div className="uaa-side uaa-s2" />
-            <div className="uaa-side uaa-s3" />
-            <div className="uaa-side uaa-s4" />
-          </div>
-        </div>
-      </div>
+      {/* Replaced the old rotating CSS "crystal" pyramid with a
+          thinking-orbs state that actually matches the current pipeline
+          stage - see THINKING_STAGE_DEFS above for the pairing. theme=
+          "light" is pinned rather than "auto" because DESIGN.md rules
+          out dark mode for this app entirely; there's no light/dark
+          switch for the library to correctly auto-detect. */}
+      <ThinkingOrb
+        state={THINKING_STAGE_DEFS[stageIndex].orb}
+        size={64}
+        theme="light"
+        aria-label={THINKING_STAGES[stageIndex]}
+        className="shrink-0"
+      />
 
       <div className="flex-1">
         <AnimatePresence mode="wait">

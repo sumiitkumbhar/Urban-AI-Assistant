@@ -71,9 +71,28 @@ export interface UseVoiceChatResult {
   // voice mode just silently did nothing. Cleared at the start of every
   // speak() call.
   ttsError: string | null;
+  // Set when SpeechRecognition itself reports an error (mic permission
+  // denied, no usable input device, or - a real, seen-in-practice case -
+  // "no-speech" when the mic opened fine but nothing was heard before it
+  // gave up). Distinct from ttsError (that's the read-aloud half);
+  // callers use this one to give the composer/voice-overlay mic control
+  // its own restrained error state instead of silently reverting to
+  // "idle" the way a raw isListening=false does. Cleared at the start of
+  // every new listening attempt and the moment real speech is heard.
+  sttError: string | null;
   startListening: () => void;
   stopListening: () => void;
-  speak: (text: string, onDone?: () => void) => void;
+  // onProgress fires on every `timeupdate` tick of the underlying <audio>
+  // element with currentTime/duration, clamped to [0, 1] - the only
+  // playback-position signal the self-hosted TTS gives us (one complete
+  // blob per reply, no word or phoneme timing). Good for a proportional
+  // "reveal the Nth word of the known full text" effect; NOT a real
+  // per-word sync with what's actually being spoken at that instant.
+  speak: (
+    text: string,
+    onDone?: () => void,
+    onProgress?: (fraction: number) => void
+  ) => void;
   stopSpeaking: () => void;
 }
 
@@ -114,6 +133,7 @@ export function useVoiceChat(
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isPreparingSpeech, setIsPreparingSpeech] = useState(false);
   const [ttsError, setTtsError] = useState<string | null>(null);
+  const [sttError, setSttError] = useState<string | null>(null);
   const [sttSupported, setSttSupported] = useState(false);
   const [ttsSupported, setTtsSupported] = useState(false);
 
@@ -159,6 +179,7 @@ export function useVoiceChat(
     };
 
     recognition.onresult = (event: any) => {
+      setSttError(null);
       let finalText = "";
       let interimText = "";
       for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -188,6 +209,24 @@ export function useVoiceChat(
       // round - this fires even when recognition never reaches onresult.
       logClient({ source: "stt", event: "error", error: event?.error });
       setIsListening(false);
+      // "aborted" fires on a perfectly normal stopListening() call (the
+      // user tapped the mic to cancel, or it was torn down on unmount) -
+      // that's not an error a person should ever see surfaced.
+      if (event?.error === "aborted") {
+        setSttError(null);
+        return;
+      }
+      const message =
+        event?.error === "not-allowed"
+          ? "Microphone access was denied."
+          : event?.error === "no-speech"
+          ? "Didn't catch that - try again."
+          : event?.error === "audio-capture"
+          ? "No microphone found."
+          : event?.error === "network"
+          ? "Speech recognition network error."
+          : "Couldn't hear you - try again.";
+      setSttError(message);
     };
     recognition.onend = () => {
       logClient({ source: "stt", event: "end" });
@@ -212,6 +251,7 @@ export function useVoiceChat(
     const beginRecognition = () => {
       if (!recognitionRef.current || isListening) return;
       try {
+        setSttError(null);
         recognitionRef.current.start();
         setIsListening(true);
       } catch (error: any) {
@@ -275,7 +315,8 @@ export function useVoiceChat(
     setIsListening(false);
   }, []);
 
-  const speak = useCallback((text: string, onDone?: () => void) => {
+  const speak = useCallback(
+    (text: string, onDone?: () => void, onProgress?: (fraction: number) => void) => {
     const trimmed = text.trim();
     if (!trimmed) {
       onDone?.();
@@ -323,9 +364,21 @@ export function useVoiceChat(
           setIsPreparingSpeech(false);
           setIsSpeaking(true);
         };
+        // duration is unknown (NaN/Infinity) for a brief moment right
+        // after the element is created - guard both before trusting it.
+        audio.ontimeupdate = () => {
+          if (
+            onProgress &&
+            Number.isFinite(audio.duration) &&
+            audio.duration > 0
+          ) {
+            onProgress(Math.min(1, audio.currentTime / audio.duration));
+          }
+        };
         audio.onended = () => {
           setIsSpeaking(false);
           setIsPreparingSpeech(false);
+          onProgress?.(1);
           URL.revokeObjectURL(url);
           if (currentAudioRef.current === audio) currentAudioRef.current = null;
           onDone?.();
@@ -361,7 +414,9 @@ export function useVoiceChat(
         setTtsError(error?.message || "Voice service unreachable");
         onDone?.();
       });
-  }, []);
+    },
+    []
+  );
 
   const stopSpeaking = useCallback(() => {
     if (speakAbortRef.current) {
@@ -386,6 +441,7 @@ export function useVoiceChat(
     isSpeaking,
     isPreparingSpeech,
     ttsError,
+    sttError,
     startListening,
     stopListening,
     speak,

@@ -9,8 +9,35 @@
 // this component is purely the presentational layer on top of that state.
 
 import React from "react";
+// MIT, npm install thinking-orbs - free, no paid tier needed (verified in
+// node_modules/thinking-orbs/LICENSE before adding, per this project's
+// zero-cost rule). Its own animated states replace the old ping/pulse
+// rings + glow-shadow solid circle below, which also brings this overlay
+// in line with DESIGN.md's "no glow" rule - the old `shadow-[0_0_...]`
+// classes were a pre-existing exception to it.
+import { ThinkingOrb } from "thinking-orbs";
+import { MicWaveform } from "./MicWaveform";
 
 export type VoiceOverlayState = "idle" | "listening" | "thinking" | "speaking";
+
+// "listening" and "connecting" are literal matches in thinking-orbs'
+// vocabulary; there's no per-stage breakdown for "thinking" here (unlike
+// ThinkingIndicator's THINKING_STAGE_DEFS in ChatInterface.tsx), so it
+// gets the generic busy state; "speaking" reuses "composing" (producing
+// the response) for the same reason ChatInterface.tsx uses it for
+// "Drafting a grounded answer…". This also doubles as the "output"
+// visual for Speaking - there's no real output waveform here on purpose
+// (see MicWaveform's own doc comment: it exists because we can measure
+// real mic energy; there's no equivalent amplitude signal for CosyVoice2
+// playback, and a decorative one would be exactly the "moves even while
+// nothing is happening" fake the user explicitly called out for the mic
+// case - the same reasoning applies to output).
+const ORB_STATE: Record<VoiceOverlayState, React.ComponentProps<typeof ThinkingOrb>["state"]> = {
+  idle: "breathing",
+  listening: "listening",
+  thinking: "working",
+  speaking: "composing",
+};
 
 interface VoiceModeOverlayProps {
   state: VoiceOverlayState;
@@ -54,48 +81,77 @@ export default function VoiceModeOverlay({
         </svg>
       </button>
 
-      <button
-        type="button"
-        onClick={onOrbClick}
-        aria-label={STATUS_LABEL[state]}
-        title={STATUS_LABEL[state]}
-        className="relative flex h-48 w-48 items-center justify-center rounded-full focus:outline-none"
-      >
-        {state === "listening" && (
-          <>
-            <span className="absolute inset-0 animate-ping rounded-full bg-neutral-950/10" />
-            <span
-              className="absolute inset-4 animate-ping rounded-full bg-neutral-950/10"
-              style={{ animationDelay: "300ms" }}
-            />
-          </>
-        )}
-        {state === "speaking" && (
-          <span className="absolute inset-2 animate-pulse rounded-full bg-neutral-950/10" />
-        )}
+      {/* Everything below is one fixed-composition column: every slot
+          (orb, waveform, label, transcript) always occupies the same
+          height whether or not it currently has content, so switching
+          states never changes the stack's total height. Before this, the
+          waveform and transcript paragraph were only mounted in some
+          states - each mount/unmount shifted how much content
+          `justify-center` had to center, which is exactly what read as
+          "the text is not centred, it's slightly up": the resting
+          (idle/thinking) layout was shorter than the listening layout,
+          so the whole group visibly re-centred itself on every state
+          change instead of holding still. */}
+      <div className="flex flex-col items-center">
+        <button
+          type="button"
+          onClick={onOrbClick}
+          aria-label={STATUS_LABEL[state]}
+          title={STATUS_LABEL[state]}
+          className="relative flex h-48 w-48 items-center justify-center rounded-full focus:outline-none"
+        >
+          {/* theme="light" is pinned rather than "auto" - DESIGN.md rules
+              out dark mode for this app, so there's no light/dark switch
+              for the library to correctly auto-detect. */}
+          <ThinkingOrb state={ORB_STATE[state]} size={64} theme="light" aria-label={STATUS_LABEL[state]} />
+        </button>
 
-        <span
-          className={`h-32 w-32 rounded-full transition-all duration-500 ${
-            state === "speaking"
-              ? "scale-110 bg-neutral-950 shadow-[0_0_60px_rgba(0,0,0,0.35)]"
-              : state === "thinking"
-              ? "animate-pulse bg-neutral-700 shadow-[0_0_40px_rgba(0,0,0,0.2)]"
-              : state === "listening"
-              ? "scale-105 bg-neutral-900 shadow-[0_0_50px_rgba(0,0,0,0.3)]"
-              : "bg-neutral-300 shadow-[0_0_20px_rgba(0,0,0,0.08)]"
-          }`}
-        />
-      </button>
+        {/* Real mic-amplitude bars (components/chat/MicWaveform.tsx) - the
+            orb's own "listening" animation is decorative, not driven by
+            actual sound, so it was the main source of "I can't tell if
+            it's hearing me." Only captures audio while genuinely
+            listening (active={state === "listening"}), so the mic is
+            never opened a moment longer than recognition itself is
+            running - but the slot itself is always present at a fixed
+            height so nothing above or below it moves when it appears. */}
+        <div className="mt-6 flex h-8 items-center justify-center">
+          <MicWaveform
+            active={state === "listening"}
+            bars={5}
+            className="h-8 text-neutral-500"
+          />
+        </div>
 
-      <p className="mt-8 text-sm font-medium text-neutral-600">
-        {STATUS_LABEL[state]}
-      </p>
-
-      {liveCaption && (
-        <p className="mt-4 max-w-md px-6 text-center text-base text-neutral-800">
-          {liveCaption}
+        <p className="mt-3 text-sm font-medium text-neutral-600">
+          {STATUS_LABEL[state]}
         </p>
-      )}
+
+        {/* Fixed-height transcript/reveal slot, always mounted. Listening:
+            the user's own live transcript, muted and clamped to a few
+            lines - it's a caption, not the main content, and shouldn't
+            grow into a wall of text as a long sentence builds up word by
+            word. Thinking: that same utterance stays put (not blanked)
+            per the explicit requirement, just dimmed to show it's no
+            longer live. Speaking: the assistant's reply, revealed word by
+            word in step with playback (see voiceSpeakingReveal in
+            ChatInterface.tsx) - the most important text on this screen
+            while it's showing, so it gets the most prominent treatment. */}
+        <div className="mt-4 flex min-h-[5.5rem] w-full max-w-md items-start justify-center px-6">
+          {liveCaption && (
+            <p
+              className={
+                state === "speaking"
+                  ? "text-center text-lg leading-relaxed text-neutral-900 transition-opacity duration-150"
+                  : state === "thinking"
+                  ? "line-clamp-3 text-center text-base leading-relaxed text-neutral-400 transition-opacity duration-150"
+                  : "line-clamp-3 text-center text-base leading-relaxed text-neutral-700 transition-opacity duration-150"
+              }
+            >
+              {liveCaption}
+            </p>
+          )}
+        </div>
+      </div>
 
       <p className="absolute bottom-8 text-xs text-neutral-400">
         Tap the circle to interrupt or start talking again. Tap ✕ to end.

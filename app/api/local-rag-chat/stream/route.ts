@@ -174,13 +174,13 @@ function sseError(message: string, status: number) {
 // comment. Mirrors real /query/stream's event sequence (coverage, then
 // delta(s), then done) closely enough that sendLocalStreaming() in
 // ChatInterface.tsx needs no branch of its own to handle it.
-async function siteAnswerAsStream(postcode: string, query: string) {
+async function siteAnswerAsStream(postcode: string, query: string, backend: string) {
   let upstream: Response;
   try {
     upstream = await fetch(`${LOCAL_RAG_URL}/site-answer`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ postcode, question: query }),
+      body: JSON.stringify({ postcode, question: query, backend }),
       signal: AbortSignal.timeout(60_000),
     });
   } catch {
@@ -259,9 +259,16 @@ export async function POST(req: Request) {
     );
   }
 
+  // Fully-local generation (added 2026-09-24, opt-in) - see
+  // ../route.ts's identical `backend` handling for the full explanation;
+  // duplicated here for the same reason every other helper in this file
+  // is duplicated rather than imported (Next.js route modules don't
+  // share state across files here).
+  const backend = body?.backend === "ollama" ? "ollama" : "groq";
+
   const postcode = extractPostcode(query);
   if (postcode) {
-    return siteAnswerAsStream(postcode, query);
+    return siteAnswerAsStream(postcode, query, backend);
   }
 
   let upstream: Response;
@@ -269,7 +276,7 @@ export async function POST(req: Request) {
     upstream = await fetch(`${LOCAL_RAG_URL}/query/stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: query }),
+      body: JSON.stringify({ question: query, backend }),
       // A streamed query can legitimately run longer than the
       // non-streaming route's 60s budget before its first byte, but one
       // still running after 3 minutes is almost certainly stuck, not

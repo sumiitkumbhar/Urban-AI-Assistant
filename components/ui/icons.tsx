@@ -44,4 +44,17 @@ export const CubeIcon = (p: IconProps) => (<Svg {...p}><path d="M21 16V8l-9-5-9 
 export const DocumentChartBarIcon = BarChart
 export const CheckCircle = CircleCheck
 export const AlertTriangle = TriangleAlert
+// Loading spinner: circular track + rotating arc, heavier 2.5 stroke than
+// this file's default 1.8 (a spinner needs to read at a glance at small
+// sizes, same reasoning ConversationSidebar.tsx's own hand-rolled spinner
+// already used before this one - consolidated here instead of duplicated
+// again, and used in place of lucide-react's Loader2 in ui/button.tsx so
+// this app has one icon system, not two, per DESIGN.md's SF-Symbols-derived
+// "icon and type are one system" rule).
+export const Spinner = (p: IconProps) => (
+  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true" {...p}>
+    <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" strokeOpacity="0.2" />
+    <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+  </svg>
+)
 export default {}

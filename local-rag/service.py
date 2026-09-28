@@ -30,7 +30,9 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from common import DATA_DIR, CHUNKS_PATH, QDRANT_PATH, BM25_PATH
+import requests as _requests
+
+from common import DATA_DIR, CHUNKS_PATH, QDRANT_PATH, BM25_PATH, OLLAMA_BASE_URL, DEFAULT_OLLAMA_MODEL
 from answer import generate_answer, stream_answer
 from orchestrate import orchestrate
 from site_context import build_site_context, _describe_constraints, _find_map_citations
@@ -96,6 +98,24 @@ REPORTS_DIR = Path(__file__).parent / "reports"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/reports", StaticFiles(directory=str(REPORTS_DIR)), name="reports")
 
+# Serves the persisted original documents document_edit.save_document()
+# writes under documents/<doc_id>/ (original.pdf) - added 2026-09-23 for
+# live in-place clause editing, see document_edit.py's own module
+# docstring. Same mount-a-static-dir pattern as /reports and
+# /map-images above. Mounted at /document-files, NOT /documents -
+# the GET /documents/{doc_id} and POST /documents/{doc_id}/edit-clause
+# API routes below also live under /documents/*, and Starlette
+# resolves routes in registration order: a Mount("/documents", ...)
+# registered here (near the top of the file) would silently claim
+# every /documents/* request - including those two API routes,
+# appended much further down - before they ever got a chance to run,
+# 404ing from inside the static app instead. A different mount path
+# avoids the collision entirely rather than relying on route order.
+from document_edit import DOCUMENTS_DIR
+
+DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/document-files", StaticFiles(directory=str(DOCUMENTS_DIR)), name="document_files")
+
 
 class GroundednessCheckRequest(BaseModel):
     # See hallucination_check.py's module docstring for what this
@@ -127,6 +147,15 @@ class QueryRequest(BaseModel):
     # project-scoped query doesn't need the caller to repeat the
     # authority on every request.
     project_id: int | None = None
+    # Fully-local generation (added 2026-09-24, opt-in - see answer.py's
+    # generate_answer()/stream_answer() `backend` parameter and
+    # common.py's OLLAMA_BASE_URL/DEFAULT_OLLAMA_MODEL). "groq" (default,
+    # unchanged) answers via Groq's cloud API, same as every request
+    # before this field existed. "ollama" answers via a local Ollama
+    # instance instead, so nothing about this one query - not just
+    # retrieval - leaves the machine. Retrieval itself is unaffected
+    # either way; this only changes which model drafts the answer text.
+    backend: str = "groq"
 
 
 def _resolve_project_context(project_id, geography):
@@ -272,6 +301,33 @@ def health():
     return {"status": "ok" if ready else "not_ingested"}
 
 
+@app.get("/ollama/status")
+def ollama_status():
+    """Lets the frontend check, before offering the fully-local backend
+    toggle, whether Ollama is actually reachable right now and which
+    models it has pulled - rather than only finding out at answer time
+    via generate_answer()'s own error message (see answer.py's
+    _backend_error_message()). Hits Ollama's own /api/tags (lists
+    locally-installed models, no side effects) with a short timeout,
+    since this is meant to be a quick UI check, not a query. Best-effort
+    like every other optional-dependency check in this service: any
+    failure here just means "not available", never a 500 - Ollama simply
+    not being installed/running is an entirely normal state for most
+    users, not an error."""
+    try:
+        resp = _requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=2)
+        resp.raise_for_status()
+        models = [m.get("name") for m in resp.json().get("models", []) if m.get("name")]
+        return {
+            "available": True,
+            "models": models,
+            "default_model": DEFAULT_OLLAMA_MODEL,
+            "default_model_pulled": DEFAULT_OLLAMA_MODEL in models,
+        }
+    except Exception:
+        return {"available": False, "models": [], "default_model": DEFAULT_OLLAMA_MODEL, "default_model_pulled": False}
+
+
 @app.get("/citation-context/{chunk_id}")
 def citation_context(chunk_id: str, window: int = 1):
     """Neighboring-chunk context for one citation, used by the chat UI's
@@ -315,14 +371,17 @@ def query(req: QueryRequest):
         site_constraints_result, map_citations,
     ) = _resolve_retrieval(req)
     t1 = time.time()
-    result = generate_answer(question_for_llm, chunks, coverage=coverage, project_context=project_context)
+    result = generate_answer(
+        question_for_llm, chunks, coverage=coverage, project_context=project_context,
+        backend=req.backend,
+    )
     t2 = time.time()
 
     _auto_log_query_event(req.project_id, req.question, result.get("answer"))
 
     logger.info(
         f"query={req.question!r} chunks={len(chunks)} confidence={coverage['confidence']} "
-        f"retrieval_ms={(t1-t0)*1000:.0f} generation_ms={(t2-t1)*1000:.0f}"
+        f"backend={req.backend} retrieval_ms={(t1-t0)*1000:.0f} generation_ms={(t2-t1)*1000:.0f}"
         + (f" site_constraint_postcode_detected=True" if site_constraints_result else "")
     )
     return {
@@ -368,7 +427,8 @@ def query_stream(req: QueryRequest):
         yield f"event: coverage\ndata: {json.dumps(coverage)}\n\n"
         try:
             for kind, payload in stream_answer(
-                question_for_llm, chunks, coverage=coverage, project_context=project_context
+                question_for_llm, chunks, coverage=coverage, project_context=project_context,
+                backend=req.backend,
             ):
                 if kind == "delta":
                     yield f"event: delta\ndata: {json.dumps({'text': payload})}\n\n"
@@ -385,7 +445,7 @@ def query_stream(req: QueryRequest):
                     _auto_log_query_event(req.project_id, req.question, payload.get("answer"))
                     logger.info(
                         f"query(stream)={req.question!r} chunks={len(chunks)} "
-                        f"confidence={coverage['confidence']} "
+                        f"confidence={coverage['confidence']} backend={req.backend} "
                         f"retrieval_ms={(t1-t0)*1000:.0f} generation_ms={(t2-t1)*1000:.0f}"
                     )
                     yield f"event: done\ndata: {json.dumps(result)}\n\n"
@@ -425,6 +485,12 @@ class SiteAnswerRequest(BaseModel):
     question: str | None = None
     top_k: int = 25
     rerank_top_n: int = 8
+    # Same opt-in fully-local generation switch as QueryRequest.backend
+    # above - a postcode-triggered query (see the Next.js proxy's
+    # extractPostcode()) routes through this endpoint instead of /query,
+    # so it needs the same field or the toggle would silently stop
+    # applying the moment a question happens to mention a postcode.
+    backend: str = "groq"
 
 
 @app.post("/site-answer")
@@ -437,14 +503,16 @@ def site_answer(req: SiteAnswerRequest):
     if "error" in ctx:
         return ctx
     t1 = time.time()
-    result = generate_answer(ctx["policy_question"], ctx["chunks"], coverage=ctx["coverage"])
+    result = generate_answer(
+        ctx["policy_question"], ctx["chunks"], coverage=ctx["coverage"], backend=req.backend,
+    )
     t2 = time.time()
 
     logger.info(
         f"site-answer postcode={req.postcode!r} lat={req.lat} lon={req.lon} "
         f"address={req.address!r} geography={ctx['geography']} "
         f"question={ctx['policy_question']!r} "
-        f"confidence={ctx['coverage']['confidence']} "
+        f"confidence={ctx['coverage']['confidence']} backend={req.backend} "
         f"retrieval_ms={(t1-t0)*1000:.0f} generation_ms={(t2-t1)*1000:.0f}"
     )
     return {
@@ -633,6 +701,11 @@ async def proposal_review_endpoint(
     postcode: str | None = Form(None),
     lat: float | None = Form(None),
     lon: float | None = Form(None),
+    # 2026-09-25: "groq" (default, unchanged) / "ollama" (fully local) -
+    # same choice /query, /site-answer, and /documents/{doc_id}/edit-clause
+    # already offer, now available for compliance reviews too, so nothing
+    # in the app is forced through Groq once "Fully local" is on.
+    backend: str = Form("groq"),
 ):
     """curl example:
       curl -s -X POST http://localhost:8010/proposal-review \
@@ -656,29 +729,112 @@ async def proposal_review_endpoint(
     document_texts = []
     pages_not_assessed = {}
     report_files = {}
+    # 2026-09-28 diagnostics pass: endpoint-level stage logging, added
+    # after a live "502 from the Next.js proxy, 400 from this endpoint,
+    # repeatedly" report - the proxy was flattening every non-2xx upstream
+    # response into an opaque 502 with no visibility into WHICH stage
+    # actually failed or why (see app/api/local-rag-proposal-review/
+    # route.ts's matching 2026-09-28 fix). These logs, plus
+    # review_proposal()'s own internal stage logs, mean a future "it got
+    # stuck/failed" report is diagnosable straight from this service's
+    # own terminal output, without needing a live debugging session.
+    logger.info(
+        f"proposal-review: request accepted - files={[f.filename for f in files]} "
+        f"project_id={project_id} postcode={postcode!r} backend={backend}"
+    )
     with tempfile.TemporaryDirectory() as tmp:
         saved_paths = []
         for upload in files:
             dest = _Path(tmp) / upload.filename
             dest.write_bytes(await upload.read())
             saved_paths.append(dest)
+            logger.info(f"proposal-review: extracting {upload.filename}")
             text, _pages_with_text, pages_without_text, error = extract_proposal_text(dest)
             if error:
+                logger.warning(f"proposal-review: extraction FAILED for {upload.filename} - {error}")
                 raise HTTPException(status_code=400, detail=f"{upload.filename}: {error}")
             document_texts.append((upload.filename, text))
             if pages_without_text:
                 pages_not_assessed[upload.filename] = pages_without_text
+            logger.info(
+                f"proposal-review: extraction complete for {upload.filename} - "
+                f"{len(_pages_with_text)} page(s) with text, {len(pages_without_text)} without"
+            )
 
         result = review_proposal(
             document_texts, project_id=project_id, postcode=postcode, lat=lat, lon=lon,
+            backend=backend,
         )
         if result.get("error"):
+            logger.warning(f"proposal-review: review FAILED - {result['error']}")
             raise HTTPException(status_code=400, detail=result["error"])
 
         # Extracting site photos (extract_report_images) and rendering the
         # PDF both need the uploaded files on disk, so this runs while the
         # temp dir is still alive - it's gone the moment the `with` exits.
         document_names = [name for name, _ in document_texts]
+
+        # Persist each uploaded document (original PDF + paragraph-split
+        # text) so it survives past this one response and can be edited
+        # live via chat afterward - see document_edit.py's own module
+        # docstring. Best-effort per file: a persistence failure shouldn't
+        # break the review response the user is actually waiting on.
+        from document_edit import extract_paragraphs_from_pdf, save_document
+
+        documents = []
+        for upload, dest in zip(files, saved_paths):
+            try:
+                paragraphs = extract_paragraphs_from_pdf(dest)
+                doc_id = save_document(
+                    upload.filename, dest.read_bytes(), paragraphs,
+                    meta={
+                        "geography": result.get("geography"),
+                        "project_id": project_id,
+                        "postcode": postcode,
+                    },
+                )
+                documents.append({
+                    "doc_id": doc_id,
+                    "filename": upload.filename,
+                    # Points at the REGENERATED current.pdf (built from
+                    # paragraphs.json by save_document(), see
+                    # document_edit.py's 2026-09-23 module docstring
+                    # update), not the raw original.pdf - this is now the
+                    # one and only document view DocumentPanel shows, so
+                    # it needs to be the version that later edits will
+                    # also update in place. version=1 matches what
+                    # save_document() just wrote to meta.json.
+                    "url": f"/document-files/{doc_id}/current.pdf?v=1",
+                    "paragraph_count": len(paragraphs),
+                    "version": 1,
+                })
+            except Exception as e:
+                logger.warning(f"Could not persist {upload.filename} for live editing: {e}")
+
+        # Persist the review's own editable prose as its own addressable
+        # "report document" (2026-09-25, Report-tab correction to the
+        # inline-editing milestone: editing happens against the
+        # AI-generated report, never the uploaded source - see
+        # document_edit.py's "Report-block editing" section for the full
+        # design). Additive, alongside the source documents[] persistence
+        # just above, never instead of it. Best-effort, same reasoning as
+        # that loop: a persistence failure here shouldn't break the
+        # review response the user is actually waiting on - it just means
+        # this review's Report tab won't be editable this time.
+        report_doc_id, report_blocks = None, []
+        try:
+            from document_edit import save_report_blocks
+            source_doc_ids = [d["doc_id"] for d in documents]
+            report_doc_id, role_map = save_report_blocks(result, document_names, source_doc_ids)
+            if role_map:
+                report_blocks = [
+                    {"localId": lid, "kind": role["kind"], "index": role["index"]}
+                    for lid, role in role_map.items()
+                ]
+        except Exception as e:
+            logger.warning(f"Could not persist report blocks for live editing: {e}")
+
+        logger.info("proposal-review: report rendering starting")
         reports = build_reports(result, document_names, pdf_paths=saved_paths)
         reports_dir = _Path(__file__).parent / "reports"
         reports_dir.mkdir(exist_ok=True)
@@ -713,7 +869,7 @@ async def proposal_review_endpoint(
     t1 = time.time()
     logger.info(
         f"proposal-review files={[f.filename for f in files]} project_id={project_id} "
-        f"postcode={postcode!r} geography={result.get('geography')} "
+        f"postcode={postcode!r} geography={result.get('geography')} backend={backend} "
         f"issues={len(result['assessment'].get('issues', []))} "
         f"total_ms={(t1-t0)*1000:.0f}"
     )
@@ -721,6 +877,14 @@ async def proposal_review_endpoint(
         **result,
         "pages_not_assessed": pages_not_assessed,
         "report_files": report_files,
+        "documents": documents,
+        # report_doc_id/report_blocks (2026-09-25): the Report tab's own
+        # editable identity, separate from documents[].doc_id above (the
+        # source proposal). None/[] when persistence failed - the
+        # frontend's Report tab just isn't selectable/editable that time,
+        # same "degrade, don't break the review" contract as documents[].
+        "report_doc_id": report_doc_id,
+        "report_blocks": report_blocks,
         "total_ms": round((t1 - t0) * 1000, 1),
     }
 
@@ -783,3 +947,255 @@ def proposal_review_chat(req: ProposalReviewChatRequest):
         "retrieval_ms": round((t1 - t0) * 1000, 1),
         "generation_ms": round((t2 - t1) * 1000, 1),
     }
+
+
+class EditClauseRequest(BaseModel):
+    """Body for POST /documents/{doc_id}/edit-clause - added 2026-09-23,
+    see document_edit.py's own module docstring for the full feature.
+    instruction is free text, e.g. "paragraph 4 needs to mention cycle
+    parking" or "the bit about parking is too vague, tie it to policy" -
+    find_target_paragraph() locates the one paragraph it's about,
+    rewrite_paragraph() rewrites only that paragraph.
+
+    backend added 2026-09-24 (step 3 of the interactive-document-editing
+    plan, architecture section 53) - same "groq" (default, unchanged) /
+    "ollama" (fully local) choice already offered on /query and
+    /site-answer, now available for document edits too."""
+    instruction: str
+    geography: str | None = None
+    backend: str = "groq"
+
+
+@app.get("/documents/{doc_id}")
+def get_document(doc_id: str):
+    """Returns a document's current paragraphs (after any edits already
+    applied) plus its stored metadata - what the frontend re-fetches to
+    reload the editable preview, e.g. after a page refresh."""
+    from document_edit import load_paragraphs, load_meta
+
+    paragraphs = load_paragraphs(doc_id)
+    if paragraphs is None:
+        raise HTTPException(status_code=404, detail=f"No document with id {doc_id!r}.")
+    meta = load_meta(doc_id) or {}
+    version = meta.get("version", 1)
+    return {
+        "doc_id": doc_id,
+        "paragraphs": paragraphs,
+        "meta": meta,
+        "version": version,
+        "pdf_url": f"/document-files/{doc_id}/current.pdf?v={version}",
+    }
+
+
+@app.post("/documents/{doc_id}/edit-clause")
+def edit_clause(doc_id: str, req: EditClauseRequest):
+    """Rewrites exactly one paragraph of a persisted document per a chat
+    instruction, grounded against the policy corpus - see
+    document_edit.edit_document_clause()'s own docstring. Returns the
+    single changed paragraph (id, page, original/revised text,
+    rationale, citations) so the frontend can patch just that one block
+    of the live preview; every other paragraph is untouched on both the
+    server and the client."""
+    from document_edit import edit_document_clause
+
+    t0 = time.time()
+    result = edit_document_clause(
+        doc_id, req.instruction, geography=req.geography, backend=req.backend,
+    )
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    t1 = time.time()
+
+    logger.info(
+        f"edit-clause doc_id={doc_id} paragraph_id={result['paragraph_id']} "
+        f"backend={req.backend} instruction={req.instruction!r} total_ms={(t1-t0)*1000:.0f}"
+    )
+    return {**result, "total_ms": round((t1 - t0) * 1000, 1)}
+
+
+# --- Phase 2: propose/choose/reject/revert (2026-09-25, architecture plan ---
+# section 53) - the real alternatives-before-replace endpoints, additive to
+# /documents/{doc_id}/edit-clause above (which stays exactly as it is, the
+# backward-compatible one-shot path). See document_edit.py's own "Phase 2"
+# section docstring for the full design.
+
+
+class ProposeEditRequest(BaseModel):
+    """Body for POST /documents/{doc_id}/propose-edit. `issues` is the
+    active compliance review's own merged issue list (proposal_review.py's
+    {"topic","issue",...} shape, unchanged) - passed through by the
+    frontend from its own `activeReview` state, since a review isn't
+    stored server-side anywhere a doc_id could look it back up. Optional:
+    an empty/omitted list just means plain paragraph matching, same as
+    edit-clause today.
+
+    `target_local_id`/`selected_text` (2026-09-25, inline-block-editing
+    milestone) are optional and both None on the original chat-driven
+    path (unchanged). When the frontend already knows the exact target -
+    the user selected text inside a specific block in the interactive
+    document view - it sends that block's id here instead of making the
+    backend re-guess it; see document_edit.propose_edit()'s own
+    docstring for the full split."""
+    instruction: str
+    geography: str | None = None
+    backend: str = "groq"
+    issues: list[dict] | None = None
+    mode: str = "edit"
+    target_local_id: int | None = None
+    selected_text: str | None = None
+
+
+@app.post("/documents/{doc_id}/propose-edit")
+def propose_edit_route(doc_id: str, req: ProposeEditRequest):
+    """Resolves the target paragraph - either explicitly given
+    (`target_local_id`, the selection-driven path) or optionally
+    issue-augmented and guessed (`find_target_paragraph()`/
+    `match_compliance_issue()`, the original chat-driven path) - and
+    generates alternatives (three grounded rewrites, or one exact
+    replacement - see document_edit.propose_edit()'s own docstring) -
+    writes a `patches` row + `patch_alternatives` row(s) and returns them
+    for the user to choose from. Writes NOTHING to `blocks`: the live
+    document is untouched until a later `.../choose` call. Returns
+    {"error": ...} -> HTTP 400 on any failure, same convention as every
+    other best-effort call in this project."""
+    from document_edit import propose_edit
+
+    t0 = time.time()
+    result = propose_edit(
+        doc_id, req.instruction, geography=req.geography, backend=req.backend,
+        issues=req.issues, mode=req.mode,
+        target_local_id=req.target_local_id, selected_text=req.selected_text,
+    )
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    t1 = time.time()
+
+    logger.info(
+        f"propose-edit doc_id={doc_id} paragraph_id={result['paragraph_id']} "
+        f"matched_issue={(result.get('matched_issue') or {}).get('topic')!r} "
+        f"backend={req.backend} instruction={req.instruction!r} total_ms={(t1-t0)*1000:.0f}"
+    )
+    return {**result, "total_ms": round((t1 - t0) * 1000, 1)}
+
+
+class ChoosePatchRequest(BaseModel):
+    alternative_index: int
+    expected_doc_version: int
+
+
+@app.post("/documents/{doc_id}/patches/{patch_id}/choose")
+def choose_patch_route(doc_id: str, patch_id: str, req: ChoosePatchRequest):
+    """Applies one of propose-edit's three alternatives for real - the
+    patch validator (staleness/citation-integrity/content-drift) runs
+    here, at the moment of choosing, and only on success is the new
+    revision written and current.pdf regenerated. Idempotent: choosing
+    an already-applied patch again returns the same result rather than
+    writing twice (see document_store.choose_patch()'s own docstring)."""
+    from document_edit import choose_edit
+
+    result = choose_edit(doc_id, patch_id, req.alternative_index, req.expected_doc_version)
+    if result.get("error"):
+        raise HTTPException(status_code=409, detail=result["error"])
+    logger.info(
+        f"choose-patch doc_id={doc_id} patch_id={patch_id} "
+        f"alternative_index={req.alternative_index} already_applied={result.get('already_applied')}"
+    )
+    return result
+
+
+@app.post("/documents/{doc_id}/patches/{patch_id}/reject")
+def reject_patch_route(doc_id: str, patch_id: str):
+    """Keeps the original wording - marks the proposal rejected, writes
+    nothing else."""
+    from document_edit import reject_edit
+
+    result = reject_edit(doc_id, patch_id)
+    if result.get("error"):
+        raise HTTPException(status_code=409, detail=result["error"])
+    return result
+
+
+class RefinePatchRequest(BaseModel):
+    """Body for POST /documents/{doc_id}/patches/{patch_id}/refine - the
+    "Custom" refinement box (2026-09-26 six-area polish pass). Operates
+    on a still-open (status="proposed") patch's own already-generated
+    alternatives; never applies anything itself."""
+    instruction: str
+    backend: str = "groq"
+    model: str | None = None
+
+
+@app.post("/documents/{doc_id}/patches/{patch_id}/refine")
+def refine_patch_route(doc_id: str, patch_id: str, req: RefinePatchRequest):
+    """Generates ONE new alternative from the patch's existing
+    alternatives plus a refinement instruction ("use option 2 but
+    shorter", "combine options 1 and 3"...) and appends it to the same
+    patch. Writes nothing to blocks/block_revisions - the result is just
+    one more choosable alternative; the existing .../choose route is
+    what actually applies it, unchanged."""
+    from document_edit import refine_alternatives
+
+    result = refine_alternatives(doc_id, patch_id, req.instruction, backend=req.backend, model=req.model)
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    logger.info(
+        f"refine-patch doc_id={doc_id} patch_id={patch_id} backend={req.backend} "
+        f"instruction={req.instruction!r} new_index={result.get('index')}"
+    )
+    return result
+
+
+class RevertBlockRequest(BaseModel):
+    to_revision_id: str
+    expected_doc_version: int
+
+
+@app.post("/documents/{doc_id}/blocks/{local_id}/revert")
+def revert_block_route(doc_id: str, local_id: int, req: RevertBlockRequest):
+    """Undo - writes a NEW revision equal to an older one's text (never
+    deletes/rewrites history). Deliberately skips the content-drift
+    guard (see document_store.revert_block()'s own docstring for why)."""
+    from document_edit import revert_edit
+
+    result = revert_edit(doc_id, local_id, req.to_revision_id, req.expected_doc_version)
+    if result.get("error"):
+        raise HTTPException(status_code=409, detail=result["error"])
+    logger.info(f"revert-block doc_id={doc_id} local_id={local_id} version={result.get('version')}")
+    return result
+
+
+@app.post("/documents/{doc_id}/regenerate-report")
+def regenerate_report_route(doc_id: str):
+    """Report-tab analog of choose_edit()/revert_edit()'s own current.pdf
+    regeneration, added 2026-09-25 for report-block editing:
+    doc_id here is a report_doc_id (from /proposal-review's
+    report_doc_id field), not a source document. Re-runs
+    report_render.build_reports() against the report's current,
+    possibly-edited prose and overwrites the same reports/<slug> files
+    the original review wrote - see document_edit.regenerate_report_
+    files()'s own docstring. The frontend calls this once, right after a
+    successful choose-patch, to refresh reportFiles.pdf_url/html_url -
+    it is NOT called automatically by choose_patch_route/revert_block_
+    route above, which stay completely generic/unaware of report vs.
+    source documents."""
+    from document_edit import regenerate_report_files
+
+    result = regenerate_report_files(doc_id)
+    if result.get("error"):
+        raise HTTPException(status_code=400, detail=result["error"])
+    logger.info(f"regenerate-report doc_id={doc_id} version={result.get('version')}")
+    return result
+
+
+@app.get("/documents/{doc_id}/blocks/{local_id}/history")
+def block_history_route(doc_id: str, local_id: int):
+    """The ordered, immutable revision history of one block - what a
+    future "view history" UI or an Undo affordance's own confirmation
+    can read from, and what this session's Undo button uses to show
+    when there's nothing left to undo (history length <= 1)."""
+    import document_store as store
+
+    if not store.document_exists(doc_id):
+        raise HTTPException(status_code=404, detail=f"No document with id {doc_id!r}.")
+    history = store.get_block_history(doc_id, local_id)
+    return {"doc_id": doc_id, "local_id": local_id, "history": history}

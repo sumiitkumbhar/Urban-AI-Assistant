@@ -130,6 +130,16 @@ html, body, #__next {
   min-height: 100vh;
   margin: 0;
   padding: 0;
+  /* 2026-09-28 scroll-jump fix: the app shell (page.tsx) clips overflow
+     visually with its own `overflow-hidden` wrapper, but that only hides
+     content that spills past it - it does not stop html/body from having
+     a real, non-zero scrollTop of their own. A scrollIntoView() call deep
+     in the tree can still walk up and nudge html/body's scrollTop even
+     though nothing ever appears to overflow them, which is what produced
+     the "whole page jumps" bug on the starter-card -> first-answer path.
+     Making them explicitly non-scrolling closes that off for good,
+     regardless of what any future scrollIntoView() call does. */
+  overflow: hidden;
 }
 
 body {
@@ -8488,16 +8498,34 @@ p {
    box bows the sides into an oval. data-grown is set by the resize effect in
    ChatInterface, which measures scrollHeight rather than counting newlines -
    soft-wrapped and pasted text have no newlines to count. */
-textarea.uaa-composer {
-  background: var(--paper-raised, #fbf9f5) !important;
+/* Main chat composer's textarea (components/chat/MainChatComposer.tsx).
+   2026-09-28 visual-redesign pass: the pill surface, border and shadow
+   now live on FloatingComposerShell's own bar (see that component) so
+   there is exactly ONE floating surface, not an outer rounded container
+   plus a second inner bordered/backgrounded input on top of it - that
+   double-box look was this rule painting an opaque pill background here
+   while the shell painted a translucent one around it. This textarea
+   opts out of the app-wide bare `input:not([type]), textarea` rule and
+   the `textarea:focus` glow above (same technique `.ai-command-input`
+   already uses) so it renders with NO surface, border, radius or focus
+   ring of its own - just text sitting on the shell. Sizing (min/max
+   height, autosize) stays here since that's still this element's own
+   concern, not the shell's; the old `[data-grown="true"]` radius swap is
+   gone with it since the shell's radius is now fixed regardless of how
+   tall the textarea grows. */
+textarea.uaa-composer,
+textarea.uaa-composer:focus {
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  outline: none !important;
   color: #1c1a16 !important;
-  border-radius: 9999px !important;
-  min-height: 3rem;
+}
+textarea.uaa-composer {
+  min-height: 2.75rem;
   max-height: 168px;
   overflow-y: hidden;
-}
-textarea.uaa-composer[data-grown="true"] {
-  border-radius: 20px !important;
 }
 textarea.uaa-composer::placeholder { color: #a39b8d !important; }
 
@@ -8511,4 +8539,27 @@ input[type="text"].uaa-composer::placeholder { color: var(--ink-faint); }
 input[type="text"].uaa-composer:focus {
   background: #ffffff !important;
   border-color: var(--rule-strong) !important;
+}
+
+/* AI command box (Report tab inline edit, DocumentPanel.tsx InlineEditCommand) -
+   opts its textarea out of the app-wide bare `input:not([type]), textarea`
+   and `input:focus, select:focus, textarea:focus` rules above, which paint
+   every plain textarea with an !important border + blue focus box-shadow.
+   Those rules only have element-level specificity for `textarea`, so a
+   scoped class here wins even though both sides use !important. Added
+   2026-09-26. */
+.ai-command-input,
+.ai-command-input:focus {
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  outline: none !important;
+  /* Was #fff, correct back when this box was still charcoal-themed. The
+     command box (and now FullscreenEditBar, which shares this class) has
+     since gone light-themed - force-inheriting the surrounding text color
+     instead keeps this rule scoped to killing the global input/textarea
+     reset (border/bg/shadow/outline) without also dictating a color that
+     doesn't match whichever light-themed composer uses this class. */
+  color: inherit !important;
 }
