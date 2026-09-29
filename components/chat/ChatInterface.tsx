@@ -4326,11 +4326,19 @@ function MessageBubble({
   )}
 
   <div className={`w-full ${isUser ? "max-w-2xl" : "max-w-5xl"}`}>
+    {/* 2026-09-29: question/answer bubbles now carry the same glass
+        design language as the composer pill (see the "GLASS MESSAGE
+        BUBBLES" block in globals.css for the full rationale and the
+        deliberate-exception note) - `.uaa-glass-card--user` /
+        `.uaa-glass-card--assistant` supply background, border, blur and
+        highlight directly, replacing the old flat bg-neutral-950/* +
+        border-neutral-950/* + shadow-[...] combo so those three things
+        stay defined in exactly one place. */}
     <div
-      className={`px-6 py-5 rounded-3xl shadow-[0_1px_3px_rgba(0,0,0,0.04),0_1px_2px_rgba(0,0,0,0.03)] ${
+      className={`px-6 py-5 rounded-3xl ${
         isUser
-          ? "ml-auto max-w-[720px] border border-neutral-950/15 bg-neutral-950/[0.08]"
-          : "w-full max-w-[980px] border border-neutral-950/10 bg-neutral-950/5"
+          ? "ml-auto max-w-[720px] uaa-glass-card--user"
+          : "w-full max-w-[980px] uaa-glass-card--assistant"
       }`}
     >
 <div className="text-[15px] leading-7 text-neutral-800">

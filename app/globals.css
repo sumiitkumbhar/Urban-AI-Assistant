@@ -8597,25 +8597,32 @@ input[type="text"].uaa-composer:focus {
   position: relative;
   overflow: hidden;
   isolation: isolate;
-  /* Detuned again 2026-09-29 (third pass): the previous 22%/8px version
-     still read as a "translucent white blur slab" rather than crisp glass -
-     both the fill AND the drop-shadow's own soft spread were reading as
-     haze around the pill, not just the backdrop-filter. This pass cuts
-     fill/blur/saturate roughly in half again, tightens the shadow's blur
-     radius (34px->22px) and opacity (0.08->0.05) so it reads as elevation,
-     not fog, and keeps the border a touch stronger relative to the now
-     much-lighter fill so the edge still reads as a defined glass rim
-     ("soft edge definition... delicate inner highlight") rather than
-     dissolving into the page. Same warm --paper-raised tint and
-     ink-tinted shadow convention as every prior pass - only magnitudes
-     changed, again. */
-  background: rgba(251, 249, 245, 0.13);
-  -webkit-backdrop-filter: blur(5px) saturate(1.04);
-  backdrop-filter: blur(5px) saturate(1.04);
-  border: 1px solid rgba(255, 253, 246, 0.24);
+  /* Detuned a fourth time 2026-09-29: unlike passes 2 and 3, this is NOT a
+     uniform scale-down. Feedback was explicitly two-sided - "too much white
+     fill, not enough true transparency" AND "not enough edge definition,
+     material feels flat" - so fill/blur move down again (13%->9%,
+     5px->4px, the lowest yet - clearer background visibility, no added
+     fog) while the border and highlight move the OPPOSITE direction in
+     relative terms, gaining contrast as the fill they sit against gets
+     lighter: border alpha 0.24->0.34 (visibly crisper rim, still a
+     hairline weight, not a harsh outline) and a second, tighter box-shadow
+     ring (`0 0 0 0.5px`) added purely for edge crispness at the pill's
+     literal boundary - independent of the wider elevation shadow below it,
+     which itself tightens (22px->18px, 0.05->0.045) so it reads as a
+     shorter, more precise drop rather than a soft glow. Net effect: less
+     "frosted panel," more "thin polished pane with a defined rim" - the
+     glass-not-frost distinction from this pass's brief. Saturate nudges up
+     (1.04->1.06) since a touch more color vibrancy in what shows through
+     reads as clarity, not haze. Same warm --paper-raised tint and
+     ink-tinted shadow convention as every prior pass. */
+  background: rgba(251, 249, 245, 0.09);
+  -webkit-backdrop-filter: blur(4px) saturate(1.06);
+  backdrop-filter: blur(4px) saturate(1.06);
+  border: 1px solid rgba(255, 253, 246, 0.34);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.16),
-    0 10px 22px rgba(28, 26, 22, 0.05);
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 0 0 0.5px rgba(28, 26, 22, 0.05),
+    0 8px 18px rgba(28, 26, 22, 0.045);
 }
 
 /* Top-highlight - the one cheap thing that reads as "material" rather than
@@ -8630,14 +8637,114 @@ input[type="text"].uaa-composer:focus {
   inset: 0;
   border-radius: inherit;
   pointer-events: none;
-  /* Halved again 2026-09-29 (third pass) alongside the fill/blur/shadow
-     reduction above - still compounding into the "washed out" look even
-     at half its original strength. */
+  /* Retuned 2026-09-29 (fourth pass): brief explicitly asked for a "more
+     refined top highlight" via a *tighter gradient stop*, not just another
+     opacity cut - a gradual fade to 100% reads as a soft wash across the
+     whole pill, not a highlight. This peaks higher (0.06->0.10) right at
+     the top edge, then falls essentially to nothing by ~40% height instead
+     of fading all the way down, so it reads as a crisp catch-light along
+     the rim rather than a general brightening of the surface - closer to
+     how a real polished edge catches light in a narrow band. */
   background: linear-gradient(
     to bottom,
-    rgba(255, 255, 255, 0.06),
-    rgba(255, 255, 255, 0.03) 35%,
-    rgba(255, 255, 255, 0.015) 100%
+    rgba(255, 255, 255, 0.10),
+    rgba(255, 255, 255, 0.025) 18%,
+    rgba(255, 255, 255, 0) 42%
+  );
+}
+
+/* ===========================================================================
+   GLASS MESSAGE BUBBLES (added 2026-09-29, composer-glass pass 4 /
+   bubble-glass pass 1) - see claude/composer-icon-alignment-and-liquid-glass-poc.md
+   for the full history this extends.
+   ---------------------------------------------------------------------------
+   EXPANDS the composer's narrow, explicitly-documented glassmorphism
+   exception (DESIGN.md's brand-read section still says "explicitly avoid
+   glassmorphism" as the general rule) to two more surfaces: the question
+   bubble and the answer bubble in ChatInterface.tsx's MessageBubble. This
+   is a deliberate widening of that exception, per explicit 2026-09-29
+   product direction, not a silent reversal - still scoped to exactly these
+   three surfaces (composer, question bubble, answer bubble), nothing else.
+
+   Deliberately NOT the same recipe as `.uaa-glass-pill`, on two axes:
+   - Tint: these sit directly on the page's light background and need
+     genuine contrast to stay readable, so the fill is ink-tinted
+     (rgba(28,26,22,...), matching --ink/--rule's own color rather than an
+     arbitrary Tailwind neutral-950) instead of the composer's warm
+     --paper-raised tint, which exists to sit invisibly against page
+     content scrolling underneath a floating bar.
+   - Intensity: these are "medium-subtle" glass, a full tier below the
+     composer by design (blur 3px vs the composer's 4px, fill capped at
+     6%/4.5% vs the composer's 9%) - the composer stays the strongest,
+     most premium glass surface on the page; the bubbles read as "lightly
+     glassy," never competing with it. Border/highlight follow the same
+     "keep edge definition relatively higher than fill" idea as the
+     composer's own fourth pass, just scaled down for this quieter tier.
+
+   `position: relative; overflow: hidden; isolation: isolate;` on each,
+   matching the composer pill's own clipping discipline, so backdrop-filter
+   can never leak past the bubble's own rounded-3xl bounds and `isolation:
+   isolate` keeps the citation cards nested inside an answer bubble from
+   ever being composited "through" the parent's own backdrop-filter - they
+   keep rendering their own normal background/text, untouched, on top.
+   ======================================================================== */
+.uaa-glass-card--user {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  background: rgba(28, 26, 22, 0.06);
+  -webkit-backdrop-filter: blur(3px) saturate(1.02);
+  backdrop-filter: blur(3px) saturate(1.02);
+  border: 1px solid rgba(28, 26, 22, 0.16);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.30),
+    0 1px 3px rgba(28, 26, 22, 0.04),
+    0 1px 2px rgba(28, 26, 22, 0.03);
+}
+.uaa-glass-card--user::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.05),
+    rgba(255, 255, 255, 0) 30%
+  );
+}
+
+/* Answer bubble - same tier as the question bubble, tuned very slightly
+   more conservative (lower fill, lower border/highlight alpha) since it
+   holds dense long-form markdown (headings, lists, bold text, and nested
+   citation cards) where the brief was explicit: "the glass treatment must
+   stay restrained... preserve typography clarity." Same 3px blur as the
+   question bubble - readability risk here is fill/contrast, not blur
+   radius, so blur doesn't need to drop further; live-verified against a
+   real multi-paragraph answer (see project doc). */
+.uaa-glass-card--assistant {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  background: rgba(28, 26, 22, 0.045);
+  -webkit-backdrop-filter: blur(3px) saturate(1.02);
+  backdrop-filter: blur(3px) saturate(1.02);
+  border: 1px solid rgba(28, 26, 22, 0.12);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.26),
+    0 1px 3px rgba(28, 26, 22, 0.04),
+    0 1px 2px rgba(28, 26, 22, 0.03);
+}
+.uaa-glass-card--assistant::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.04),
+    rgba(255, 255, 255, 0) 30%
   );
 }
 
