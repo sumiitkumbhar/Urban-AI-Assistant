@@ -176,6 +176,19 @@ export interface LiquidGlassSurfaceProps {
   tintOpacity?: number;
   /** Force debug (exaggerated) parameters regardless of the `?liquidGlassDebug=1` URL param. */
   debug?: boolean;
+  /**
+   * 2026-09-29 glass-blur-bounds debug aid (see FloatingComposerShell's
+   * `readComposerOutlineDebugParam`, which computes this from
+   * `?composerDebug=1`). When true, outlines this surface's own host div
+   * (green - "composer rect"), the glass runtime's `.glass-container`
+   * element (blue - "glass host rect"), and its canvas (red -
+   * "blur/canvas rect") so the three can be visually compared: if red
+   * extends past green/blue, the blur region is bigger than the
+   * composer. Purely visual (outline, not border - adds no layout), and
+   * only takes effect at mount (matches `debug`'s own load-time-only
+   * semantics above).
+   */
+  debugOutline?: boolean;
   onStatusChange?: (status: LiquidGlassStatus) => void;
 }
 
@@ -187,6 +200,7 @@ export function LiquidGlassSurface({
   borderRadius = 26,
   tintOpacity = 0.14,
   debug = false,
+  debugOutline = false,
   onStatusChange,
 }: LiquidGlassSurfaceProps) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -302,6 +316,36 @@ export function LiquidGlassSurface({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 2026-09-29 glass-blur-bounds debug aid (see debugOutline prop doc
+  // above). Reactive - not folded into the mount-once init effect above
+  // - so it applies correctly even though `debugOutline` typically
+  // becomes true one render AFTER this component first mounts (the
+  // parent reads `?composerDebug=1` in its own effect, which runs after
+  // this child's effects on first paint).
+  useEffect(() => {
+    if (status !== "active") return;
+    const instance = instanceRef.current;
+    const canvasEl = instance?.element?.querySelector("canvas") as HTMLCanvasElement | null;
+    if (!instance?.element) return;
+    if (debugOutline) {
+      // Blue = glass host rect (`.glass-container`, i.e. instance.element).
+      instance.element.style.outline = "2px solid #3b82f6";
+      instance.element.style.outlineOffset = "-3px";
+      // Red = blur/canvas rect.
+      if (canvasEl) {
+        canvasEl.style.outline = "2px solid #ef4444";
+        canvasEl.style.outlineOffset = "-6px";
+      }
+    } else {
+      instance.element.style.outline = "";
+      instance.element.style.outlineOffset = "";
+      if (canvasEl) {
+        canvasEl.style.outline = "";
+        canvasEl.style.outlineOffset = "";
+      }
+    }
+  }, [debugOutline, status]);
+
   // The library has no resize/ResizeObserver handling of its own (file
   // header point 2) - without this, the glass canvas silently desyncs
   // from the real composer bounds the moment the sidebar toggles or the
@@ -328,7 +372,11 @@ export function LiquidGlassSurface({
   const showFallbackVisual = status !== "active";
 
   return (
-    <div ref={hostRef} className={`${outerClassName} ${showFallbackVisual ? fallbackVisualClassName : ""}`.trim()}>
+    <div
+      ref={hostRef}
+      className={`${outerClassName} ${showFallbackVisual ? fallbackVisualClassName : ""}`.trim()}
+      style={debugOutline ? { outline: "2px solid #22c55e", outlineOffset: "0px" } : undefined}
+    >
       <div ref={contentRef}>{children}</div>
     </div>
   );

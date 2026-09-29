@@ -38,9 +38,28 @@
  * shell share its look, never each other's state.
  */
 
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Z } from "./zIndex";
 import { LiquidGlassSurface } from "./LiquidGlassSurface";
+
+/**
+ * 2026-09-29 glass-blur-bounds debug aid. `?composerDebug=1` outlines, in
+ * the live DOM, the three rects the 2026-09-29 "blur extends above the
+ * composer" bug report asked to compare: the composer bar itself
+ * (green - drawn here and, for the glass path, again inside
+ * LiquidGlassSurface around its own host element, since both names refer
+ * to the same box), the fade layer that turned out to be the actual
+ * oversized blur source (magenta dashed - NOT one of the original
+ * 3-color ask, added because this is the element the bug traced to), and
+ * (inside LiquidGlassSurface) the glass host/canvas rects. Same
+ * load-time-param pattern as `?liquidGlass=off` / `?liquidGlassDebug=1`
+ * above - read once, not a live toggle. Turn off by dropping the param
+ * (or leave it in prod; it is inert unless the param is present).
+ */
+function readComposerOutlineDebugParam(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get("composerDebug") === "1";
+}
 
 export interface FloatingComposerShellProps {
   children: React.ReactNode;
@@ -132,6 +151,8 @@ export function FloatingComposerShell({
   visible = true,
 }: FloatingComposerShellProps) {
   const wrapRef = useRef<HTMLDivElement>(null);
+  const [composerDebug, setComposerDebug] = useState(false);
+  useEffect(() => setComposerDebug(readComposerOutlineDebugParam()), []);
 
   // Reports the shell's own height (fade zone height, which is fixed, PLUS
   // however much the composer bar itself grows past the fade zone via
@@ -157,7 +178,16 @@ export function FloatingComposerShell({
           content appears to pass underneath it and fade out rather than
           hit a hard rectangular wall. A sibling of the bar (not a parent),
           so it can have its own fixed height independent of the bar's
-          actual (possibly-taller, e.g. with an attachment list) height. */}
+          actual (possibly-taller, e.g. with an attachment list) height.
+          SOLID-COLOR GRADIENT ONLY - no backdrop-filter/blur here. This
+          layer is deliberately taller and wider than the composer bar
+          (see height/inset-x-0 above), which is only safe for an opaque
+          fade-to-transparent color wash; a blur here would (and, before
+          2026-09-29, did) apply to real page content above the composer's
+          own top edge, which is the one thing the glass architecture
+          explicitly reserves for the actual glass pill surface alone.
+          Do not add backdrop-filter/filter back onto this element - if a
+          softer transition is wanted, tune the gradient stops instead. */}
       <div
         aria-hidden
         className="pointer-events-none absolute inset-x-0 bottom-0"
@@ -165,8 +195,9 @@ export function FloatingComposerShell({
           height: fadeHeightPx,
           zIndex: Z.BOTTOM_FADE,
           background: `linear-gradient(to top, ${fadeBackground} 0%, ${fadeBackground} 42%, transparent 100%)`,
-          backdropFilter: "blur(1px)",
-          WebkitBackdropFilter: "blur(1px)",
+          ...(composerDebug
+            ? { outline: "2px dashed #d946ef", outlineOffset: "-2px" }
+            : null),
         }}
       />
 
@@ -214,6 +245,7 @@ export function FloatingComposerShell({
               }
               type="pill"
               tintOpacity={0.14}
+              debugOutline={composerDebug}
             >
               {children}
             </LiquidGlassSurface>
@@ -234,6 +266,7 @@ export function FloatingComposerShell({
                     "rounded-[26px] bg-[rgba(251,249,245,0.9)] shadow-[0_3px_16px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] backdrop-blur-xl " +
                     barClassName)
               }
+              style={composerDebug ? { outline: "2px solid #22c55e", outlineOffset: "0px" } : undefined}
             >
               {children}
             </div>
