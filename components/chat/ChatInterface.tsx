@@ -150,6 +150,14 @@ export interface ChatMessage {
     groundedness?: number | null;
     unsupportedClaims?: string[];
     citations?: Citation[];
+    // True from the moment a local-streaming assistant message is first
+    // created until the SSE 'done' event actually resolves with real
+    // citations (see sendLocalStreaming's upsertAssistantMessage). Lets
+    // the citations area show a lightweight inline placeholder instead of
+    // leaving the full-message ThinkingIndicator visible for that gap,
+    // which read as a second, redundant loading state under an answer
+    // that already looked complete.
+    citationsPending?: boolean;
     diagram?: DiagramPayload;
     complianceResult?: any;
     // Domain terms the speech recognizer misheard and the backend
@@ -3169,6 +3177,9 @@ export default function ChatInterface() {
                 content,
                 timestamp: startTimestamp,
                 skipTypewriter: true,
+                // Overridden by the 'done' handler's own metadata object
+                // (extra) once real citations are ready.
+                metadata: { citationsPending: true },
                 ...extra,
               },
             ]
@@ -3240,6 +3251,7 @@ export default function ChatInterface() {
               groundedness: payload.groundedness,
               unsupportedClaims: payload.unsupportedClaims || [],
               citations: mappedCitations,
+              citationsPending: false,
               mapCitations: Array.isArray(payload.mapCitations)
                 ? payload.mapCitations
                 : [],
@@ -3660,7 +3672,16 @@ export default function ChatInterface() {
             )}
           </AnimatePresence>
 
-          {isLoading && <ThinkingIndicator />}
+          {(() => {
+            const lastMessage = messages[messages.length - 1];
+            const showThinkingIndicator =
+              isLoading &&
+              !(
+                lastMessage?.type === "assistant" &&
+                lastMessage.content.trim().length > 0
+              );
+            return showThinkingIndicator && <ThinkingIndicator />;
+          })()}
 
           {error && (
             <div className="max-w-md rounded-xl border border-neutral-950/25 bg-neutral-950/[0.06] px-3 py-2 text-xs text-neutral-950">
@@ -4364,7 +4385,12 @@ function MessageBubble({
                       </div>
                     )}
 
-                  {Array.isArray(message.metadata?.citations) &&
+                  {message.metadata?.citationsPending ? (
+                    <div className="mt-5 w-full">
+                      <CitationsLoadingPlaceholder />
+                    </div>
+                  ) : (
+                    Array.isArray(message.metadata?.citations) &&
                     message.metadata.citations.length > 0 && (
                       <div className="mt-5 w-full">
                         <SourcesSection
@@ -4372,7 +4398,8 @@ function MessageBubble({
                           queryText={queryText}
                         />
                       </div>
-                    )}
+                    )
+                  )}
                 </>
               )}
             </div>
@@ -4447,6 +4474,33 @@ function ShimmerText({
     >
       {children}
     </span>
+  );
+}
+
+// Lightweight inline placeholder shown in place of SourcesSection while
+// citations are still being assembled after streaming text has finished
+// (see ChatMessage.metadata.citationsPending in sendLocalStreaming) -
+// replaces the old behaviour of leaving the full-message ThinkingIndicator
+// visible for that whole gap, which read as a second, redundant loading
+// state stacked below an answer that already looked complete. Mirrors
+// SourcesSection's own outer card chrome so nothing shifts noticeably
+// when the real citations swap in, and never calls scrollIntoView or
+// otherwise moves the page - it just replaces itself in place.
+function CitationsLoadingPlaceholder() {
+  return (
+    <div className="rounded-3xl border border-neutral-950/10 bg-neutral-950/[0.04] p-4">
+      <p className="text-sm font-semibold text-neutral-950">
+        <ShimmerText>Loading evidence…</ShimmerText>
+      </p>
+      <div className="mt-3 space-y-2">
+        {[0, 1].map((i) => (
+          <div
+            key={i}
+            className="h-14 animate-pulse rounded-2xl border border-neutral-950/10 bg-neutral-950/[0.05]"
+          />
+        ))}
+      </div>
+    </div>
   );
 }
 

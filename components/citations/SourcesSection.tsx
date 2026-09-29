@@ -69,25 +69,35 @@ export default function SourcesSection({
     return counts;
   }, [sortedSources]);
 
-  const [expandedId, setExpandedId] = useState<string | number | null>(
-    sortedSources[0]?.id ?? null
+  // Independent per-citation expand/collapse: each card owns its own
+  // open/closed state via Set membership, instead of a single nullable id
+  // that forced accordion behaviour (opening one closed another). Starts
+  // empty - nothing is auto-expanded when citations arrive.
+  const [expandedIds, setExpandedIds] = useState<Set<string | number>>(
+    () => new Set()
   );
   const [showAll, setShowAll] = useState(false);
 
+  // Prune ids that no longer correspond to a source (e.g. citations were
+  // replaced on a re-answer). Never force anything open - whatever the
+  // user had expanded stays expanded, whatever was collapsed stays
+  // collapsed.
   useEffect(() => {
-    if (!sortedSources.length) {
-      setExpandedId(null);
-      return;
-    }
-
-    const currentStillExists = sortedSources.some(
-      (source) => source.id === expandedId
-    );
-
-    if (!currentStillExists) {
-      setExpandedId(sortedSources[0].id);
-    }
-  }, [sortedSources, expandedId]);
+    setExpandedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const validIds = new Set(sortedSources.map((source) => source.id));
+      let changed = false;
+      const next = new Set<string | number>();
+      prev.forEach((id) => {
+        if (validIds.has(id)) {
+          next.add(id);
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [sortedSources]);
 
   if (!sortedSources.length) return null;
 
@@ -143,10 +153,18 @@ export default function SourcesSection({
             <ExpandableCitation
               citation={citation}
               index={index}
-              expanded={expandedId === citation.id}
+              expanded={expandedIds.has(citation.id)}
               queryText={queryText}
               onToggle={() =>
-                setExpandedId((prev) => (prev === citation.id ? null : citation.id))
+                setExpandedIds((prev) => {
+                  const next = new Set(prev);
+                  if (next.has(citation.id)) {
+                    next.delete(citation.id);
+                  } else {
+                    next.add(citation.id);
+                  }
+                  return next;
+                })
               }
             />
           </div>

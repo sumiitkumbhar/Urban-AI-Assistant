@@ -604,9 +604,6 @@ function looksDirtyForStructuredView(text: string) {
   );
 }
 
-function getScrollClass() {
-  return "overflow-visible";
-}
 
 export default function ExpandableCitation({
   citation,
@@ -1135,56 +1132,60 @@ citation.directLink.startsWith("http") ? (
   </div>
 ) : null}
 
-              {shouldUseRawFallback ? (
-                <div className="rounded-3xl border border-dashed border-neutral-950/20 bg-neutral-950/[0.05] p-4">
-                  <div className="mb-3 flex items-center gap-2">
-                    <span className="h-2 w-2 rounded-full bg-neutral-600" />
-                    <h5 className="text-xs font-semibold uppercase tracking-[0.14em] text-neutral-700">
-                      {showExpandedContext && expandedContext ? "Expanded extract" : "Raw extract"}
-                    </h5>
+              {/* Long evidence gets a bounded, independently-scrolling
+                  region instead of growing the whole page - action
+                  buttons, status messages and the page preview above stay
+                  pinned, only this content area scrolls. */}
+              <div className="max-h-[360px] overflow-y-auto pr-1">
+                {shouldUseRawFallback ? (
+                  <div className="rounded-3xl border border-dashed border-neutral-950/20 bg-neutral-950/[0.05] p-4">
+                    <div className="mb-3 flex items-center gap-2">
+                      <span className="h-2 w-2 rounded-full bg-neutral-600" />
+                      <h5 className="text-xs font-semibold uppercase tracking-[0.14em] text-neutral-700">
+                        {showExpandedContext && expandedContext ? "Expanded extract" : "Raw extract"}
+                      </h5>
+                    </div>
+
+                    <div className="space-y-2 text-[12px] leading-7">
+                      {rawParagraphsForDisplay.slice(0, 40).map((line, i) =>
+                        renderEvidenceLine(line, `${citation.id}-raw-${i}`, highlightTerms)
+                      )}
+                    </div>
                   </div>
+                ) : (
+                  <div className="space-y-3">
+                    {complianceBuckets.map((bucket, bucketIndex) => {
+                      const bucketTone = bucketToneClasses(bucket.tone);
 
-                  <div className="space-y-2 text-[12px] leading-7">
-                    {rawParagraphsForDisplay.slice(0, 40).map((line, i) =>
-                      renderEvidenceLine(line, `${citation.id}-raw-${i}`, highlightTerms)
-                    )}
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {complianceBuckets.map((bucket, bucketIndex) => {
-                    const bucketTone = bucketToneClasses(bucket.tone);
-
-                    return (
-                      <div
-                        key={`${citation.id}-bucket-${bucketIndex}`}
-                        className={`rounded-3xl border p-4 ${bucketTone.wrap}`}
-                      >
-                        <div className="mb-3 flex items-center gap-2">
-                          <span className={`h-2 w-2 rounded-full ${bucketTone.dot}`} />
-                          <h5
-                            className={`text-xs font-semibold uppercase tracking-[0.14em] ${bucketTone.title}`}
-                          >
-                            {bucket.heading}
-                          </h5>
-                        </div>
-
+                      return (
                         <div
-                          className={`${getScrollClass()} space-y-2 pb-1 text-[12px] leading-7`}
+                          key={`${citation.id}-bucket-${bucketIndex}`}
+                          className={`rounded-3xl border p-4 ${bucketTone.wrap}`}
                         >
-                          {bucket.lines.map((line, lineIndex) =>
-                            renderEvidenceLine(
-                              line,
-                              `${citation.id}-${bucketIndex}-${lineIndex}`,
-                              highlightTerms
-                            )
-                          )}
+                          <div className="mb-3 flex items-center gap-2">
+                            <span className={`h-2 w-2 rounded-full ${bucketTone.dot}`} />
+                            <h5
+                              className={`text-xs font-semibold uppercase tracking-[0.14em] ${bucketTone.title}`}
+                            >
+                              {bucket.heading}
+                            </h5>
+                          </div>
+
+                          <div className="space-y-2 pb-1 text-[12px] leading-7">
+                            {bucket.lines.map((line, lineIndex) =>
+                              renderEvidenceLine(
+                                line,
+                                `${citation.id}-${bucketIndex}-${lineIndex}`,
+                                highlightTerms
+                              )
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
           </motion.div>
         )}
