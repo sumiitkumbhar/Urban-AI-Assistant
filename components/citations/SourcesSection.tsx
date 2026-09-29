@@ -104,15 +104,16 @@ export default function SourcesSection({
   const visibleSources = showAll ? sortedSources : sortedSources.slice(0, 5);
 
   // 2026-09-29: glass token pass. glass-soft (this app's lightest glass
-  // tier, for nested/supporting surfaces) + glass-tint-ink (matches the
-  // surrounding answer bubble's own glass-tint-ink, since this container
+  // tier, for nested/supporting surfaces). 2026-09-29 unification pass:
+  // no separate tint class any more - `.glass` itself carries the one
+  // app-wide tint, so this container automatically matches the surrounding
   // sits flat inside it, not floating) - replaces the old flat
   // border-neutral-950/10 bg-neutral-950/[0.04] combo. See
   // app/globals.css's "GLASS SYSTEM" block for the shared recipe.
   // Expand/collapse state and logic below are untouched - surface-only
   // change.
   return (
-    <div className="glass glass-soft glass-tint-ink mt-4 rounded-3xl p-4">
+    <div className="glass glass-soft mt-4 rounded-3xl p-4">
       <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-sm font-semibold text-neutral-950">

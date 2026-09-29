@@ -8576,18 +8576,30 @@ input[type="text"].uaa-composer:focus {
    here). What changes is architecture only: one mechanism rule (`.glass`)
    reads seven `--glass-*` custom properties; three tier classes
    (`.glass-strong` / `.glass-medium` / `.glass-soft`) set those properties
-   to this pass's three intensity levels; two tint classes
-   (`.glass-tint-warm` / `.glass-tint-ink`) set the two fill/border colour
-   families this file already uses elsewhere (`--paper-raised` for
-   surfaces that float or sit "lifted off the ground", ink
-   (`rgba(28,26,22,...)`, matching `--ink`) for surfaces that read as
-   content sitting flat on the page); and a handful of tiny per-surface
-   modifier classes nudge one or two properties where a specific surface
-   was already tuned slightly differently from its tier's own default
-   (the answer bubble vs. the question bubble; hover states). Every
-   concrete surface below is composed as `.glass` + one tier class + one
-   tint class + (optionally) one modifier class - never a fourth
-   hand-written rgba/blur stack.
+   to this pass's three intensity levels; and a handful of tiny
+   per-surface modifier classes nudge one or two properties where a
+   specific surface was already tuned slightly differently from its
+   tier's own default (the answer bubble vs. the question bubble; hover
+   states). Every concrete surface below is composed as `.glass` + one
+   tier class + (optionally) one modifier class - never a hand-written
+   rgba/blur stack.
+
+   UPDATE 2026-09-29 (tint unification pass): `.glass-tint-warm` and
+   `.glass-tint-ink` originally let each surface pick between two colour
+   families - warm `--paper-raised` for "floating" surfaces (composer,
+   homepage cards) vs. ink `--ink` for "flat on the page" surfaces
+   (bubbles, citations). Direct follow-up feedback: this read as two
+   related-but-different products, not one material. Fixed by deleting
+   the tint-class split entirely and baking ONE application-wide tint
+   (`--glass-tint-fill-rgb` / `--glass-tint-border-rgb`, defined once
+   below, sourced from the composer's own live-measured computed style -
+   not guessed) directly into `.glass` itself. Every glass surface now
+   gets the same material colour by construction; only the three tier
+   classes vary intensity. If a future surface genuinely needs a
+   different colour family, that's a deliberate new decision to revisit
+   here explicitly - not something to solve by quietly reintroducing a
+   second tint class (see this section's own closing note on avoiding
+   token sprawl).
 
    Still exactly the same DESIGN.md exception as before: "explicitly avoid
    glassmorphism" is this app's general rule; this system is the deliberate,
@@ -8600,6 +8612,23 @@ input[type="text"].uaa-composer:focus {
    ink-medium fallback in case a surface ever picks up `.glass` without a
    tier class.
    ======================================================================== */
+/* The one application-wide glass tint. Sourced directly from the
+   composer's own live `getComputedStyle` output (`rgba(251, 249, 245,
+   ...)` fill / `rgba(255, 253, 246, ...)` border) rather than re-guessed -
+   the composer was this system's original, most-tuned surface, so its
+   colour is the source of truth every other glass surface now inherits.
+   Every glass surface shares these two values; only alpha (via the tier
+   classes) varies. This *is* the "--glass-tint" token the design
+   direction asked for, expressed as its two rgb channels (fill/border
+   need slightly different literal rgb - 251/249/245 vs 255/253/246 - to
+   keep the existing crisp-rim vs. soft-fill relationship the composer
+   was already tuned with, so one token holds both rather than forcing a
+   single triplet to serve two slightly different purposes). */
+:root {
+  --glass-tint-fill-rgb: 251, 249, 245;
+  --glass-tint-border-rgb: 255, 253, 246;
+}
+
 .glass {
   position: relative;
   overflow: hidden;
@@ -8607,10 +8636,10 @@ input[type="text"].uaa-composer:focus {
     rounded bounds, and nested glass (e.g. citation cards inside an answer
     bubble) never composites "through" a parent's own blur - each surface
     keeps rendering its own background/text untouched on top. */
-  background: rgba(var(--glass-fill-rgb, 28, 26, 22), var(--glass-fill-alpha, 0.05));
+  background: rgba(var(--glass-tint-fill-rgb), var(--glass-fill-alpha, 0.05));
   -webkit-backdrop-filter: blur(var(--glass-blur, 3px)) saturate(var(--glass-saturate, 1.02));
   backdrop-filter: blur(var(--glass-blur, 3px)) saturate(var(--glass-saturate, 1.02));
-  border: 1px solid rgba(var(--glass-border-rgb, 28, 26, 22), var(--glass-border-alpha, 0.14));
+  border: 1px solid rgba(var(--glass-tint-border-rgb), var(--glass-border-alpha, 0.14));
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, var(--glass-inset-highlight, 0.24)),
     var(--glass-elevation-shadow, 0 1px 3px rgba(28, 26, 22, 0.04), 0 1px 2px rgba(28, 26, 22, 0.03));
@@ -8681,26 +8710,6 @@ input[type="text"].uaa-composer:focus {
   --glass-highlight-mid: 0;
   --glass-highlight-stop: 26%;
   --glass-highlight-fade: 26%;
-}
-
-/* --- Tints -------------------------------------------------------------
-   Colour only - no intensity. `warm` is this file's own --paper-raised
-   family (#fbf9f5), used for surfaces that read as "lifted paper": the
-   composer (floats over scrolling content) and the homepage prompt cards
-   (already `bg-[#fbf9f5]` before this pass - a plain rgb() triplet here
-   rather than var(--paper-raised) since that token isn't itself
-   channel-separated for use inside rgba()). `ink` matches --ink
-   (rgba(28,26,22,...)), used for surfaces that read as content sitting on
-   the page: the two message bubbles and, new in this pass, the citation
-   container/cards nested inside the answer bubble - keeping them in the
-   same tint family as their parent. */
-.glass-tint-warm {
-  --glass-fill-rgb: 251, 249, 245;
-  --glass-border-rgb: 255, 253, 246;
-}
-.glass-tint-ink {
-  --glass-fill-rgb: 28, 26, 22;
-  --glass-border-rgb: 28, 26, 22;
 }
 
 /* --- Per-surface modifiers -----------------------------------------------

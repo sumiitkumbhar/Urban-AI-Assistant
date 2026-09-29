@@ -85,7 +85,7 @@ const FEATURES: Record<
   // Honesty-clause finding (LiquidGlassSurface.tsx file header, point 7):
   // `?liquidGlassDebug=1` - every shader parameter exaggerated ~2x - was
   // still visually indistinguishable from the plain CSS frosted-glass
-  // material (app/globals.css `.glass glass-strong glass-tint-warm`) in a live side-by-side
+  // material (app/globals.css `.glass glass-strong`) in a live side-by-side
   // against real chat content, so the library (stale one-shot html2canvas
   // snapshot, no destroy/cleanup, WebGL1-only) was not earning its
   // complexity as the default. The CSS material is now the shipped look;
@@ -4029,11 +4029,11 @@ function WelcomeScreen({
               type="button"
               onClick={() => onSuggestionClick(question)}
               style={{ ["--i" as any]: 4 + i }}
-              className="rise group relative flex min-h-[6.5rem] w-full flex-col justify-start rounded-2xl glass glass-soft glass-tint-warm glass-home-card p-5 pr-11 text-left transition-[background-color,border-color,box-shadow] duration-200 ease-settle"
+              className="rise group relative flex min-h-[6.5rem] w-full flex-col justify-start rounded-2xl glass glass-soft glass-home-card p-5 pr-11 text-left transition-[background-color,border-color,box-shadow] duration-200 ease-settle"
               // 2026-09-29: glass token pass - was an opaque `bg-[#fbf9f5]`
               // card with a `hover:bg-white` (fully opaque) hover state,
               // exactly the "plain white SaaS card" look the brief asks to
-              // move away from. Now `glass-soft` + `glass-tint-warm` (same
+              // move away from. Now `glass-soft` (same one app-wide tint as every
               // --paper-raised family as before, still translucent) with
               // `glass-home-card` supplying a restrained hover delta in
               // globals.css (fill/border/shadow step up together, never to
@@ -4337,7 +4337,8 @@ function MessageBubble({
     {/* 2026-09-29: question/answer bubbles carry the same shared glass
         token system as the composer (see the "GLASS SYSTEM" block in
         globals.css for the full rationale) at the `glass-medium` tier,
-        ink-tinted (`glass-tint-ink`) since - unlike the composer - these
+        the same app-wide glass tint as the composer (2026-09-29 unification
+        pass removed the separate ink/warm split) - unlike the composer, these
         sit flat on the page rather than floating over scrolled content.
         The question bubble uses the tier's own default numbers; the
         answer bubble adds `glass-medium--assistant`, a small modifier
@@ -4350,8 +4351,8 @@ function MessageBubble({
     <div
       className={`px-6 py-5 rounded-3xl ${
         isUser
-          ? "ml-auto max-w-[720px] glass glass-medium glass-tint-ink"
-          : "w-full max-w-[980px] glass glass-medium glass-tint-ink glass-medium--assistant"
+          ? "ml-auto max-w-[720px] glass glass-medium"
+          : "w-full max-w-[980px] glass glass-medium glass-medium--assistant"
       }`}
     >
 <div className="text-[15px] leading-7 text-neutral-800">

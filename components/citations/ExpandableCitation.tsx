@@ -940,7 +940,7 @@ export default function ExpandableCitation({
       ? "bg-neutral-600/70"
       : "bg-neutral-400/70";
 
-  // 2026-09-29: glass token pass. glass-soft + glass-tint-ink (same
+  // 2026-09-29: glass token pass, tint unified same day. glass-soft (same
   // tier/tint as the parent SourcesSection.tsx container) - replaces
   // the old flat border/bg/shadow + hover: combo. The hover state
   // (fill/border/shadow step up together) now lives as a
@@ -952,7 +952,7 @@ export default function ExpandableCitation({
   // per-card state, capped scroll height) below is untouched -
   // surface-only change.
   return (
-    <div className="glass glass-soft glass-tint-ink glass-citation-card rounded-3xl transition-all duration-200">
+    <div className="glass glass-soft glass-citation-card rounded-3xl transition-all duration-200">
       <span
         aria-hidden="true"
         className={`absolute inset-y-0 left-0 w-[3px] ${accentBar}`}
