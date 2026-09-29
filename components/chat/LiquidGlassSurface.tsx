@@ -74,6 +74,21 @@
  *    only redraws once at init and again on `window scroll` events - it
  *    is NOT continuous, which is a much lighter runtime cost than the
  *    Button path.
+ * 7. HONESTY-CLAUSE FINDING (2026-09-29): with `?liquidGlassDebug=1` (every
+ *    shader parameter exaggerated ~2x, see readDebugParam/glassControls
+ *    below) live against real chat content scrolled behind the composer,
+ *    the WebGL refraction was visually indistinguishable from the plain
+ *    CSS frosted-glass material this component now always layers underneath
+ *    it (`materialClassName`, see the render logic below, which now applies
+ *    it unconditionally) - same near-imperceptible ghosting, no visible
+ *    edge distortion or rim highlight beyond what the CSS material alone
+ *    produces. Combined
+ *    with points 1-5 above, this is why `FEATURES.liquidGlassComposer`
+ *    (ChatInterface.tsx) now defaults to false: the CSS material is the
+ *    shipped default, and this component - and the WebGL path through it -
+ *    is kept as an opt-in (`?liquidGlass=on`) for a future revisit, not
+ *    deleted, per this codebase's "dead but type-correct code stays,
+ *    documented" convention.
  */
 
 import React, { useEffect, useRef, useState } from "react";
@@ -165,12 +180,18 @@ export interface LiquidGlassSurfaceProps {
   /** Always-applied structural classes (layout/positioning) - kept regardless of glass/fallback state. */
   outerClassName?: string;
   /**
-   * The CSS-only look (translucent fill, blur, ring, shadow) used both
-   * while the glass runtime is still loading AND as the permanent look
-   * when WebGL/glass is unsupported or disabled - this is exactly
-   * today's shipped `FloatingComposerShell` bar styling, unchanged.
+   * 2026-09-29 renamed from `fallbackVisualClassName`: this is no longer
+   * just a fallback. It is the CSS frosted-glass material (translucent
+   * fill, blur, border, top-highlight - see app/globals.css's
+   * `.uaa-glass-pill`) applied UNCONDITIONALLY - while the glass runtime is
+   * still loading, as the permanent look when WebGL/glass is unsupported or
+   * disabled, AND (Part 8 of the 2026-09-29 material-pass brief) layered
+   * underneath the WebGL canvas when it IS active, so the canvas only ever
+   * adds refraction on top of real glass-like translucency instead of being
+   * the sole visual signal (which the honesty-clause finding in this file's
+   * header, point 7, found was not enough on its own).
    */
-  fallbackVisualClassName: string;
+  materialClassName: string;
   type?: "rounded" | "circle" | "pill";
   borderRadius?: number;
   tintOpacity?: number;
@@ -195,7 +216,7 @@ export interface LiquidGlassSurfaceProps {
 export function LiquidGlassSurface({
   children,
   outerClassName = "",
-  fallbackVisualClassName,
+  materialClassName,
   type = "pill",
   borderRadius = 26,
   tintOpacity = 0.14,
@@ -369,12 +390,12 @@ export function LiquidGlassSurface({
     };
   }, [status]);
 
-  const showFallbackVisual = status !== "active";
-
+  // 2026-09-29: always applied now, not gated on `status !== "active"` -
+  // see `materialClassName`'s own doc comment above (Part 8 of the brief).
   return (
     <div
       ref={hostRef}
-      className={`${outerClassName} ${showFallbackVisual ? fallbackVisualClassName : ""}`.trim()}
+      className={`${outerClassName} ${materialClassName}`.trim()}
       style={debugOutline ? { outline: "2px solid #22c55e", outlineOffset: "0px" } : undefined}
     >
       <div ref={contentRef}>{children}</div>

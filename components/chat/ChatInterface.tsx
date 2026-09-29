@@ -79,11 +79,20 @@ const FEATURES: Record<
   localStreamingAnswers: true,
   // 2026-09-28 Liquid Glass proof of concept (see
   // components/chat/LiquidGlassSurface.tsx) - scoped to the main chat
-  // composer only via FloatingComposerShell's `glass` prop. Disable by
-  // flipping this to false; no other code path needs to change since
-  // FloatingComposerShell falls back to the plain CSS surface whenever
-  // `glass` is false/omitted.
-  liquidGlassComposer: true,
+  // composer only via FloatingComposerShell's `glass` prop.
+  //
+  // 2026-09-29: DEFAULTS FALSE as of the geometry-then-material pass.
+  // Honesty-clause finding (LiquidGlassSurface.tsx file header, point 7):
+  // `?liquidGlassDebug=1` - every shader parameter exaggerated ~2x - was
+  // still visually indistinguishable from the plain CSS frosted-glass
+  // material (app/globals.css `.uaa-glass-pill`) in a live side-by-side
+  // against real chat content, so the library (stale one-shot html2canvas
+  // snapshot, no destroy/cleanup, WebGL1-only) was not earning its
+  // complexity as the default. The CSS material is now the shipped look;
+  // this flag - and the whole WebGL path behind it - is kept, not deleted,
+  // and reachable per-load via `?liquidGlass=on` (FloatingComposerShell's
+  // readForceGlassOnParam) for a future revisit without editing source.
+  liquidGlassComposer: false,
 };
 
 export interface Citation {

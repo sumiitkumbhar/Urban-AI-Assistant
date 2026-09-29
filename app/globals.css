@@ -8563,6 +8563,69 @@ input[type="text"].uaa-composer:focus {
   border-color: var(--rule-strong) !important;
 }
 
+/* ===========================================================================
+   FROSTED GLASS COMPOSER MATERIAL (added 2026-09-29, "geometry first, then
+   material" pass - see claude/composer-icon-alignment-and-liquid-glass-poc.md
+   for the full before/after and the decision this was tuned against).
+   ---------------------------------------------------------------------------
+   Scoped to exactly one surface: the main chat composer's rounded pill
+   (FloatingComposerShell's non-`bare` branches, both the plain-CSS path and
+   - per this pass's honesty-clause finding, ?liquidGlassDebug=1 showed the
+   vendored WebGL refraction adds nothing visible over this even at 2x its
+   own parameters - now the DEFAULT path too). Replaces the old
+   `bg-[rgba(251,249,245,0.9)]` + `backdrop-blur-xl` (24px) combo: at 90%
+   opacity that read as a flat near-opaque box with citation text barely
+   ghosting through, not glass.
+
+   Base fill is --paper-raised (this app's own composer/card token) at LOW
+   alpha, not full-strength, so real content behind the pill genuinely shows
+   through, softened - that's what makes it read as glass instead of a
+   tinted rectangle. Blur/saturate are mid-range of the 12-18px / 1.05-1.2
+   brief: more blur measurably read as muddy against this app's fairly dense
+   citation text in a live comparison.
+
+   NOTE: DESIGN.md's brand-read section says "explicitly avoid ...
+   glassmorphism" as a general rule for this app. This is a deliberate,
+   narrowly-scoped exception for exactly one surface (the floating composer
+   pill), per the explicit 2026-09-28/29 product direction recorded in the
+   project doc referenced above - not a reversal of that rule elsewhere.
+   Shadow color is ink-tinted (rgba(28,26,22,...)) rather than grey-black,
+   matching this file's own "tinted shadows instead of grey-black" rule a
+   few hundred lines up.
+   ======================================================================== */
+.uaa-glass-pill {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  background: rgba(251, 249, 245, 0.46);
+  -webkit-backdrop-filter: blur(14px) saturate(1.15);
+  backdrop-filter: blur(14px) saturate(1.15);
+  border: 1px solid rgba(255, 253, 246, 0.42);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    0 16px 40px rgba(28, 26, 22, 0.12);
+}
+
+/* Top-highlight - the one cheap thing that reads as "material" rather than
+   "flat blurred rectangle" at a glance. A pseudo-element, never a second
+   real DOM node, so it can never itself become a stray oversized blur
+   layer: it inherits the pill's own radius (`border-radius: inherit`) and
+   is strictly clipped by the parent's own `overflow: hidden` above -
+   `inset: 0` here means "fill the parent's own box", not "extend past it". */
+.uaa-glass-pill::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.22),
+    rgba(255, 255, 255, 0.1) 35%,
+    rgba(255, 255, 255, 0.06) 100%
+  );
+}
+
 /* AI command box (Report tab inline edit, DocumentPanel.tsx InlineEditCommand) -
    opts its textarea out of the app-wide bare `input:not([type]), textarea`
    and `input:focus, select:focus, textarea:focus` rules above, which paint

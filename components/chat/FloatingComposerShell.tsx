@@ -61,6 +61,42 @@ function readComposerOutlineDebugParam(): boolean {
   return new URLSearchParams(window.location.search).get("composerDebug") === "1";
 }
 
+/**
+ * 2026-09-29 material-pass opt-in escape hatch. `?liquidGlass=off` (read
+ * inside LiquidGlassSurface's own evaluateSupport()) already force-disables
+ * the WebGL runtime; this is its complement, force-ENABLING it regardless
+ * of `FEATURES.liquidGlassComposer`'s default - which this same pass flips
+ * to false (see ChatInterface.tsx) after `?liquidGlassDebug=1` showed the
+ * library adds no visible refraction over the plain CSS frosted-glass
+ * material below, even at 2x its own parameters (see
+ * claude/composer-icon-alignment-and-liquid-glass-poc.md). Kept, not
+ * deleted, per this codebase's own "dead but type-correct code stays,
+ * documented" convention - a future pass can compare again without editing
+ * source. Read once at mount, same load-time-param pattern as the others
+ * on this page - not a live toggle.
+ */
+function readForceGlassOnParam(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get("liquidGlass") === "on";
+}
+
+/**
+ * 2026-09-29 frosted-glass material pass. The actual color/blur/border/
+ * highlight recipe lives in app/globals.css's `.uaa-glass-pill` rule (kept
+ * in CSS, not Tailwind arbitrary values, since it needs a `::before`
+ * pseudo-element for the top-highlight layer - see that rule's own doc
+ * comment for the full rationale and the DESIGN.md "avoid glassmorphism"
+ * exception this is). `rounded-[26px]` stays a Tailwind class (not baked
+ * into `.uaa-glass-pill`) so the pill's own radius remains this file's one
+ * source of truth - `.uaa-glass-pill::before`'s `border-radius: inherit`
+ * picks it up automatically. Applied identically to the plain-CSS branch
+ * AND to LiquidGlassSurface's `materialClassName` (see below) - Part 8 of
+ * the 2026-09-29 brief: the WebGL canvas, when opted into via
+ * `?liquidGlass=on`, is a refraction layer *underneath* this same frost/
+ * tint material, never a replacement for it.
+ */
+const COMPOSER_GLASS_MATERIAL_CLASSNAME = "rounded-[26px] uaa-glass-pill";
+
 export interface FloatingComposerShellProps {
   children: React.ReactNode;
   /**
@@ -102,13 +138,21 @@ export interface FloatingComposerShellProps {
   /**
    * Opt-in: 2026-09-28 Liquid Glass proof of concept
    * (components/chat/LiquidGlassSurface.tsx - read its file header before
-   * enabling this anywhere else). When true and `!bare`, the bar surface
-   * is rendered by the WebGL glass runtime instead of the plain
-   * translucent CSS div, falling back automatically (same visual
-   * classes) when WebGL/glass is unsupported, disabled via
-   * `?liquidGlass=off`, or still loading. Default false - deliberately
-   * NOT wired to every FloatingComposerShell caller, only the main chat
-   * composer for now.
+   * enabling this anywhere else). When effectively true (this prop OR the
+   * `?liquidGlass=on` escape hatch - see readForceGlassOnParam above) and
+   * `!bare`, the bar surface is rendered by the WebGL glass runtime
+   * instead of the plain CSS frosted-glass div, falling back automatically
+   * (same `.uaa-glass-pill` material) when WebGL/glass is unsupported,
+   * disabled via `?liquidGlass=off`, or still loading.
+   *
+   * 2026-09-29 update: `FEATURES.liquidGlassComposer` (ChatInterface.tsx)
+   * now DEFAULTS FALSE - the honesty-clause finding of this pass was that
+   * `?liquidGlassDebug=1` (2x every shader parameter) still looked
+   * indistinguishable from the plain CSS material in a live side-by-side,
+   * so the library was not earning its complexity (stale one-shot
+   * html2canvas snapshot, no destroy/cleanup, WebGL1-only - see
+   * LiquidGlassSurface.tsx's file header). The WebGL path is kept, not
+   * deleted, and reachable via `?liquidGlass=on` for a future revisit.
    */
   glass?: boolean;
   /**
@@ -153,6 +197,9 @@ export function FloatingComposerShell({
   const wrapRef = useRef<HTMLDivElement>(null);
   const [composerDebug, setComposerDebug] = useState(false);
   useEffect(() => setComposerDebug(readComposerOutlineDebugParam()), []);
+  const [forceGlassOn, setForceGlassOn] = useState(false);
+  useEffect(() => setForceGlassOn(readForceGlassOnParam()), []);
+  const effectiveGlass = glass || forceGlassOn;
 
   // Reports the shell's own height (fade zone height, which is fixed, PLUS
   // however much the composer bar itself grows past the fade zone via
@@ -232,17 +279,19 @@ export function FloatingComposerShell({
           className="pointer-events-none flex flex-col items-stretch gap-1.5"
           style={{ width: `min(${maxWidthPx}px, calc(100% - 32px))`, marginInline: "auto" }}
         >
-          {glass && !bare ? (
-            // 2026-09-28 Liquid Glass PoC - identical visual classes to
-            // the plain-CSS branch below, passed as the fallback so
-            // loading/unsupported/`?liquidGlass=off` states are
-            // pixel-identical to what already shipped.
+          {effectiveGlass && !bare ? (
+            // 2026-09-28 Liquid Glass PoC, opt-in only since the 2026-09-29
+            // material pass (see the `glass` prop doc above) - identical
+            // `.uaa-glass-pill` material to the plain-CSS branch below,
+            // passed as `materialClassName` so loading/unsupported/
+            // `?liquidGlass=off` states - and, per Part 8 of that pass's
+            // brief, the WebGL-active state too - all render the same
+            // frosted-glass surface, with the canvas (when active) as an
+            // additional refraction layer on top of it, never a
+            // replacement for it.
             <LiquidGlassSurface
               outerClassName="pointer-events-auto w-full"
-              fallbackVisualClassName={
-                "rounded-[26px] bg-[rgba(251,249,245,0.9)] shadow-[0_3px_16px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] backdrop-blur-xl " +
-                barClassName
-              }
+              materialClassName={`${COMPOSER_GLASS_MATERIAL_CLASSNAME} ${barClassName}`}
               type="pill"
               tintOpacity={0.14}
               debugOutline={composerDebug}
@@ -253,18 +302,7 @@ export function FloatingComposerShell({
             <div
               className={
                 "pointer-events-auto w-full " +
-                (bare
-                  ? ""
-                  : // One clean floating surface, not a container-around-a-container:
-                    // no outer border (a hairline `ring` stands in for the "very
-                    // subtle 1px internal stroke" the 2026-09-28 visual-redesign
-                    // brief allows, since the warm-on-warm translucent fill needs
-                    // *some* definition against a similarly warm page background),
-                    // a tight/soft elevation shadow instead of the old wide diffuse
-                    // one, and a warm-neutral fill (matches --paper-raised) instead
-                    // of generic white.
-                    "rounded-[26px] bg-[rgba(251,249,245,0.9)] shadow-[0_3px_16px_rgba(0,0,0,0.08)] ring-1 ring-black/[0.04] backdrop-blur-xl " +
-                    barClassName)
+                (bare ? "" : `${COMPOSER_GLASS_MATERIAL_CLASSNAME} ${barClassName}`)
               }
               style={composerDebug ? { outline: "2px solid #22c55e", outlineOffset: "0px" } : undefined}
             >
