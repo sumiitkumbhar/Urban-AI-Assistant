@@ -23,6 +23,7 @@
 // ever run the service on another machine/port).
 
 import { NextResponse } from "next/server";
+import { ensureConversation, persistConversationTurn } from "@/lib/conversationMemory";
 
 export const runtime = "nodejs";
 
@@ -155,6 +156,17 @@ export async function POST(req: Request) {
     );
   }
 
+  // Per-browser conversation memory (see lib/conversationMemory.ts and
+  // sql/chat_history_setup.sql) - added so Local mode saves/reopens chats
+  // through the exact same conversations/chat_messages tables Cloud mode
+  // already uses (app/api/rag-chat/route.ts). conversationId stays null
+  // (persistence becomes a no-op) whenever visitorId is absent, exactly
+  // like the Cloud path.
+  const visitorId =
+    typeof body?.visitorId === "string" ? body.visitorId.trim() : "";
+  const requestedConversationId =
+    typeof body?.conversationId === "string" ? body.conversationId.trim() : "";
+
   const postcode = extractPostcode(query);
   const upstreamPath = postcode ? "/site-answer" : "/query";
   // Fully-local generation (added 2026-09-24, opt-in) - "ollama" routes
@@ -210,10 +222,25 @@ export async function POST(req: Request) {
   // see site_context.py's build_site_context(). Surface that as a normal
   // chat answer rather than as a blank/broken message.
   if (postcode && data?.error) {
+    const noSiteAnswer = `I couldn't find site data for ${postcode}: ${data.error}`;
+    let noSiteConversationId: string | null = null;
+    if (visitorId) {
+      noSiteConversationId = await ensureConversation(
+        visitorId,
+        requestedConversationId,
+        query
+      );
+      if (noSiteConversationId) {
+        await persistConversationTurn(noSiteConversationId, query, noSiteAnswer, {
+          source: "local-rag",
+          postcode,
+        });
+      }
+    }
     return NextResponse.json(
       {
         success: true,
-        answer: `I couldn't find site data for ${postcode}: ${data.error}`,
+        answer: noSiteAnswer,
         data: {
           citations: [],
           query,
@@ -230,6 +257,7 @@ export async function POST(req: Request) {
           unsupportedClaims: [],
           source: "local-rag",
           postcode,
+          conversationId: noSiteConversationId || undefined,
         },
         mapCitations: [],
       },
@@ -240,6 +268,42 @@ export async function POST(req: Request) {
   const citations = transformCitations(data.citations);
   const mapCitations = transformMapCitations(data.map_citations);
   const confidenceLabel: string | undefined = data?.coverage?.confidence;
+  const confidenceScore =
+    confidenceLabel != null ? CONFIDENCE_SCORE[confidenceLabel] ?? null : null;
+  const groundedness =
+    typeof data?.groundedness === "number" ? data.groundedness : null;
+  const unsupportedClaims: string[] = Array.isArray(data?.unsupported_claims)
+    ? data.unsupported_claims
+    : [];
+
+  // Resolve + save this turn the same way app/api/rag-chat/route.ts does -
+  // see lib/conversationMemory.ts. Stored in the same raw shape the
+  // client's own extraction helpers (extractRawCitations/
+  // mapBackendCitations in ChatInterface.tsx) already know how to
+  // normalize, so reopening a saved Local-mode conversation renders the
+  // exact same citations/confidence/groundedness badges the live
+  // response did.
+  let conversationId: string | null = null;
+  if (visitorId) {
+    conversationId = await ensureConversation(
+      visitorId,
+      requestedConversationId,
+      query
+    );
+    if (conversationId) {
+      await persistConversationTurn(conversationId, query, data.answer, {
+        processingtime: Date.now() - startedAt,
+        confidence: confidenceScore,
+        confidenceLabel,
+        groundedness,
+        unsupportedClaims,
+        citations,
+        mapCitations,
+        source: "local-rag",
+        backend,
+      });
+    }
+  }
 
   const response = {
     success: true,
@@ -253,8 +317,7 @@ export async function POST(req: Request) {
     },
     metadata: {
       processing_time: Date.now() - startedAt,
-      confidence:
-        confidenceLabel != null ? CONFIDENCE_SCORE[confidenceLabel] ?? null : null,
+      confidence: confidenceScore,
       confidenceLabel,
       webFallbackUsed: false,
       // local-rag now runs its own claim-level groundedness judge
@@ -264,11 +327,8 @@ export async function POST(req: Request) {
       // field) instead of always reporting null, so the groundedness
       // badge in ChatInterface.tsx now renders for local mode too, not
       // just Cloud.
-      groundedness:
-        typeof data?.groundedness === "number" ? data.groundedness : null,
-      unsupportedClaims: Array.isArray(data?.unsupported_claims)
-        ? data.unsupported_claims
-        : [],
+      groundedness,
+      unsupportedClaims,
       agents: data?.coverage?.agents,
       verified: data?.verified,
       source: "local-rag",
@@ -276,6 +336,7 @@ export async function POST(req: Request) {
       // query) - lets the UI label which site a map citation belongs to
       // without re-parsing the question text.
       postcode: postcode || undefined,
+      conversationId: conversationId || undefined,
     },
     // Top-level (not nested under data/metadata) so ChatInterface.tsx's
     // handleSend() can read it with one straightforward

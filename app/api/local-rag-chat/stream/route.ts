@@ -28,6 +28,7 @@
 //   cd local-rag && source venv/bin/activate && uvicorn service:app --port 8010
 
 import { NextResponse } from "next/server";
+import { ensureConversation, persistConversationTurn } from "@/lib/conversationMemory";
 
 export const runtime = "nodejs";
 
@@ -118,7 +119,10 @@ function transformMapCitations(mapCitations: LocalRagMapCitation[] | undefined) 
   }));
 }
 
-function transformDonePayload(payload: any, extra?: { postcode?: string }) {
+function transformDonePayload(
+  payload: any,
+  extra?: { postcode?: string; conversationId?: string | null }
+) {
   const confidenceLabel: string | undefined = payload?.coverage?.confidence;
   return {
     answer: payload.answer,
@@ -137,10 +141,14 @@ function transformDonePayload(payload: any, extra?: { postcode?: string }) {
     retrieval_ms: payload.retrieval_ms,
     generation_ms: payload.generation_ms,
     postcode: extra?.postcode,
+    conversationId: extra?.conversationId || undefined,
   };
 }
 
-function transformDoneEvent(rawEvent: string): string {
+async function transformDoneEvent(
+  rawEvent: string,
+  conversation: { visitorId: string; requestedConversationId: string; query: string } | null
+): Promise<string> {
   const lines = rawEvent.split("\n");
   let dataLine = "";
   for (const line of lines) {
@@ -148,7 +156,44 @@ function transformDoneEvent(rawEvent: string): string {
   }
   try {
     const payload = JSON.parse(dataLine);
-    const transformed = transformDonePayload(payload);
+
+    // Per-browser conversation memory (see lib/conversationMemory.ts) -
+    // resolved and persisted here, right before the "done" event goes
+    // out, so the save completes before the client can possibly act on
+    // a completed turn (matches the Cloud path's own await-before-
+    // respond ordering in app/api/rag-chat/route.ts).
+    let conversationId: string | null = null;
+    if (conversation?.visitorId) {
+      conversationId = await ensureConversation(
+        conversation.visitorId,
+        conversation.requestedConversationId,
+        conversation.query
+      );
+      if (conversationId) {
+        const confidenceLabel: string | undefined = payload?.coverage?.confidence;
+        await persistConversationTurn(
+          conversationId,
+          conversation.query,
+          payload.answer,
+          {
+            processingtime: (payload.retrieval_ms || 0) + (payload.generation_ms || 0),
+            confidence:
+              confidenceLabel != null ? CONFIDENCE_SCORE[confidenceLabel] ?? null : null,
+            confidenceLabel,
+            groundedness:
+              typeof payload.groundedness === "number" ? payload.groundedness : null,
+            unsupportedClaims: Array.isArray(payload.unsupported_claims)
+              ? payload.unsupported_claims
+              : [],
+            citations: transformCitations(payload.citations),
+            mapCitations: transformMapCitations(payload.map_citations),
+            source: "local-rag",
+          }
+        );
+      }
+    }
+
+    const transformed = transformDonePayload(payload, { conversationId });
     return `event: done\ndata: ${JSON.stringify(transformed)}`;
   } catch {
     // Malformed/unparseable "done" payload - forward it as-is rather
@@ -158,9 +203,12 @@ function transformDoneEvent(rawEvent: string): string {
   }
 }
 
-function transformEvent(rawEvent: string): string {
+async function transformEvent(
+  rawEvent: string,
+  conversation: { visitorId: string; requestedConversationId: string; query: string } | null
+): Promise<string> {
   if (rawEvent.startsWith("event: done")) {
-    return transformDoneEvent(rawEvent);
+    return transformDoneEvent(rawEvent, conversation);
   }
   return rawEvent;
 }
@@ -174,7 +222,12 @@ function sseError(message: string, status: number) {
 // comment. Mirrors real /query/stream's event sequence (coverage, then
 // delta(s), then done) closely enough that sendLocalStreaming() in
 // ChatInterface.tsx needs no branch of its own to handle it.
-async function siteAnswerAsStream(postcode: string, query: string, backend: string) {
+async function siteAnswerAsStream(
+  postcode: string,
+  query: string,
+  backend: string,
+  conversation: { visitorId: string; requestedConversationId: string } | null
+) {
   let upstream: Response;
   try {
     upstream = await fetch(`${LOCAL_RAG_URL}/site-answer`, {
@@ -210,6 +263,25 @@ async function siteAnswerAsStream(postcode: string, query: string, backend: stri
     data.coverage = data.coverage || { confidence: "low", agents: [] };
   }
 
+  // Per-browser conversation memory (see lib/conversationMemory.ts) -
+  // resolved and persisted before the stream starts, same as the main
+  // /query/stream branch below, so a fast page refresh right after this
+  // single-shot answer still finds it saved.
+  let conversationId: string | null = null;
+  if (conversation?.visitorId) {
+    conversationId = await ensureConversation(
+      conversation.visitorId,
+      conversation.requestedConversationId,
+      query
+    );
+    if (conversationId) {
+      await persistConversationTurn(conversationId, query, data.answer, {
+        source: "local-rag",
+        postcode,
+      });
+    }
+  }
+
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
@@ -222,7 +294,7 @@ async function siteAnswerAsStream(postcode: string, query: string, backend: stri
           `event: delta\ndata: ${JSON.stringify({ text: data.answer || "" })}\n\n`
         )
       );
-      const done = transformDonePayload(data, { postcode });
+      const done = transformDonePayload(data, { postcode, conversationId });
       controller.enqueue(
         encoder.encode(`event: done\ndata: ${JSON.stringify(done)}\n\n`)
       );
@@ -266,9 +338,21 @@ export async function POST(req: Request) {
   // share state across files here).
   const backend = body?.backend === "ollama" ? "ollama" : "groq";
 
+  // Per-browser conversation memory (see lib/conversationMemory.ts) -
+  // mirrors app/api/rag-chat/route.ts and ../route.ts's identical
+  // visitorId/conversationId handling. conversationId stays null
+  // (persistence becomes a no-op) whenever visitorId is absent.
+  const visitorId =
+    typeof body?.visitorId === "string" ? body.visitorId.trim() : "";
+  const requestedConversationId =
+    typeof body?.conversationId === "string" ? body.conversationId.trim() : "";
+  const conversation = visitorId
+    ? { visitorId, requestedConversationId, query }
+    : null;
+
   const postcode = extractPostcode(query);
   if (postcode) {
-    return siteAnswerAsStream(postcode, query, backend);
+    return siteAnswerAsStream(postcode, query, backend, conversation);
   }
 
   let upstream: Response;
@@ -326,12 +410,16 @@ export async function POST(req: Request) {
             const rawEvent = buffer.slice(0, idx);
             buffer = buffer.slice(idx + 2);
             if (rawEvent.trim()) {
-              controller.enqueue(encoder.encode(transformEvent(rawEvent) + "\n\n"));
+              controller.enqueue(
+                encoder.encode((await transformEvent(rawEvent, conversation)) + "\n\n")
+              );
             }
           }
         }
         if (buffer.trim()) {
-          controller.enqueue(encoder.encode(transformEvent(buffer) + "\n\n"));
+          controller.enqueue(
+            encoder.encode((await transformEvent(buffer, conversation)) + "\n\n")
+          );
         }
       } catch (e) {
         controller.error(e);

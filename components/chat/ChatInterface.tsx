@@ -1448,6 +1448,16 @@ export default function ChatInterface() {
   // (null until the first message of a new chat gets a reply).
   const [visitorId, setVisitorId] = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
+  // Root-cause fix for the "refresh loses the conversation" bug: without
+  // this, conversationId only ever lived in React state, so a refresh -
+  // or reopening the tab, or coming back after switching Cloud/Local -
+  // had no way to know which saved conversation had just been open. The
+  // turn itself was already safely written to Supabase by
+  // persistConversationTurn() (see lib/conversationMemory.ts); the UI
+  // just never asked for it back, and always rendered the empty
+  // WelcomeScreen instead. Scoped to this one browser exactly like
+  // visitorId itself (lib/visitorId.ts).
+  const ACTIVE_CONVERSATION_STORAGE_KEY = "uaa-active-conversation-id";
   const [sidebarRefresh, setSidebarRefresh] = useState(0);
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   // Desktop-only collapse (icon rail vs full list). Persisted per-browser so
@@ -1527,6 +1537,62 @@ export default function ChatInterface() {
   useEffect(() => {
     setVisitorId(getVisitorId());
   }, []);
+
+  // Guards both effects below. Declared before the localStorage-sync
+  // effect specifically because of the ordering bug this comment is
+  // replacing: on true initial mount, conversationId is null - if the
+  // sync effect were allowed to run its removeItem branch before the
+  // restore effect (further down) had a chance to read the stored id
+  // back, it would wipe out the very value the restore effect needs,
+  // every single time, before it could ever be used. Gating the
+  // removeItem branch on this ref (only flips true once a restore has
+  // actually been attempted) closes that race.
+  const hasAttemptedConversationRestoreRef = useRef(false);
+
+  useEffect(() => {
+    try {
+      if (conversationId) {
+        window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, conversationId);
+      } else if (hasAttemptedConversationRestoreRef.current) {
+        window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
+      }
+    } catch {
+      // localStorage unavailable (private mode, blocked storage, etc.) -
+      // the chat still works for this tab's lifetime, it just won't
+      // survive a refresh for this visitor.
+    }
+  }, [conversationId]);
+
+  // Runs once, as soon as visitorId is ready: reopens whichever
+  // conversation was last active in this browser (page refresh, browser
+  // restart, switching Cloud/Local and back, reopening the tab), the
+  // same way clicking it in the sidebar would. Guarded so it only ever
+  // fires on initial mount, never again later - clicking "New chat" or
+  // another conversation afterwards must not be undone by this effect
+  // re-firing.
+  useEffect(() => {
+    if (!visitorId) return;
+    if (hasAttemptedConversationRestoreRef.current) return;
+    hasAttemptedConversationRestoreRef.current = true;
+
+    let storedConversationId: string | null = null;
+    try {
+      storedConversationId = window.localStorage.getItem(
+        ACTIVE_CONVERSATION_STORAGE_KEY
+      );
+    } catch {
+      // localStorage unavailable - nothing to restore, falls through to
+      // the ordinary empty-state welcome screen.
+    }
+    if (storedConversationId) {
+      handleSelectConversation(storedConversationId);
+    }
+    // handleSelectConversation is a stable `function` declaration in this
+    // component (not a useCallback), so it's intentionally left out of
+    // the dependency array - including it would make this effect track
+    // every dependency IT has, defeating the "run once" guard above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visitorId]);
 
   // Tracks the message count as of the previous run of the effect below,
   // across renders - a plain variable would reset every render, a ref
@@ -1677,7 +1743,16 @@ export default function ChatInterface() {
         `/api/conversations/${id}?visitorId=${encodeURIComponent(visitorId)}`
       );
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || !Array.isArray(data?.messages)) return;
+      if (!res.ok || !Array.isArray(data?.messages)) {
+        if (!res.ok) {
+          try {
+            window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
+          } catch {
+            // localStorage unavailable - nothing to clean up.
+          }
+        }
+        return;
+      }
       if (chatSessionRef.current !== sessionToken) return;
 
       const loaded: ChatMessage[] = data.messages.map((m: any) => {
@@ -3198,7 +3273,12 @@ export default function ChatInterface() {
     const res = await fetch("/api/local-rag-chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: prompt, backend: ragBackend }),
+      body: JSON.stringify({
+        query: prompt,
+        backend: ragBackend,
+        visitorId: visitorId || undefined,
+        conversationId: conversationId || undefined,
+      }),
     });
 
     if (!res.ok || !res.body) {
@@ -3267,6 +3347,18 @@ export default function ChatInterface() {
               sitePostcode: payload.postcode,
             },
           });
+
+          // Adopt the conversationId the server resolved this turn
+          // against (see app/api/local-rag-chat/stream/route.ts) - same
+          // handling as the Cloud path's returnedConversationId below in
+          // handleSend, duplicated here because this streaming branch
+          // returns before reaching that shared code.
+          if (payload.conversationId) {
+            setSidebarRefresh((n) => n + 1);
+            if (payload.conversationId !== conversationId) {
+              setConversationId(payload.conversationId);
+            }
+          }
 
           if (voiceModeEnabled && ttsSupported) {
             const speechText = sanitizeForSpeech(finalAnswer);
@@ -3378,13 +3470,21 @@ export default function ChatInterface() {
           body: formData,
         });
       } else if (ragSource === "local") {
-        // Local-rag has no feasibility/permitting/risk handling or
-        // conversation persistence - plain Q&A only, so chatMode/
-        // conversationId/voiceMode aren't sent.
+        // Local-rag has no feasibility/permitting/risk handling, so
+        // chatMode/voiceMode aren't sent - but it does now save/resume
+        // conversations through the same conversations/chat_messages
+        // tables Cloud mode uses (see app/api/local-rag-chat/route.ts
+        // and lib/conversationMemory.ts), so visitorId/conversationId
+        // are sent just like the Cloud branch below.
         res = await fetch("/api/local-rag-chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: prompt, backend: ragBackend }),
+          body: JSON.stringify({
+            query: prompt,
+            backend: ragBackend,
+            visitorId: visitorId || undefined,
+            conversationId: conversationId || undefined,
+          }),
         });
       } else {
         res = await fetch("/api/rag-chat", {

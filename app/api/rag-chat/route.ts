@@ -10,6 +10,12 @@
 import fs from "fs";
 import path from "path";
 import { getSupabase } from "@/lib/supabase";
+import {
+  type ConversationTurn,
+  ensureConversation,
+  loadRecentMessages,
+  persistConversationTurn,
+} from "@/lib/conversationMemory";
 import { generateEmbedding } from "@/lib/embeddings";
 import {
   getCompleteCitationText,
@@ -3111,38 +3117,11 @@ ${answerMarkdown}`;
 // feature existed - none of this can turn a working answer into a
 // broken request.
 
-interface ConversationTurn {
-  role: "user" | "assistant";
-  content: string;
-}
-
-const CONVERSATION_HISTORY_LIMIT = 8;
-
-async function loadRecentMessages(
-  conversationId: string
-): Promise<ConversationTurn[]> {
-  try {
-    const { data, error } = await getSupabase()
-      .from("chat_messages")
-      .select("role, content, created_at")
-      .eq("conversation_id", conversationId)
-      .order("created_at", { ascending: false })
-      .limit(CONVERSATION_HISTORY_LIMIT);
-
-    if (error || !data) return [];
-
-    return data
-      .slice()
-      .reverse()
-      .map((row: any) => ({ role: row.role, content: row.content }));
-  } catch (error) {
-    console.error(
-      "loadRecentMessages failed (continuing without history):",
-      error
-    );
-    return [];
-  }
-}
+// ConversationTurn/loadRecentMessages/ensureConversation/
+// persistConversationTurn now live in lib/conversationMemory.ts (imported
+// above) so app/api/local-rag-chat/route.ts and .../stream/route.ts can
+// save Local-mode turns through the exact same functions instead of a
+// second hand-rolled copy of this Supabase write logic.
 
 // Rewrites a follow-up like "what about for listed buildings?" into a
 // standalone question before it's used for retrieval - hybrid search on
@@ -3216,81 +3195,6 @@ function buildConversationContextForPrompt(
     .slice(-2000);
 
   return `\n\nRecent conversation (for context only - answer the current question, don't repeat this back):\n${transcript}\n`;
-}
-
-// Resolves which conversation this turn belongs to: continues
-// requestedConversationId if it's real and owned by this visitor,
-// otherwise starts a fresh one titled from the first message. Returns
-// null (never throws) if persistence isn't configured or fails, so the
-// caller can just skip saving this turn.
-async function ensureConversation(
-  visitorId: string,
-  requestedConversationId: string,
-  firstMessagePreview: string
-): Promise<string | null> {
-  try {
-    if (requestedConversationId) {
-      const { data, error } = await getSupabase()
-        .from("conversations")
-        .select("id, visitor_id")
-        .eq("id", requestedConversationId)
-        .maybeSingle();
-
-      if (!error && data && data.visitor_id === visitorId) {
-        return requestedConversationId;
-      }
-      // Requested id doesn't exist, or belongs to a different visitor -
-      // fall through and start a fresh conversation rather than failing
-      // the whole chat request over a stale or tampered id.
-    }
-
-    const title = firstMessagePreview.trim().slice(0, 60) || "New conversation";
-    const { data, error } = await getSupabase()
-      .from("conversations")
-      .insert({ visitor_id: visitorId, title })
-      .select("id")
-      .single();
-
-    if (error || !data) return null;
-    return data.id;
-  } catch (error) {
-    console.error(
-      "ensureConversation failed (continuing without persistence):",
-      error
-    );
-    return null;
-  }
-}
-
-async function persistConversationTurn(
-  conversationId: string,
-  userQuery: string,
-  assistantAnswer: string,
-  assistantMetadata: Record<string, any>
-) {
-  try {
-    const supabase = getSupabase();
-
-    await supabase.from("chat_messages").insert([
-      { conversation_id: conversationId, role: "user", content: userQuery },
-      {
-        conversation_id: conversationId,
-        role: "assistant",
-        content: assistantAnswer,
-        metadata: assistantMetadata,
-      },
-    ]);
-
-    await supabase
-      .from("conversations")
-      .update({ updated_at: new Date().toISOString() })
-      .eq("id", conversationId);
-  } catch (error) {
-    console.error(
-      "persistConversationTurn failed (chat still answered fine):",
-      error
-    );
-  }
 }
 
 // =============================================================================
