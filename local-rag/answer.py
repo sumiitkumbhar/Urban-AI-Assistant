@@ -9,6 +9,7 @@ folder needs to change for that.
 """
 
 import json
+import logging
 import os
 import re
 from types import SimpleNamespace
@@ -17,8 +18,15 @@ import requests
 from groq import Groq, APIStatusError
 
 import hallucination_check
-from common import load_dotenv_from_repo, DEFAULT_GROQ_MODEL, OLLAMA_BASE_URL, DEFAULT_OLLAMA_MODEL
+from common import (
+    load_dotenv_from_repo, DEFAULT_GROQ_MODEL, OLLAMA_BASE_URL,
+    DEFAULT_OLLAMA_MODEL, DEBUG_RETRIEVAL,
+)
 from retrieve import get_complete_citation_text
+
+# Same shared logger name proposal_review.py already uses ("local-rag") -
+# one logger for the whole package, not one per file.
+logger = logging.getLogger("local-rag")
 
 SYSTEM_PROMPT = """You are a UK planning and building-regulations assistant. \
 Answer ONLY using the numbered evidence extracts provided below - never from \
@@ -322,6 +330,37 @@ def _backend_error_message(backend, error):
     )
 
 
+def _log_context_debug(chunks_in, blocks, citations, dropped, context):
+    """LOCAL_RAG_DEBUG_RETRIEVAL=1 (see common.py) - the context-packing
+    half of the debug mode (see retrieve.py's _log_retrieval_debug() for
+    the retrieval half). Logs how many of the chunks retrieve() handed
+    to build_context() actually survived into FINAL CONTEXT SENT TO
+    MODEL - which ones were dropped by the MAX_CONTEXT_CHARS budget and
+    why - then the full assembled context text itself, exactly as the
+    generation call will see it. Never called unless the env var is
+    set."""
+    logger.info("=== LOCAL_RAG_DEBUG_RETRIEVAL: build_context() ===")
+    logger.info(
+        "CHUNKS IN: %d retrieved -> %d citations included, %d dropped "
+        "(MAX_CONTEXT_CHARS budget), %d total context chars",
+        len(chunks_in), len(citations), len(dropped),
+        sum(len(b) for b in blocks),
+    )
+    for cit in citations:
+        logger.info(
+            "INCLUDED [%s]: chunk_id=%s source_id=%s page=%s score=%.4f chars=%d",
+            cit["id"], cit.get("chunk_id"), cit["doc"], cit["page"],
+            cit.get("rerank_score", 0.0), len(cit.get("text") or ""),
+        )
+    for d in dropped:
+        logger.info(
+            "DROPPED (did not fit MAX_CONTEXT_CHARS): chunk_id=%s source_id=%s "
+            "page=%s score=%.4f block_chars=%d",
+            d["chunk_id"], d["doc"], d["page"], d["rerank_score"], d["block_chars"],
+        )
+    logger.info("FINAL CONTEXT SENT TO MODEL (%d chars):\n%s", len(context), context)
+
+
 def build_context(chunks):
     """Numbered evidence blocks the model can cite by index, and the
     parallel citation list the caller returns alongside the answer -
@@ -349,6 +388,7 @@ def build_context(chunks):
     ordered = sorted(chunks, key=lambda c: c.get("rerank_score", 0.0), reverse=True)
     blocks = []
     citations = []
+    dropped = []  # (LOCAL_RAG_DEBUG_RETRIEVAL) chunks that lost the MAX_CONTEXT_CHARS budget
     total_chars = 0
     for c in ordered:
         chunk_id = c.get("chunk_id")
@@ -367,6 +407,13 @@ def build_context(chunks):
         i = len(blocks) + 1
         block = f"[{i}] {c['doc_filename']} (page {c['page']}):\n{text}"
         if blocks and total_chars + len(block) > MAX_CONTEXT_CHARS:
+            dropped.append({
+                "chunk_id": chunk_id,
+                "doc": c.get("doc_filename"),
+                "page": c.get("page"),
+                "rerank_score": c.get("rerank_score", 0.0),
+                "block_chars": len(block),
+            })
             continue
         total_chars += len(block)
         blocks.append(block)
@@ -398,7 +445,10 @@ def build_context(chunks):
             "complete_before": complete_before,
             "complete_after": complete_after,
         })
-    return "\n\n---\n\n".join(blocks), citations
+    context = "\n\n---\n\n".join(blocks)
+    if DEBUG_RETRIEVAL:
+        _log_context_debug(chunks, blocks, citations, dropped, context)
+    return context, citations
 
 
 # Matches a bare inline citation marker like "[3]" - what the model

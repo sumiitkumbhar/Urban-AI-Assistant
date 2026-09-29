@@ -313,6 +313,24 @@ DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 OLLAMA_BASE_URL = "http://localhost:11434"
 DEFAULT_OLLAMA_MODEL = "deepseek-r1:7b"
 
+# Debug mode for the retrieval-parity investigation (2026-09-29) - when
+# set, retrieve.py logs the query/retrieved chunks/scores/source ids/
+# page numbers/reranked order for every retrieve() call, and answer.py
+# logs the exact assembled context (per-citation char counts, which
+# retrieved chunks were dropped by MAX_CONTEXT_CHARS, and the full
+# context text) actually sent to the generation model. OFF by default -
+# purely diagnostic, matching CHECKLIST_DEBUG_LOG_RAW_RESPONSE's own
+# convention (proposal_review.py): never a standing production log,
+# never logs anything beyond what retrieval/context-building already
+# computed (no new model calls). Like DEFAULT_OLLAMA_MODEL above, this
+# is read directly from os.environ rather than via load_dotenv_from_repo()
+# (module-level code here runs before that's ever called) - export it
+# as a real shell env var before starting uvicorn, e.g.:
+#   LOCAL_RAG_DEBUG_RETRIEVAL=1 uvicorn service:app --port 8010
+# (a value in .env.local alone will NOT be picked up, for the same
+# reason OLLAMA_BASE_URL/DEFAULT_OLLAMA_MODEL above aren't).
+DEBUG_RETRIEVAL = os.environ.get("LOCAL_RAG_DEBUG_RETRIEVAL") == "1"
+
 
 def load_dotenv_from_repo():
     """.env.local lives at the repo root (Next.js convention) - reuse the

@@ -2580,6 +2580,24 @@ async function generateAnswer(
   const strictDocumentContext = buildStrictDocumentContext(chosenChunks);
   const webContext = buildWebContext(webCitations);
 
+  if (RAG_DEBUG_RETRIEVAL) {
+    const chosenIds = new Set(chosenChunks.map((c) => c.id));
+    console.log("=== RAG_DEBUG_RETRIEVAL: generateAnswer() ===");
+    console.log("QUERY:", query);
+    chunks.forEach((c, i) => {
+      console.log(
+        `RERANKED ORDER #${i + 1}: id=${c.id} score=${(c as any)._finalScore ?? "n/a"} ` +
+          `distance=${c.distance} source_id=${c.doc_title} page=${c.page_from} ` +
+          `kept=${chosenIds.has(c.id)}`
+      );
+    });
+    console.log(
+      `CHUNKS IN: ${chunks.length} retrieved -> ${chosenChunks.length} kept by ` +
+      `chooseChunksForAnswer(), ${strictDocumentContext.length} total context chars`
+    );
+    console.log("FINAL CONTEXT SENT TO MODEL:\n" + strictDocumentContext);
+  }
+
   const drawingSection = drawingValidation
     ? `
 
@@ -3291,6 +3309,18 @@ async function persistConversationTurn(
 // alone (delta from the previous mark), not cumulative.
 
 const RAG_TIMING = process.env.RAG_TIMING === "1";
+
+// Opt-in retrieval/context-packing debug dump, same on/off convention as
+// RAG_TIMING above (env var, off by default). Added 2026-09-29 for the
+// Cloud-vs-Local retrieval-parity investigation - logs QUERY, every
+// RETRIEVED CHUNK's SCORE/SOURCE ID/PAGE NUMBER in its final reranked
+// order, which of those chooseChunksForAnswer() actually kept vs dropped,
+// and the FINAL CONTEXT (strictDocumentContext) sent to the generation
+// model - the same six things local-rag/retrieve.py's
+// LOCAL_RAG_DEBUG_RETRIEVAL logs on the Local-mode path, so a run from
+// each mode can be compared line-for-line. Set RAG_DEBUG_RETRIEVAL=1 in
+// .env.local and read the dev-server output.
+const RAG_DEBUG_RETRIEVAL = process.env.RAG_DEBUG_RETRIEVAL === "1";
 
 // Same reasoning as voice-debug.log / client-debug.log (see app/api/tts/
 // route.ts and app/api/client-log/route.ts): a console.log only reaches

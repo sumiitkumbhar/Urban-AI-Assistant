@@ -29,6 +29,7 @@ from common import (
     STATUS_BOOST, CONFIDENCE_TOP_SCORE_HIGH, CONFIDENCE_TOP_SCORE_LOW,
     MIN_SOURCE_DIVERSITY_FOR_HIGH, EXACT_REFERENCE_PATTERNS,
     GRAPH_MAX_RELATED, GRAPH_EXPANSION_BOOST, CHUNK_OVERLAP_CHARS,
+    DEBUG_RETRIEVAL,
 )
 from graph_build import load_graph
 
@@ -544,6 +545,49 @@ def _reciprocal_rank_fusion(*ranked_lists, k=RRF_K):
     return sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
+def _log_retrieval_debug(query, results, coverage, domain_filter=None, geography_filter=None):
+    """LOCAL_RAG_DEBUG_RETRIEVAL=1 (see common.py) - prints, for one
+    retrieve() call: the query, every retrieved chunk in its final
+    RERANKED ORDER with its cross-encoder SCORE, SOURCE ID (doc_filename)
+    and PAGE NUMBER, and the coverage/confidence verdict retrieve()
+    computed from them. This is the retrieval half of the debug mode the
+    2026-09-29 Cloud-vs-Local retrieval-parity investigation asked for -
+    see answer.py's _log_context_debug() for the other half (what of
+    this actually reached the model's final context). Never called
+    unless the env var is set - zero cost/behavior change otherwise."""
+    logger.info("=== LOCAL_RAG_DEBUG_RETRIEVAL: retrieve() ===")
+    logger.info("QUERY: %r", query)
+    if domain_filter or geography_filter:
+        logger.info(
+            "FILTERS: domain_filter=%r geography_filter=%r",
+            domain_filter, geography_filter,
+        )
+    if not results:
+        logger.info("RETRIEVED CHUNKS: none")
+    for rank, chunk in enumerate(results, start=1):
+        logger.info(
+            "RERANKED ORDER #%d: chunk_id=%s score=%.4f source_id=%s page=%s "
+            "domain=%s status=%s text_preview=%r",
+            rank,
+            chunk.get("chunk_id"),
+            chunk.get("rerank_score", 0.0),
+            chunk.get("doc_filename"),
+            chunk.get("page"),
+            chunk.get("domain"),
+            chunk.get("status"),
+            (chunk.get("text") or "")[:160],
+        )
+    logger.info(
+        "COVERAGE: confidence=%s top_rerank_score=%s source_count=%s "
+        "reasons=%s broadened_from_top_k=%s",
+        coverage.get("confidence"),
+        coverage.get("top_rerank_score"),
+        coverage.get("source_count"),
+        coverage.get("reasons"),
+        coverage.get("broadened_from_top_k"),
+    )
+
+
 def assess_coverage(results, references):
     """Corrective-RAG-style confidence check (architecture plan section
     16/52) - cheap, deterministic signals on the already-reranked
@@ -766,7 +810,13 @@ def retrieve(query, top_k=25, rerank_top_n=8, allow_broaden=True, domain_filter=
         wider_coverage = assess_coverage(wider_results, references)
         wider_coverage["broadened_from_top_k"] = top_k
         wider_coverage["related_references"] = expanded_references
+        if DEBUG_RETRIEVAL:
+            _log_retrieval_debug(
+                query, wider_results, wider_coverage, domain_filter, geography_filter
+            )
         return wider_results, wider_coverage
 
     coverage["broadened_from_top_k"] = None
+    if DEBUG_RETRIEVAL:
+        _log_retrieval_debug(query, results, coverage, domain_filter, geography_filter)
     return results, coverage
