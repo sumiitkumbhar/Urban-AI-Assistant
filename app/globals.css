@@ -8597,20 +8597,25 @@ input[type="text"].uaa-composer:focus {
   position: relative;
   overflow: hidden;
   isolation: isolate;
-  /* Detuned 2026-09-29: the first pass (46% fill / 14px blur) read as a
-     milky opaque panel rather than glass - background content was fully
-     obscured instead of softened-but-visible. Cut fill opacity and blur
-     roughly in half, keep the same warm --paper-raised tint (matches this
-     app's own token system rather than plain white) and the same
-     ink-tinted shadow convention, but at lower opacity/spread so the
-     composer still reads as "material," not "haze." */
-  background: rgba(251, 249, 245, 0.22);
-  -webkit-backdrop-filter: blur(8px) saturate(1.08);
-  backdrop-filter: blur(8px) saturate(1.08);
-  border: 1px solid rgba(255, 253, 246, 0.28);
+  /* Detuned again 2026-09-29 (third pass): the previous 22%/8px version
+     still read as a "translucent white blur slab" rather than crisp glass -
+     both the fill AND the drop-shadow's own soft spread were reading as
+     haze around the pill, not just the backdrop-filter. This pass cuts
+     fill/blur/saturate roughly in half again, tightens the shadow's blur
+     radius (34px->22px) and opacity (0.08->0.05) so it reads as elevation,
+     not fog, and keeps the border a touch stronger relative to the now
+     much-lighter fill so the edge still reads as a defined glass rim
+     ("soft edge definition... delicate inner highlight") rather than
+     dissolving into the page. Same warm --paper-raised tint and
+     ink-tinted shadow convention as every prior pass - only magnitudes
+     changed, again. */
+  background: rgba(251, 249, 245, 0.13);
+  -webkit-backdrop-filter: blur(5px) saturate(1.04);
+  backdrop-filter: blur(5px) saturate(1.04);
+  border: 1px solid rgba(255, 253, 246, 0.24);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.22),
-    0 14px 34px rgba(28, 26, 22, 0.08);
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    0 10px 22px rgba(28, 26, 22, 0.05);
 }
 
 /* Top-highlight - the one cheap thing that reads as "material" rather than
@@ -8625,14 +8630,14 @@ input[type="text"].uaa-composer:focus {
   inset: 0;
   border-radius: inherit;
   pointer-events: none;
-  /* Halved alongside the fill/blur reduction above - was reading as a
-     "heavy white overlay" contributing to the milky-panel look on top of
-     the fill itself. */
+  /* Halved again 2026-09-29 (third pass) alongside the fill/blur/shadow
+     reduction above - still compounding into the "washed out" look even
+     at half its original strength. */
   background: linear-gradient(
     to bottom,
-    rgba(255, 255, 255, 0.11),
-    rgba(255, 255, 255, 0.05) 35%,
-    rgba(255, 255, 255, 0.03) 100%
+    rgba(255, 255, 255, 0.06),
+    rgba(255, 255, 255, 0.03) 35%,
+    rgba(255, 255, 255, 0.015) 100%
   );
 }
 
