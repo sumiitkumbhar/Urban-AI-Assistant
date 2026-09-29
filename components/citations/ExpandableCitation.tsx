@@ -940,8 +940,19 @@ export default function ExpandableCitation({
       ? "bg-neutral-600/70"
       : "bg-neutral-400/70";
 
+  // 2026-09-29: glass token pass. glass-soft + glass-tint-ink (same
+  // tier/tint as the parent SourcesSection.tsx container) - replaces
+  // the old flat border/bg/shadow + hover: combo. The hover state
+  // (fill/border/shadow step up together) now lives as a
+  // .glass-citation-card:hover custom-property override in
+  // app/globals.css instead of parallel Tailwind hover: utilities, so
+  // it stays part of the shared token system. relative overflow-hidden
+  // isolation:isolate are supplied by the shared .glass mechanism
+  // itself now, not duplicated here. Expand/collapse logic (independent
+  // per-card state, capped scroll height) below is untouched -
+  // surface-only change.
   return (
-    <div className="relative overflow-hidden rounded-3xl border border-neutral-950/10 bg-neutral-950/[0.04] shadow-[0_1px_3px_rgba(0,0,0,0.04),0_1px_2px_rgba(0,0,0,0.03)] transition-all duration-200 hover:border-neutral-950/15 hover:bg-neutral-950/[0.06] hover:shadow-[0_2px_8px_rgba(0,0,0,0.05),0_1px_2px_rgba(0,0,0,0.03)]">
+    <div className="glass glass-soft glass-tint-ink glass-citation-card rounded-3xl transition-all duration-200">
       <span
         aria-hidden="true"
         className={`absolute inset-y-0 left-0 w-[3px] ${accentBar}`}

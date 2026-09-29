@@ -183,7 +183,7 @@ export interface LiquidGlassSurfaceProps {
    * 2026-09-29 renamed from `fallbackVisualClassName`: this is no longer
    * just a fallback. It is the CSS frosted-glass material (translucent
    * fill, blur, border, top-highlight - see app/globals.css's
-   * `.uaa-glass-pill`) applied UNCONDITIONALLY - while the glass runtime is
+   * `.glass glass-strong glass-tint-warm`) applied UNCONDITIONALLY - while the glass runtime is
    * still loading, as the permanent look when WebGL/glass is unsupported or
    * disabled, AND (Part 8 of the 2026-09-29 material-pass brief) layered
    * underneath the WebGL canvas when it IS active, so the canvas only ever

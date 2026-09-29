@@ -85,7 +85,7 @@ const FEATURES: Record<
   // Honesty-clause finding (LiquidGlassSurface.tsx file header, point 7):
   // `?liquidGlassDebug=1` - every shader parameter exaggerated ~2x - was
   // still visually indistinguishable from the plain CSS frosted-glass
-  // material (app/globals.css `.uaa-glass-pill`) in a live side-by-side
+  // material (app/globals.css `.glass glass-strong glass-tint-warm`) in a live side-by-side
   // against real chat content, so the library (stale one-shot html2canvas
   // snapshot, no destroy/cleanup, WebGL1-only) was not earning its
   // complexity as the default. The CSS material is now the shipped look;
@@ -4029,12 +4029,20 @@ function WelcomeScreen({
               type="button"
               onClick={() => onSuggestionClick(question)}
               style={{ ["--i" as any]: 4 + i }}
-              className="rise group relative flex min-h-[6.5rem] w-full flex-col justify-start rounded-2xl border border-neutral-950/[0.08] bg-[#fbf9f5] p-5 pr-11 text-left shadow-paper-xs transition-[background-color,border-color,box-shadow] duration-200 ease-settle hover:border-neutral-950/20 hover:bg-white hover:shadow-paper-md"
-              // Replaces the .press CSS class for these cards specifically -
-              // Framer now owns their transform (lift on hover, settle on
-              // tap) so it can share one easing curve with the rest of this
-              // screen's motion instead of mixing a CSS :active transform in
-              // too. No hover scale-up (DESIGN.md) - only a translateY lift.
+              className="rise group relative flex min-h-[6.5rem] w-full flex-col justify-start rounded-2xl glass glass-soft glass-tint-warm glass-home-card p-5 pr-11 text-left transition-[background-color,border-color,box-shadow] duration-200 ease-settle"
+              // 2026-09-29: glass token pass - was an opaque `bg-[#fbf9f5]`
+              // card with a `hover:bg-white` (fully opaque) hover state,
+              // exactly the "plain white SaaS card" look the brief asks to
+              // move away from. Now `glass-soft` + `glass-tint-warm` (same
+              // --paper-raised family as before, still translucent) with
+              // `glass-home-card` supplying a restrained hover delta in
+              // globals.css (fill/border/shadow step up together, never to
+              // opaque white). Replaces the .press CSS class for these
+              // cards specifically - Framer now owns their transform (lift
+              // on hover, settle on tap) so it can share one easing curve
+              // with the rest of this screen's motion instead of mixing a
+              // CSS :active transform in too. No hover scale-up
+              // (DESIGN.md) - only a translateY lift.
               whileHover={shouldReduceMotion ? undefined : { y: -3 }}
               whileTap={shouldReduceMotion ? undefined : { y: 0, scale: 0.985 }}
               transition={{ duration: 0.14, ease: EASE_SETTLE }}
@@ -4326,19 +4334,24 @@ function MessageBubble({
   )}
 
   <div className={`w-full ${isUser ? "max-w-2xl" : "max-w-5xl"}`}>
-    {/* 2026-09-29: question/answer bubbles now carry the same glass
-        design language as the composer pill (see the "GLASS MESSAGE
-        BUBBLES" block in globals.css for the full rationale and the
-        deliberate-exception note) - `.uaa-glass-card--user` /
-        `.uaa-glass-card--assistant` supply background, border, blur and
-        highlight directly, replacing the old flat bg-neutral-950/* +
-        border-neutral-950/* + shadow-[...] combo so those three things
-        stay defined in exactly one place. */}
+    {/* 2026-09-29: question/answer bubbles carry the same shared glass
+        token system as the composer (see the "GLASS SYSTEM" block in
+        globals.css for the full rationale) at the `glass-medium` tier,
+        ink-tinted (`glass-tint-ink`) since - unlike the composer - these
+        sit flat on the page rather than floating over scrolled content.
+        The question bubble uses the tier's own default numbers; the
+        answer bubble adds `glass-medium--assistant`, a small modifier
+        that keeps it very slightly more conservative (lower fill/border/
+        highlight alpha) since it carries dense long-form markdown where
+        reading clarity has to win over material presence. Background,
+        border, blur and highlight all come from those shared classes, not
+        a hand-written bg-neutral-950/* + border-neutral-950/* +
+        shadow-[...] combo. */}
     <div
       className={`px-6 py-5 rounded-3xl ${
         isUser
-          ? "ml-auto max-w-[720px] uaa-glass-card--user"
-          : "w-full max-w-[980px] uaa-glass-card--assistant"
+          ? "ml-auto max-w-[720px] glass glass-medium glass-tint-ink"
+          : "w-full max-w-[980px] glass glass-medium glass-tint-ink glass-medium--assistant"
       }`}
     >
 <div className="text-[15px] leading-7 text-neutral-800">

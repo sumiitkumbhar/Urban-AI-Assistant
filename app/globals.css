@@ -8564,144 +8564,64 @@ input[type="text"].uaa-composer:focus {
 }
 
 /* ===========================================================================
-   FROSTED GLASS COMPOSER MATERIAL (added 2026-09-29, "geometry first, then
-   material" pass - see claude/composer-icon-alignment-and-liquid-glass-poc.md
-   for the full before/after and the decision this was tuned against).
+   GLASS SYSTEM - shared tokens (added 2026-09-29, "one material, three
+   tiers" pass). Replaces the three previously hand-written, independently-
+   tuned surfaces (`.uaa-glass-pill`, `.uaa-glass-card--user`,
+   `.uaa-glass-card--assistant`) with one shared recipe plus a small set of
+   CSS custom properties that vary its intensity and tint. Nothing about
+   the ALREADY-TUNED look of the composer or the two message bubbles
+   changes here - every number below is carried over verbatim from those
+   three rules (see the prior four detuning passes' history in
+   claude/composer-icon-alignment-and-liquid-glass-poc.md for how they got
+   here). What changes is architecture only: one mechanism rule (`.glass`)
+   reads seven `--glass-*` custom properties; three tier classes
+   (`.glass-strong` / `.glass-medium` / `.glass-soft`) set those properties
+   to this pass's three intensity levels; two tint classes
+   (`.glass-tint-warm` / `.glass-tint-ink`) set the two fill/border colour
+   families this file already uses elsewhere (`--paper-raised` for
+   surfaces that float or sit "lifted off the ground", ink
+   (`rgba(28,26,22,...)`, matching `--ink`) for surfaces that read as
+   content sitting flat on the page); and a handful of tiny per-surface
+   modifier classes nudge one or two properties where a specific surface
+   was already tuned slightly differently from its tier's own default
+   (the answer bubble vs. the question bubble; hover states). Every
+   concrete surface below is composed as `.glass` + one tier class + one
+   tint class + (optionally) one modifier class - never a fourth
+   hand-written rgba/blur stack.
+
+   Still exactly the same DESIGN.md exception as before: "explicitly avoid
+   glassmorphism" is this app's general rule; this system is the deliberate,
+   now-multi-surface exception to it, per 2026-09-29 product direction,
+   not a reversal of that rule for the rest of the app.
    ---------------------------------------------------------------------------
-   Scoped to exactly one surface: the main chat composer's rounded pill
-   (FloatingComposerShell's non-`bare` branches, both the plain-CSS path and
-   - per this pass's honesty-clause finding, ?liquidGlassDebug=1 showed the
-   vendored WebGL refraction adds nothing visible over this even at 2x its
-   own parameters - now the DEFAULT path too). Replaces the old
-   `bg-[rgba(251,249,245,0.9)]` + `backdrop-blur-xl` (24px) combo: at 90%
-   opacity that read as a flat near-opaque box with citation text barely
-   ghosting through, not glass.
-
-   Base fill is --paper-raised (this app's own composer/card token) at LOW
-   alpha, not full-strength, so real content behind the pill genuinely shows
-   through, softened - that's what makes it read as glass instead of a
-   tinted rectangle. Blur/saturate are mid-range of the 12-18px / 1.05-1.2
-   brief: more blur measurably read as muddy against this app's fairly dense
-   citation text in a live comparison.
-
-   NOTE: DESIGN.md's brand-read section says "explicitly avoid ...
-   glassmorphism" as a general rule for this app. This is a deliberate,
-   narrowly-scoped exception for exactly one surface (the floating composer
-   pill), per the explicit 2026-09-28/29 product direction recorded in the
-   project doc referenced above - not a reversal of that rule elsewhere.
-   Shadow color is ink-tinted (rgba(28,26,22,...)) rather than grey-black,
-   matching this file's own "tinted shadows instead of grey-black" rule a
-   few hundred lines up.
+   .glass - the mechanism. Every property here is driven by a custom
+   property so tier/tint/modifier classes can each set only the handful of
+   values they actually change. Defaults on the var()s are a safe
+   ink-medium fallback in case a surface ever picks up `.glass` without a
+   tier class.
    ======================================================================== */
-.uaa-glass-pill {
+.glass {
   position: relative;
   overflow: hidden;
-  isolation: isolate;
-  /* Detuned a fourth time 2026-09-29: unlike passes 2 and 3, this is NOT a
-     uniform scale-down. Feedback was explicitly two-sided - "too much white
-     fill, not enough true transparency" AND "not enough edge definition,
-     material feels flat" - so fill/blur move down again (13%->9%,
-     5px->4px, the lowest yet - clearer background visibility, no added
-     fog) while the border and highlight move the OPPOSITE direction in
-     relative terms, gaining contrast as the fill they sit against gets
-     lighter: border alpha 0.24->0.34 (visibly crisper rim, still a
-     hairline weight, not a harsh outline) and a second, tighter box-shadow
-     ring (`0 0 0 0.5px`) added purely for edge crispness at the pill's
-     literal boundary - independent of the wider elevation shadow below it,
-     which itself tightens (22px->18px, 0.05->0.045) so it reads as a
-     shorter, more precise drop rather than a soft glow. Net effect: less
-     "frosted panel," more "thin polished pane with a defined rim" - the
-     glass-not-frost distinction from this pass's brief. Saturate nudges up
-     (1.04->1.06) since a touch more color vibrancy in what shows through
-     reads as clarity, not haze. Same warm --paper-raised tint and
-     ink-tinted shadow convention as every prior pass. */
-  background: rgba(251, 249, 245, 0.09);
-  -webkit-backdrop-filter: blur(4px) saturate(1.06);
-  backdrop-filter: blur(4px) saturate(1.06);
-  border: 1px solid rgba(255, 253, 246, 0.34);
+  isolation: isolate; /* backdrop-filter can never leak past this box's own
+    rounded bounds, and nested glass (e.g. citation cards inside an answer
+    bubble) never composites "through" a parent's own blur - each surface
+    keeps rendering its own background/text untouched on top. */
+  background: rgba(var(--glass-fill-rgb, 28, 26, 22), var(--glass-fill-alpha, 0.05));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 3px)) saturate(var(--glass-saturate, 1.02));
+  backdrop-filter: blur(var(--glass-blur, 3px)) saturate(var(--glass-saturate, 1.02));
+  border: 1px solid rgba(var(--glass-border-rgb, 28, 26, 22), var(--glass-border-alpha, 0.14));
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.22),
-    0 0 0 0.5px rgba(28, 26, 22, 0.05),
-    0 8px 18px rgba(28, 26, 22, 0.045);
+    inset 0 1px 0 rgba(255, 255, 255, var(--glass-inset-highlight, 0.24)),
+    var(--glass-elevation-shadow, 0 1px 3px rgba(28, 26, 22, 0.04), 0 1px 2px rgba(28, 26, 22, 0.03));
 }
 
-/* Top-highlight - the one cheap thing that reads as "material" rather than
-   "flat blurred rectangle" at a glance. A pseudo-element, never a second
-   real DOM node, so it can never itself become a stray oversized blur
-   layer: it inherits the pill's own radius (`border-radius: inherit`) and
-   is strictly clipped by the parent's own `overflow: hidden` above -
-   `inset: 0` here means "fill the parent's own box", not "extend past it". */
-.uaa-glass-pill::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  /* Retuned 2026-09-29 (fourth pass): brief explicitly asked for a "more
-     refined top highlight" via a *tighter gradient stop*, not just another
-     opacity cut - a gradual fade to 100% reads as a soft wash across the
-     whole pill, not a highlight. This peaks higher (0.06->0.10) right at
-     the top edge, then falls essentially to nothing by ~40% height instead
-     of fading all the way down, so it reads as a crisp catch-light along
-     the rim rather than a general brightening of the surface - closer to
-     how a real polished edge catches light in a narrow band. */
-  background: linear-gradient(
-    to bottom,
-    rgba(255, 255, 255, 0.10),
-    rgba(255, 255, 255, 0.025) 18%,
-    rgba(255, 255, 255, 0) 42%
-  );
-}
-
-/* ===========================================================================
-   GLASS MESSAGE BUBBLES (added 2026-09-29, composer-glass pass 4 /
-   bubble-glass pass 1) - see claude/composer-icon-alignment-and-liquid-glass-poc.md
-   for the full history this extends.
-   ---------------------------------------------------------------------------
-   EXPANDS the composer's narrow, explicitly-documented glassmorphism
-   exception (DESIGN.md's brand-read section still says "explicitly avoid
-   glassmorphism" as the general rule) to two more surfaces: the question
-   bubble and the answer bubble in ChatInterface.tsx's MessageBubble. This
-   is a deliberate widening of that exception, per explicit 2026-09-29
-   product direction, not a silent reversal - still scoped to exactly these
-   three surfaces (composer, question bubble, answer bubble), nothing else.
-
-   Deliberately NOT the same recipe as `.uaa-glass-pill`, on two axes:
-   - Tint: these sit directly on the page's light background and need
-     genuine contrast to stay readable, so the fill is ink-tinted
-     (rgba(28,26,22,...), matching --ink/--rule's own color rather than an
-     arbitrary Tailwind neutral-950) instead of the composer's warm
-     --paper-raised tint, which exists to sit invisibly against page
-     content scrolling underneath a floating bar.
-   - Intensity: these are "medium-subtle" glass, a full tier below the
-     composer by design (blur 3px vs the composer's 4px, fill capped at
-     6%/4.5% vs the composer's 9%) - the composer stays the strongest,
-     most premium glass surface on the page; the bubbles read as "lightly
-     glassy," never competing with it. Border/highlight follow the same
-     "keep edge definition relatively higher than fill" idea as the
-     composer's own fourth pass, just scaled down for this quieter tier.
-
-   `position: relative; overflow: hidden; isolation: isolate;` on each,
-   matching the composer pill's own clipping discipline, so backdrop-filter
-   can never leak past the bubble's own rounded-3xl bounds and `isolation:
-   isolate` keeps the citation cards nested inside an answer bubble from
-   ever being composited "through" the parent's own backdrop-filter - they
-   keep rendering their own normal background/text, untouched, on top.
-   ======================================================================== */
-.uaa-glass-card--user {
-  position: relative;
-  overflow: hidden;
-  isolation: isolate;
-  background: rgba(28, 26, 22, 0.06);
-  -webkit-backdrop-filter: blur(3px) saturate(1.02);
-  backdrop-filter: blur(3px) saturate(1.02);
-  border: 1px solid rgba(28, 26, 22, 0.16);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.30),
-    0 1px 3px rgba(28, 26, 22, 0.04),
-    0 1px 2px rgba(28, 26, 22, 0.03);
-}
-.uaa-glass-card--user::before {
+/* Top-highlight - a pseudo-element, never a second real DOM node, so it can
+   never itself become a stray oversized blur layer: it inherits the
+   surface's own radius (`border-radius: inherit`) and is strictly clipped
+   by `.glass`'s own `overflow: hidden` above - `inset: 0` means "fill the
+   parent's own box", not "extend past it". */
+.glass::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -8709,43 +8629,126 @@ input[type="text"].uaa-composer:focus {
   pointer-events: none;
   background: linear-gradient(
     to bottom,
-    rgba(255, 255, 255, 0.05),
-    rgba(255, 255, 255, 0) 30%
+    rgba(255, 255, 255, var(--glass-highlight-top, 0.06)),
+    rgba(255, 255, 255, var(--glass-highlight-mid, 0)) var(--glass-highlight-stop, 30%),
+    rgba(255, 255, 255, 0) var(--glass-highlight-fade, 30%)
   );
 }
 
-/* Answer bubble - same tier as the question bubble, tuned very slightly
-   more conservative (lower fill, lower border/highlight alpha) since it
-   holds dense long-form markdown (headings, lists, bold text, and nested
-   citation cards) where the brief was explicit: "the glass treatment must
-   stay restrained... preserve typography clarity." Same 3px blur as the
-   question bubble - readability risk here is fill/contrast, not blur
-   radius, so blur doesn't need to drop further; live-verified against a
-   real multi-paragraph answer (see project doc). */
-.uaa-glass-card--assistant {
-  position: relative;
-  overflow: hidden;
-  isolation: isolate;
-  background: rgba(28, 26, 22, 0.045);
-  -webkit-backdrop-filter: blur(3px) saturate(1.02);
-  backdrop-filter: blur(3px) saturate(1.02);
-  border: 1px solid rgba(28, 26, 22, 0.12);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.26),
-    0 1px 3px rgba(28, 26, 22, 0.04),
-    0 1px 2px rgba(28, 26, 22, 0.03);
+/* --- Tiers -----------------------------------------------------------------
+   Intensity only - no colour. Numbers are exactly the prior, already-live-
+   tuned `.uaa-glass-pill` (strong) and `.uaa-glass-card--user` (medium)
+   values; `glass-soft` is new, derived as a further, lighter step down the
+   same recipe shape for the previously-untreated nested/supporting
+   surfaces (citation container + cards, homepage prompt cards) - roughly
+   half the medium tier's fill/border alpha and a shorter blur, since these
+   are smaller, more numerous, and often nested inside an already-glass
+   parent (the citation cards sit inside the ink-tinted answer bubble). */
+.glass-strong {
+  --glass-blur: 4px;
+  --glass-saturate: 1.06;
+  --glass-fill-alpha: 0.09;
+  --glass-border-alpha: 0.34;
+  --glass-inset-highlight: 0.22;
+  --glass-elevation-shadow: 0 0 0 0.5px rgba(28, 26, 22, 0.05), 0 8px 18px rgba(28, 26, 22, 0.045);
+  --glass-highlight-top: 0.10;
+  --glass-highlight-mid: 0.025;
+  --glass-highlight-stop: 18%;
+  --glass-highlight-fade: 42%;
 }
-.uaa-glass-card--assistant::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  background: linear-gradient(
-    to bottom,
-    rgba(255, 255, 255, 0.04),
-    rgba(255, 255, 255, 0) 30%
-  );
+
+.glass-medium {
+  --glass-blur: 3px;
+  --glass-saturate: 1.02;
+  --glass-fill-alpha: 0.06;
+  --glass-border-alpha: 0.16;
+  --glass-inset-highlight: 0.30;
+  --glass-elevation-shadow: 0 1px 3px rgba(28, 26, 22, 0.04), 0 1px 2px rgba(28, 26, 22, 0.03);
+  --glass-highlight-top: 0.05;
+  --glass-highlight-mid: 0;
+  --glass-highlight-stop: 30%;
+  --glass-highlight-fade: 30%;
+}
+
+.glass-soft {
+  --glass-blur: 2px;
+  --glass-saturate: 1.0;
+  --glass-fill-alpha: 0.04;
+  --glass-border-alpha: 0.10;
+  --glass-inset-highlight: 0.18;
+  --glass-elevation-shadow: 0 1px 2px rgba(28, 26, 22, 0.03);
+  --glass-highlight-top: 0.035;
+  --glass-highlight-mid: 0;
+  --glass-highlight-stop: 26%;
+  --glass-highlight-fade: 26%;
+}
+
+/* --- Tints -------------------------------------------------------------
+   Colour only - no intensity. `warm` is this file's own --paper-raised
+   family (#fbf9f5), used for surfaces that read as "lifted paper": the
+   composer (floats over scrolling content) and the homepage prompt cards
+   (already `bg-[#fbf9f5]` before this pass - a plain rgb() triplet here
+   rather than var(--paper-raised) since that token isn't itself
+   channel-separated for use inside rgba()). `ink` matches --ink
+   (rgba(28,26,22,...)), used for surfaces that read as content sitting on
+   the page: the two message bubbles and, new in this pass, the citation
+   container/cards nested inside the answer bubble - keeping them in the
+   same tint family as their parent. */
+.glass-tint-warm {
+  --glass-fill-rgb: 251, 249, 245;
+  --glass-border-rgb: 255, 253, 246;
+}
+.glass-tint-ink {
+  --glass-fill-rgb: 28, 26, 22;
+  --glass-border-rgb: 28, 26, 22;
+}
+
+/* --- Per-surface modifiers -----------------------------------------------
+   Small, deliberate deltas off a tier+tint pair, for the surfaces that
+   were already tuned slightly differently from their tier's own default.
+   Order matters here: these rules must appear AFTER the tier classes
+   above so the cascade (equal specificity, later wins) actually applies
+   the override on elements carrying both classes. */
+
+/* Answer bubble: same tier as the question bubble, tuned slightly more
+   conservative (lower fill/border/highlight alpha) since it holds dense
+   long-form markdown where the brief is explicit that reading clarity
+   must win over material presence. The question bubble uses the tier's
+   own default (no modifier needed) since it was the stronger/reference
+   tuning `.glass-medium` itself is built from. */
+.glass-medium--assistant {
+  --glass-fill-alpha: 0.045;
+  --glass-border-alpha: 0.12;
+  --glass-inset-highlight: 0.26;
+  --glass-highlight-top: 0.04;
+}
+
+/* Individual citation card hover - was `hover:border-neutral-950/15
+   hover:bg-neutral-950/[0.06] hover:shadow-[0_2px_8px_rgba(0,0,0,0.05),...]`
+   on the old flat-Tailwind version; reproduced here as a live override of
+   the same custom properties `.glass` already reads, so the hover state
+   stays part of the token system instead of a parallel hard-coded rule.
+   `:focus-within` (not `:focus`) so keyboard-focusing the toggle button
+   inside the card gets the same affordance as a mouse hover. */
+.glass-citation-card:hover,
+.glass-citation-card:focus-within {
+  --glass-fill-alpha: 0.06;
+  --glass-border-alpha: 0.15;
+  --glass-elevation-shadow: 0 2px 8px rgba(28, 26, 22, 0.05), 0 1px 2px rgba(28, 26, 22, 0.03);
+}
+
+/* Homepage "Start with" card hover - was `hover:bg-white` (fully opaque)
+   on the old version, which is exactly the "plain white SaaS card" look
+   the brief asks to move away from. Restrained instead: fill/border/
+   highlight/shadow all step up together (still translucent, never
+   opaque), with the y:-3 lift (Framer, in ChatInterface.tsx) staying the
+   primary hover affordance rather than a material change to full white. */
+.glass-home-card:hover,
+.glass-home-card:focus-visible {
+  --glass-fill-alpha: 0.065;
+  --glass-border-alpha: 0.16;
+  --glass-inset-highlight: 0.22;
+  --glass-elevation-shadow: 0 4px 14px rgba(28, 26, 22, 0.05), 0 1px 3px rgba(28, 26, 22, 0.03);
 }
 
 /* AI command box (Report tab inline edit, DocumentPanel.tsx InlineEditCommand) -

@@ -81,21 +81,25 @@ function readForceGlassOnParam(): boolean {
 }
 
 /**
- * 2026-09-29 frosted-glass material pass. The actual color/blur/border/
- * highlight recipe lives in app/globals.css's `.uaa-glass-pill` rule (kept
- * in CSS, not Tailwind arbitrary values, since it needs a `::before`
+ * 2026-09-29 glass-token pass. The actual fill/blur/border/highlight
+ * recipe lives in app/globals.css's shared `.glass` mechanism (kept in
+ * CSS, not Tailwind arbitrary values, since it needs a `::before`
  * pseudo-element for the top-highlight layer - see that rule's own doc
  * comment for the full rationale and the DESIGN.md "avoid glassmorphism"
- * exception this is). `rounded-[26px]` stays a Tailwind class (not baked
- * into `.uaa-glass-pill`) so the pill's own radius remains this file's one
- * source of truth - `.uaa-glass-pill::before`'s `border-radius: inherit`
- * picks it up automatically. Applied identically to the plain-CSS branch
- * AND to LiquidGlassSurface's `materialClassName` (see below) - Part 8 of
- * the 2026-09-29 brief: the WebGL canvas, when opted into via
- * `?liquidGlass=on`, is a refraction layer *underneath* this same frost/
- * tint material, never a replacement for it.
+ * exception this is). The composer is the `glass-strong` tier (this app's
+ * strongest, most premium glass surface) with the `glass-tint-warm` tint
+ * (the --paper-raised family, since the composer floats over scrolling
+ * content and needs to read as "lifted paper" rather than page content).
+ * `rounded-[26px]` stays a Tailwind class (not baked into `.glass`) so the
+ * pill's own radius remains this file's one source of truth -
+ * `.glass::before`'s `border-radius: inherit` picks it up automatically.
+ * Applied identically to the plain-CSS branch AND to LiquidGlassSurface's
+ * `materialClassName` (see below) - Part 8 of the 2026-09-29 brief: the
+ * WebGL canvas, when opted into via `?liquidGlass=on`, is a refraction
+ * layer *underneath* this same frost/tint material, never a replacement
+ * for it.
  */
-const COMPOSER_GLASS_MATERIAL_CLASSNAME = "rounded-[26px] uaa-glass-pill";
+const COMPOSER_GLASS_MATERIAL_CLASSNAME = "rounded-[26px] glass glass-strong glass-tint-warm";
 
 export interface FloatingComposerShellProps {
   children: React.ReactNode;
@@ -142,7 +146,7 @@ export interface FloatingComposerShellProps {
    * `?liquidGlass=on` escape hatch - see readForceGlassOnParam above) and
    * `!bare`, the bar surface is rendered by the WebGL glass runtime
    * instead of the plain CSS frosted-glass div, falling back automatically
-   * (same `.uaa-glass-pill` material) when WebGL/glass is unsupported,
+   * (same `.glass glass-strong glass-tint-warm` material) when WebGL/glass is unsupported,
    * disabled via `?liquidGlass=off`, or still loading.
    *
    * 2026-09-29 update: `FEATURES.liquidGlassComposer` (ChatInterface.tsx)
@@ -282,7 +286,7 @@ export function FloatingComposerShell({
           {effectiveGlass && !bare ? (
             // 2026-09-28 Liquid Glass PoC, opt-in only since the 2026-09-29
             // material pass (see the `glass` prop doc above) - identical
-            // `.uaa-glass-pill` material to the plain-CSS branch below,
+            // `.glass glass-strong glass-tint-warm` material to the plain-CSS branch below,
             // passed as `materialClassName` so loading/unsupported/
             // `?liquidGlass=off` states - and, per Part 8 of that pass's
             // brief, the WebGL-active state too - all render the same
